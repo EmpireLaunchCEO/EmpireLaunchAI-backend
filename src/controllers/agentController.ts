@@ -4,7 +4,7 @@ import { HumanMessage } from '@langchain/core/messages';
 
 export const startAgent = async (req: Request, res: Response) => {
   try {
-    const { goal } = req.body;
+    const { goal, userId } = req.body;
     
     if (!goal) {
       return res.status(400).json({ error: 'Goal is required' });
@@ -12,6 +12,7 @@ export const startAgent = async (req: Request, res: Response) => {
 
     const initialState = {
       messages: [new HumanMessage(goal)],
+      userId: userId || 'default-user',
     };
 
     const result = await orchestrator.invoke(initialState);
