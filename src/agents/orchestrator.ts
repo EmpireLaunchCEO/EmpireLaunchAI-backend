@@ -34,7 +34,7 @@ const planNode = async (state: typeof OrchestratorState.State) => {
   // In a real scenario, we'd use an LLM to generate a plan based on user input
   // and check which integrations are active for the user
   return {
-    plan: ["Research trends", "Generate content", "List on Etsy", "Post to Instagram"],
+    plan: ["Research trends", "Generate content", "Create Payment Link", "List on Etsy", "Post to Instagram"],
     nextStep: "execute",
   };
 };
@@ -49,7 +49,10 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
   console.log(`Executing task: ${currentTask}`);
   
   // Logic to delegate to specialized services
-  if (currentTask === "List on Etsy") {
+  if (currentTask === "Create Payment Link") {
+    console.log("Delegating to Stripe Service...");
+    // Here we would call stripeService.createPaymentLink
+  } else if (currentTask === "List on Etsy") {
     console.log("Delegating to Etsy Service...");
     // Here we would fetch credentials from DB and call etsyService.createListing
   } else if (currentTask === "Post to Instagram") {
