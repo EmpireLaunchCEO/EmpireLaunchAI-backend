@@ -1,7 +1,83 @@
 import { Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { aiTaskQueue } from '../services/queueService.js';
-const { goals } = schema;
+import { eq } from 'drizzle-orm';
+const { goals, empires } = schema;
+
+export const initializeEmpire = async (req: Request, res: Response) => {
+  try {
+    const { userId, name, niche, angle, automationMode } = req.body;
+
+    if (!userId || !name || !niche) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Create the empire
+    // @ts-ignore
+    const [newEmpire] = await db.insert(empires).values({
+      userId,
+      name,
+      niche,
+      angle,
+      automationMode: automationMode || 'co-pilot',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }).returning();
+
+    // Trigger AI goal creation based on the empire identity
+    const mainGoalTitle = `Launch ${name} in the ${niche} niche`;
+    const mainGoalDesc = `Establish a dominant presence in ${niche} by executing on the '${angle}' angle.`;
+
+    // @ts-ignore
+    const [newGoal] = await db.insert(goals).values({
+      userId,
+      title: mainGoalTitle,
+      description: mainGoalDesc,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }).returning();
+
+    // Trigger initial job for the goal
+    await aiTaskQueue.add('goal-initial-job', {
+      goal: mainGoalTitle,
+      userId,
+      context: {
+        empireId: newEmpire.id,
+        goalId: newGoal.id,
+        goal: mainGoalDesc,
+      }
+    });
+
+    res.json({
+      status: 'success',
+      empire: newEmpire,
+      goal: newGoal,
+      message: 'Empire initialized and growth sequence started',
+    });
+
+  } catch (error) {
+    console.error('Error initializing empire:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const getEmpire = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    // @ts-ignore
+    const [empire] = await db.select().from(empires).where(eq(empires.id, id));
+    
+    if (!empire) {
+      return res.status(404).json({ error: 'Empire not found' });
+    }
+
+    res.json(empire);
+  } catch (error) {
+    console.error('Error fetching empire:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
 
 export const startAgent = async (req: Request, res: Response) => {
   try {
