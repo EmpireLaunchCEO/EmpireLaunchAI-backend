@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 // Audit Logs Table
 export const auditLogs = sqliteTable('audit_logs', {
@@ -18,7 +18,7 @@ export class AuditService {
     console.log(`[AUDIT] Actor: ${actorId}, Action: ${action}, Target: ${targetId}`);
     
     await db.insert(auditLogs).values({
-      id: uuidv4(),
+      id: randomUUID(),
       actorId,
       action,
       targetId,

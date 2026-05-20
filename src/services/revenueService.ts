@@ -2,7 +2,7 @@ import { db } from '../db/index.js';
 import { revenueMilestones, transactionHashes, users } from '../db/sqlite-schema.js';
 import { eq, and, sql } from 'drizzle-orm';
 import { hashTransactionId } from '../utils/security.js';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 export interface Transaction {
   id: string;
@@ -55,7 +55,7 @@ export class RevenueService {
 
         if (milestone.length === 0) {
           await tx.insert(revenueMilestones).values({
-            id: uuidv4(),
+            id: randomUUID(),
             userId,
             totalRevenue: newRevenue,
             lastMilestoneHit: 0,

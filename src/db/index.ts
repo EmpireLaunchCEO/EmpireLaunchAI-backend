@@ -1,6 +1,6 @@
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres';
 import { drizzle as drizzleLibsql } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client';
+import { createClient } from '@libsql/client/node';
 import { Pool } from 'pg';
 import * as pgSchema from './schema.js';
 import * as sqliteSchema from './sqlite-schema.js';

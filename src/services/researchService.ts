@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { redisConnection } from '../config/redis.js';
 
 export interface TrendData {
   platform: string;
@@ -68,25 +67,29 @@ export class ResearchService {
 
   async getAllTrends(): Promise<TrendData[]> {
     try {
+      /*
       // Try to get from cache first
       const cachedTrends = await redisConnection.get(this.CACHE_KEY);
       if (cachedTrends) {
         console.log('Serving trends from Redis cache');
         return JSON.parse(cachedTrends);
       }
+      */
 
-      console.log('Fetching fresh trends and caching in Redis');
+      console.log('Fetching fresh trends (caching disabled)');
       const etsy = await this.fetchEtsyTrends();
       const social = await this.fetchSocialTrends();
       const allTrends = [...etsy, ...social];
 
+      /*
       // Store in cache
       await redisConnection.setex(this.CACHE_KEY, this.CACHE_TTL, JSON.stringify(allTrends));
+      */
 
       return allTrends;
     } catch (error) {
-      console.error('Error with trend caching:', error);
-      // Fallback to fresh fetch if Redis fails
+      console.error('Error fetching trends:', error);
+      // Fallback to fresh fetch if error occurs
       const etsy = await this.fetchEtsyTrends();
       const social = await this.fetchSocialTrends();
       return [...etsy, ...social];

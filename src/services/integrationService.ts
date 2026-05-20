@@ -2,7 +2,7 @@ import { db } from '../db/index.js';
 import { integrations } from '../db/sqlite-schema.js';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../utils/security.js';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 export class IntegrationService {
   async saveIntegration(userId: string, platform: string, credentials: any) {
@@ -25,7 +25,7 @@ export class IntegrationService {
         .where(eq(integrations.id, existing[0].id));
       return existing[0].id;
     } else {
-      const id = uuidv4();
+      const id = randomUUID();
       await db.insert(integrations).values({
         id,
         userId,

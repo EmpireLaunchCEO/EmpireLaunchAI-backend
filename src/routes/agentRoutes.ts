@@ -1,4 +1,6 @@
+import { Router } from 'express';
 import { startAgent, createGoal, initializeEmpire, getEmpire } from '../controllers/agentController.js';
+import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
 

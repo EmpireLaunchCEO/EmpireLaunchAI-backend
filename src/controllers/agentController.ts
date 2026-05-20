@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
-import { aiTaskQueue } from '../services/queueService.js';
 import { eq } from 'drizzle-orm';
 const { goals, empires } = schema;
 
@@ -38,7 +37,8 @@ export const initializeEmpire = async (req: Request, res: Response) => {
       updatedAt: new Date()
     }).returning();
 
-    // Trigger initial job for the goal
+    // Trigger initial job for the goal (Simulated)
+    /*
     await aiTaskQueue.add('goal-initial-job', {
       goal: mainGoalTitle,
       userId,
@@ -48,12 +48,13 @@ export const initializeEmpire = async (req: Request, res: Response) => {
         goal: mainGoalDesc,
       }
     });
+    */
 
     res.json({
       status: 'success',
       empire: newEmpire,
       goal: newGoal,
-      message: 'Empire initialized and growth sequence started',
+      message: 'Empire initialized and growth sequence started (simulated)',
     });
 
   } catch (error) {
@@ -87,6 +88,7 @@ export const startAgent = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Goal is required' });
     }
 
+    /*
     const job = await aiTaskQueue.add('start-agent-job', {
       goal,
       userId: userId || 'default-user',
@@ -94,11 +96,12 @@ export const startAgent = async (req: Request, res: Response) => {
         goal
       }
     });
+    */
     
     res.json({
       status: 'success',
-      message: 'AI task has been queued',
-      jobId: job.id,
+      message: 'AI task has been simulated (queue disabled)',
+      jobId: 'simulated-job-id',
     });
   } catch (error) {
     console.error('Error starting agent:', error);
@@ -126,7 +129,8 @@ export const createGoal = async (req: Request, res: Response) => {
       updatedAt: new Date()
     }).returning();
 
-    // Trigger initial job for the goal
+    // Trigger initial job for the goal (Simulated)
+    /*
     await aiTaskQueue.add('goal-initial-job', {
       goal: title,
       userId,
@@ -137,11 +141,12 @@ export const createGoal = async (req: Request, res: Response) => {
         autoPost: newGoal.autoPost
       }
     });
+    */
 
     res.json({
       status: 'success',
       goal: newGoal,
-      message: 'Goal created and initial processing queued',
+      message: 'Goal created and initial processing simulated',
     });
   } catch (error) {
     console.error('Error creating goal:', error);

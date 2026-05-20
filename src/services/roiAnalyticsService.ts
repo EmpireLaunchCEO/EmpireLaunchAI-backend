@@ -2,7 +2,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, lte, sql } from 'drizzle-orm';
 import { bigQueryService } from './bigQueryService.js';
 import { trendResearchAgent } from '../agents/trendResearchAgent.js';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 const { adSpend, revenueTransactions, products } = schema;
 
@@ -80,7 +80,7 @@ export class ROIAnalyticsService {
 
     // 3. Map trends to opportunity cards
     const cards = trends.trendingNiches.map((trend: any) => ({
-      id: uuidv4(),
+      id: randomUUID(),
       type: 'optimization',
       title: `Optimize for ${trend.niche}`,
       description: `Based on your current ROI of ${metrics.roi}% and trending data from ${trend.platform}, we suggest focusing on ${trend.niche}. ${trend.reason}`,
@@ -93,7 +93,7 @@ export class ROIAnalyticsService {
     // Add a generic growth card if revenue is low
     if (metrics.totalRevenue < 500000) { // < $5,000
        cards.push({
-         id: uuidv4(),
+         id: randomUUID(),
          type: 'growth',
          title: 'Boost TikTok Engagement',
          description: 'Your TikTok attribution shows a lower conversion rate than Instagram. Try a "Day in the life" productivity video to boost organic reach.',
@@ -124,7 +124,7 @@ export class ROIAnalyticsService {
   async ingestRevenue(userId: string, platform: string, transactions: any[]) {
     for (const tx of transactions) {
       await db.insert(revenueTransactions).values({
-        id: uuidv4(),
+        id: randomUUID(),
         userId,
         platform,
         amount: tx.amount,

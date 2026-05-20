@@ -1,7 +1,7 @@
 import { db, schema } from '../db/index.js';
 import { eq, and, sql } from 'drizzle-orm';
 import { decrypt } from '../utils/encryption.js';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 const { revenueMilestones, revenueTransactions, approvals, users } = schema;
 
@@ -36,7 +36,7 @@ export class RevenueOracleService {
       
       // 4. Trigger Milestone Billing Approval
       await db.insert(approvals).values({
-        id: uuidv4(),
+        id: randomUUID(),
         userId,
         type: 'financial',
         status: 'pending',
@@ -52,7 +52,7 @@ export class RevenueOracleService {
       // 5. Update or insert milestone record
       if (!milestone) {
         await db.insert(revenueMilestones).values({
-          id: uuidv4(),
+          id: randomUUID(),
           userId,
           totalRevenue: currentTotalRevenue,
           lastMilestoneHit: nextMilestoneTrigger,
@@ -71,7 +71,7 @@ export class RevenueOracleService {
       // Just update the total revenue if no milestone hit
       if (!milestone) {
         await db.insert(revenueMilestones).values({
-          id: uuidv4(),
+          id: randomUUID(),
           userId,
           totalRevenue: currentTotalRevenue,
           lastMilestoneHit: 0,
@@ -101,7 +101,7 @@ export class RevenueOracleService {
      // Record each transaction in the ledger
      for (const tx of transactions) {
         await db.insert(revenueTransactions).values({
-          id: uuidv4(),
+          id: randomUUID(),
           userId,
           platform,
           amount: tx.amount,
