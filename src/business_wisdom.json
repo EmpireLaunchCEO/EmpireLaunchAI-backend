@@ -1,0 +1,127 @@
+{
+  "platform_fees": {
+    "Etsy": {
+      "listing_fee": "$0.20 per item",
+      "transaction_fee": "6.5% of total order value (including shipping and gift wrap)",
+      "payment_processing": "3% + $0.25",
+      "subscription_options": {
+        "Etsy Standard": "Free",
+        "Etsy Plus": "$10.00/month"
+      }
+    },
+    "Shopify": {
+      "monthly_plans": {
+        "Basic": "$39.00/month",
+        "Shopify": "$105.00/month",
+        "Advanced": "$399.00/month"
+      },
+      "payment_processing": {
+        "Basic": "2.9% + $0.30 (online)",
+        "Shopify": "2.6% + $0.30 (online)",
+        "Advanced": "2.4% + $0.30 (online)"
+      },
+      "third_party_transaction_fees": "2.0% (Basic), 1.0% (Shopify), 0.5% (Advanced) if not using Shopify Payments"
+    },
+    "Amazon Seller Central": {
+      "subscription_plans": {
+        "Individual": "$0.99 per item sold",
+        "Professional": "$39.99/month"
+      },
+      "referral_fees": "8% - 15% (varies by category)",
+      "fulfillment_fees": {
+        "FBA": "20% - 30% of revenue (estimated average covering storage and shipping)"
+      }
+    },
+    "TikTok Shop": {
+      "referral_fee": "2% - 8% (Category dependent: Fashion 8%, Beauty 5%, Health 6%, Electronics 3%, Food 2%)",
+      "new_seller_promotion": "2% referral fee for the first 90 days",
+      "transaction_fee": "$0.30 per order",
+      "payment_processing": "2.0% of order value"
+    }
+  },
+  "tool_recommendations": {
+    "Digital Marketing": [
+      { "name": "Canva", "purpose": "Graphic design and brand assets", "type": "Essential" },
+      { "name": "CapCut", "purpose": "Short-form video editing (TikTok/Reels)", "type": "Essential" },
+      { "name": "Mailchimp", "purpose": "Email marketing and automation", "type": "Complementary" },
+      { "name": "Buffer", "purpose": "Social media scheduling", "type": "Complementary" },
+      { "name": "HubSpot", "purpose": "CRM and lead management", "type": "Complementary" }
+    ],
+    "Print-on-Demand": [
+      { "name": "Printful", "purpose": "High-quality fulfillment and global shipping", "type": "Essential" },
+      { "name": "Printify", "purpose": "Large network of print providers for lower costs", "type": "Essential" },
+      { "name": "Gelato", "purpose": "Local production in 32 countries", "type": "Complementary" }
+    ],
+    "Dropshipping": [
+      { "name": "Ali-Express / DSers", "purpose": "Product sourcing and automated ordering", "type": "Essential" },
+      { "name": "Zendrop", "purpose": "Faster shipping and US-based suppliers", "type": "Essential" },
+      { "name": "Spocket", "purpose": "EU and US dropshipping suppliers", "type": "Complementary" }
+    ]
+  },
+  "cost_analysis": {
+    "Canva": {
+      "Free": "$0",
+      "Pro": "$119.99/year (for 1 person)",
+      "Teams": "$300.00/year (for first 5 people)"
+    },
+    "CapCut": {
+      "Free": "$0",
+      "Pro": "$7.99/month or $74.99/year"
+    },
+    "Adobe Creative Cloud": {
+      "Photography Plan": "$9.99/month",
+      "Single App": "$20.99/month",
+      "All Apps": "$54.99/month"
+    }
+  },
+  "onboarding_checklists": {
+    "TikTok Shop": [
+      "Valid US Government ID / Passport",
+      "US-based Phone Number",
+      "Email Address",
+      "US Bank Account for Payouts",
+      "SSN (for Individuals) or EIN (for Entities)",
+      "Certificate of Incorporation (for Businesses)"
+    ],
+    "Etsy": [
+      "Email Address",
+      "Identity Verification (ID/Passport)",
+      "Bank Account Details",
+      "Credit or Debit Card for Fee Payments",
+      "Physical Address for Shop Location"
+    ],
+    "Shopify": [
+      "Email Address",
+      "Store Name (can be changed later)",
+      "Business Address",
+      "Bank Account (to enable Shopify Payments)",
+      "SSN/EIN (for tax purposes during payment setup)"
+    ],
+    "Amazon Seller Central": [
+      "Government-issued ID",
+      "Chargeable Credit Card",
+      "Bank Account (capable of receiving ACH)",
+      "Tax Information (SSN or EIN)",
+      "Phone Number"
+    ]
+  },
+  "listing_requirements": {
+    "Etsy": {
+      "title_max_length": 140,
+      "tags_max_count": 13,
+      "min_images": 1,
+      "description_min_length": 20
+    },
+    "Shopify": {
+      "title_max_length": 255,
+      "vendor_required": true,
+      "min_images": 1
+    },
+    "Amazon": {
+      "title_max_length": 200,
+      "brand_required": true,
+      "sku_required": true,
+      "min_images": 1
+    }
+  }
+}

@@ -1,0 +1,7 @@
+import { drizzle } from 'drizzle-orm/pg-mem';
+import { PGMessages } from 'pg-mem';
+import * as schema from './schema.js';
+
+// Initialize in-memory postgres
+const dbMock = new PGMessages();
+export const db = drizzle(dbMock, { schema });
