@@ -2,7 +2,7 @@ import { db } from '../db/index.js';
 import { revenueMilestones, transactionHashes, users } from '../db/sqlite-schema.js';
 import { eq, and, sql } from 'drizzle-orm';
 import { hashTransactionId } from '../utils/security.js';
-import { randomUUID } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface Transaction {
   id: string;
@@ -22,7 +22,7 @@ export class RevenueService {
     console.log(`[TEE Enclave] Processing ${rawTransactions.length} transactions for user ${userId}`);
     
     // 1. Get user salt for hashing (in a real system, this might be from a KMS)
-    const userSalt = process.env.HMAC_SALT || 'default-salt-EmpireLaunch AI';
+    const userSalt = process.env.HMAC_SALT || 'default-salt-bizrunner';
     
     let newRevenue = 0;
     const processedHashes: string[] = [];
@@ -55,7 +55,7 @@ export class RevenueService {
 
         if (milestone.length === 0) {
           await tx.insert(revenueMilestones).values({
-            id: randomUUID(),
+            id: uuidv4(),
             userId,
             totalRevenue: newRevenue,
             lastMilestoneHit: 0,

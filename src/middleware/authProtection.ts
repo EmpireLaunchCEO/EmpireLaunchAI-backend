@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
+import { redisConnection } from '../config/redis.js';
 
 const FAILED_ATTEMPTS_PREFIX = 'auth:failed:';
 const LOCKOUT_PREFIX = 'auth:lockout:';
 
 export async function authBruteForceProtection(req: Request, res: Response, next: NextFunction) {
-  /*
   const ip = req.ip;
   const lockoutKey = `${LOCKOUT_PREFIX}${ip}`;
   
@@ -15,13 +15,11 @@ export async function authBruteForceProtection(req: Request, res: Response, next
       retryAfter: await redisConnection.ttl(lockoutKey)
     });
   }
-  */
   
   next();
 }
 
 export async function recordFailedAttempt(ip: string) {
-  /*
   const attemptsKey = `${FAILED_ATTEMPTS_PREFIX}${ip}`;
   const attempts = await redisConnection.incr(attemptsKey);
   
@@ -36,5 +34,4 @@ export async function recordFailedAttempt(ip: string) {
     await redisConnection.setex(lockoutKey, delay, 'true');
     console.warn(`[SECURITY] IP ${ip} locked out for ${delay} seconds due to brute force detection.`);
   }
-  */
 }

@@ -1,16 +1,24 @@
 import { db, schema } from '../db/index.js';
 const { approvals } = schema;
 import { eq } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
 
 export class ApprovalService {
-  async createRequest(userId: string, type: string, description: string, payload: any = {}, taskId?: string) {
+  async createRequest(userId: string, type: string, description: string, payload: any = {}, taskId?: string, reasoning?: string) {
     console.log(`Creating approval request for user ${userId}: ${type}`);
+    
+    const requestPayload = {
+      ...payload,
+      reasoning: reasoning || "Strategic choice based on market trends and niche DNA."
+    };
+
     // @ts-ignore
     const [request] = await db.insert(approvals).values({
+      id: uuidv4(),
       userId,
       taskId,
       type,
-      payload,
+      payload: requestPayload,
       status: 'pending',
       createdAt: new Date(),
       updatedAt: new Date()

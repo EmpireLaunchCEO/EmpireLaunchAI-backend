@@ -1,136 +1,184 @@
 import { Request, Response } from 'express';
 import { stripeService } from '../services/stripeService.js';
-import { db, schema } from '../db/index.js';
-const { users, products, paymentLinks } = schema;
+import { paymentButtonService } from '../services/paymentButtonService.js';
+import { db } from '../db/index.js';
+import { users, products, paymentLinks } from '../db/sqlite-schema.js';
 import { eq } from 'drizzle-orm';
-import { gmailService } from '../services/gmailService.js';
+import { v4 as uuidv4 } from 'uuid';
 
-export const handleWebhook = async (req: Request, res: Response) => {
-  const sig = req.headers['stripe-signature'];
-  const event = req.body; // In real app, use stripe.webhooks.constructEvent
-
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const customerEmail = session.customer_details?.email;
-    const userId = session.metadata?.userId;
-    const productName = session.metadata?.productName || 'your purchase';
-
-    if (customerEmail && userId) {
-      console.log(`Stripe Webhook: Triggering thank you email for ${customerEmail}`);
-      await gmailService.sendThankYouEmail(userId, customerEmail, productName);
-    }
-  }
-
-  res.json({ received: true });
-};
-
-export const onboarding = async (req: Request, res: Response) => {
-  const { userId, email } = req.body;
-
+export const onboardUser = async (req: Request, res: Response) => {
   try {
-    // @ts-ignore
-    let user = await db.query.users.findFirst({
-      where: eq(users.id, userId),
-    });
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
 
-    let stripeAccountId = user?.stripeAccountId;
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    let stripeAccountId = user.stripeAccountId;
 
     if (!stripeAccountId) {
-      const account = await stripeService.createConnectAccount(email);
+      const account = await stripeService.createConnectAccount(user.email);
       stripeAccountId = account.id;
-
-      // @ts-ignore
+      
       await db.update(users)
         .set({ stripeAccountId, updatedAt: new Date() })
         .where(eq(users.id, userId));
     }
 
-    const accountLink = await stripeService.createAccountLink(
-      stripeAccountId,
-      `${process.env.FRONTEND_URL}/dashboard?stripe=success`,
-      `${process.env.FRONTEND_URL}/dashboard?stripe=refresh`
-    );
+    const returnUrl = `${process.env.FRONTEND_URL}/stripe/callback?userId=${userId}`;
+    const refreshUrl = `${process.env.FRONTEND_URL}/stripe/onboard?userId=${userId}`;
+
+    const accountLink = await stripeService.createAccountLink(stripeAccountId, returnUrl, refreshUrl);
 
     res.json({ url: accountLink.url });
   } catch (error: any) {
-    console.error('Stripe onboarding error:', error);
+    console.error('Error in onboardUser:', error);
     res.status(500).json({ error: error.message });
   }
 };
 
-export const createProductLink = async (req: Request, res: Response) => {
-  const { userId, name, description, price } = req.body; // price in dollars
-
+export const getAccountStatus = async (req: Request, res: Response) => {
   try {
-    // @ts-ignore
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, userId),
-    });
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
 
     if (!user || !user.stripeAccountId) {
-      return res.status(400).json({ error: 'User not onboarded with Stripe' });
+      return res.json({ connected: false });
     }
 
-    const priceInCents = Math.round(price * 100);
+    const account = await stripeService.getAccount(user.stripeAccountId);
+    res.json({
+      connected: account.details_submitted,
+      charges_enabled: account.charges_enabled,
+      payouts_enabled: account.payouts_enabled,
+    });
+  } catch (error: any) {
+    console.error('Error in getAccountStatus:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
 
-    const { product, price: stripePrice } = await stripeService.createProductAndPrice(
+export const createPaymentLink = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const { name, description, priceInCents } = req.body;
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user || !user.stripeAccountId) {
+      return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
+    }
+
+    // 1. Create product and price in user's Connect account
+    const { product: stripeProduct, price: stripePrice } = await stripeService.createProductAndPrice(
       user.stripeAccountId,
       name,
       description,
       priceInCents
     );
 
-    const paymentLink = await stripeService.createPaymentLink(
-      user.stripeAccountId,
-      stripePrice.id
-    );
-
-    // Save to DB
-    // @ts-ignore
-    const [dbProduct] = await db.insert(products).values({
+    // 2. Save product to local DB
+    const productId = uuidv4();
+    await db.insert(products).values({
+      id: productId,
       userId,
       name,
       description,
       price: priceInCents,
+      currency: 'usd',
       createdAt: new Date(),
-      updatedAt: new Date()
-    }).returning();
-
-    // @ts-ignore
-    await db.insert(paymentLinks).values({
-      productId: dbProduct.id,
-      stripeLinkId: paymentLink.id,
-      url: paymentLink.url,
-      createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     });
 
-    res.json({ url: paymentLink.url });
+    // 3. Create payment link in Stripe
+    const stripePaymentLink = await stripeService.createPaymentLink(user.stripeAccountId, stripePrice.id);
+
+    // 4. Save payment link to local DB
+    const paymentLinkId = uuidv4();
+    await db.insert(paymentLinks).values({
+      id: paymentLinkId,
+      productId,
+      stripeLinkId: stripePaymentLink.id,
+      url: stripePaymentLink.url,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // 5. Create default payment button (HOOK)
+    await paymentButtonService.createButton(
+      userId,
+      productId,
+      'general',
+      { 
+        url: stripePaymentLink.url, 
+        label: 'Buy Now', 
+        color: '#000000', 
+        stripeLinkId: stripePaymentLink.id 
+      },
+      'link'
+    );
+
+    res.json({
+      productId,
+      paymentLinkId,
+      url: stripePaymentLink.url
+    });
   } catch (error: any) {
-    console.error('Create product link error:', error);
+    console.error('Error in createPaymentLink:', error);
     res.status(500).json({ error: error.message });
   }
 };
 
-export const getStripeStatus = async (req: Request, res: Response) => {
-  const { userId } = req.params;
-
+export const createPaymentButton = async (req: Request, res: Response) => {
   try {
-    // @ts-ignore
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, userId as string),
-    });
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const { name, description, priceInCents, buttonText, buttonColor } = req.body;
 
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user || !user.stripeAccountId) {
-      return res.json({ onboarded: false });
+      return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
     }
 
-    const account = await stripeService.getAccount(user.stripeAccountId);
-    res.json({
-      onboarded: account.details_submitted,
-      charges_enabled: account.charges_enabled,
-    });
+    // 1. Create product and price in user's Connect account
+    const { product: stripeProduct, price: stripePrice } = await stripeService.createProductAndPrice(
+      user.stripeAccountId,
+      name,
+      description,
+      priceInCents
+    );
+
+    // 2. Create styled button and store in DB
+    const button = await stripeService.createPaymentButton(
+      userId,
+      user.stripeAccountId,
+      stripeProduct.id,
+      stripePrice.id,
+      buttonText || 'Buy Now',
+      buttonColor || '#000000'
+    );
+
+    res.json(button);
   } catch (error: any) {
+    console.error('Error in createPaymentButton:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const triggerInstantPayout = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const { amountInCents } = req.body;
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user || !user.stripeAccountId) {
+      return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
+    }
+
+    const payout = await stripeService.triggerInstantPayout(userId, user.stripeAccountId, amountInCents);
+    res.json(payout);
+  } catch (error: any) {
+    console.error('Error in triggerInstantPayout:', error);
     res.status(500).json({ error: error.message });
   }
 };

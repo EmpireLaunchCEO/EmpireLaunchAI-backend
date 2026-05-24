@@ -2,10 +2,10 @@ import { db } from '../db/index.js';
 import { integrations } from '../db/sqlite-schema.js';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../utils/security.js';
-import { randomUUID } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 export class IntegrationService {
-  async saveIntegration(userId: string, platform: string, credentials: any) {
+  async saveIntegration(userId: string, platform: string, credentials: any, platformAccountId?: string) {
     const encryptedCredentials = encrypt(JSON.stringify(credentials));
     
     const existing = await db.select()
@@ -20,16 +20,18 @@ export class IntegrationService {
       await db.update(integrations)
         .set({
           credentials: encryptedCredentials,
+          platformAccountId: platformAccountId || existing[0].platformAccountId,
           updatedAt: new Date(),
         })
         .where(eq(integrations.id, existing[0].id));
       return existing[0].id;
     } else {
-      const id = randomUUID();
+      const id = uuidv4();
       await db.insert(integrations).values({
         id,
         userId,
         platform,
+        platformAccountId,
         credentials: encryptedCredentials,
         createdAt: new Date(),
         updatedAt: new Date(),

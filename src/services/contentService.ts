@@ -37,7 +37,7 @@ export class ContentService {
     return [
       {
         title: `${niche} - Product Post`,
-        body: `Check out our new ${title}! Trending in ${niche}. #EmpireLaunch AI #ai`,
+        body: `Check out our new ${title}! Trending in ${niche}. #bizrunner #ai`,
         platform: "Instagram",
         mediaUrl: productImagePath
       },

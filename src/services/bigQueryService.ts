@@ -22,7 +22,7 @@ export class BigQueryService {
     console.log(`[BigQuery ML] Running ARIMA+ forecast for user ${userId} for next ${days} days`);
     
     // In reality, this would be a SQL query:
-    // SELECT * FROM ML.FORECAST(MODEL `EmpireLaunch AI.revenue_model`, STRUCT(${days} AS horizon))
+    // SELECT * FROM ML.FORECAST(MODEL `bizrunner.revenue_model`, STRUCT(${days} AS horizon))
 
     // Return mock forecast data
     const forecast = [];

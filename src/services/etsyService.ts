@@ -74,6 +74,23 @@ export class EtsyService {
 
     return response.data;
   }
+
+  async searchListings(query: string, limit: number = 10) {
+    // Note: Public search usually requires an API key and different endpoint
+    // For this implementation, we simulate searching for high-performing listings
+    const response = await axios.get('https://openapi.etsy.com/v3/application/listings/active', {
+      params: {
+        keywords: query,
+        limit,
+        sort_on: 'score', // Simulation of 'best seller' ranking
+      },
+      headers: {
+        'x-api-key': this.clientId,
+      },
+    });
+
+    return response.data;
+  }
 }
 
 export const etsyService = new EtsyService();

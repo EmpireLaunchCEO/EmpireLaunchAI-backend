@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { 
+  acceptTerms,
+  redeemKey,
   getEtsyAuthUrl, 
   etsyCallback, 
   getMetaAuthUrl, 
@@ -7,11 +9,17 @@ import {
   getGmailAuthUrl,
   gmailCallback,
   getOutlookAuthUrl,
-  outlookCallback
+  outlookCallback,
+  getYouTubeAuthUrl,
+  youtubeCallback,
+  getTikTokAuthUrl,
+  tiktokCallback
 } from '../controllers/authController.js';
 
 const router = Router();
 
+router.post('/terms/accept', acceptTerms);
+router.post('/redeem-key', redeemKey);
 router.get('/etsy/url', getEtsyAuthUrl);
 router.post('/etsy/callback', etsyCallback);
 
@@ -23,5 +31,11 @@ router.post('/gmail/callback', gmailCallback);
 
 router.get('/outlook/url', getOutlookAuthUrl);
 router.post('/outlook/callback', outlookCallback);
+
+router.get('/youtube/url', getYouTubeAuthUrl);
+router.post('/youtube/callback', youtubeCallback);
+
+router.get('/tiktok/url', getTikTokAuthUrl);
+router.post('/tiktok/callback', tiktokCallback);
 
 export default router;

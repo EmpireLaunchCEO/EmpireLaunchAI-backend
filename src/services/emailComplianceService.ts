@@ -16,9 +16,9 @@ export class EmailComplianceService {
 
     // Check for unsubscribe link
     if (!compliantContent.includes('[UNSUBSCRIBE_LINK_PLACEHOLDER]')) {
-      compliantContent += '\n\nTo unsubscribe from these emails, please click here: https://EmpireLaunch AI.ai/unsubscribe';
+      compliantContent += '\n\nTo unsubscribe from these emails, please click here: https://bizrunner.ai/unsubscribe';
     } else {
-      compliantContent = compliantContent.replace('[UNSUBSCRIBE_LINK_PLACEHOLDER]', 'https://EmpireLaunch AI.ai/unsubscribe');
+      compliantContent = compliantContent.replace('[UNSUBSCRIBE_LINK_PLACEHOLDER]', 'https://bizrunner.ai/unsubscribe');
     }
 
     return compliantContent;

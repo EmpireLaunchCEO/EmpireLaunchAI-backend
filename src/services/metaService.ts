@@ -1,31 +1,10 @@
 import axios from 'axios';
-import dotenv from 'dotenv';
 import { integrationService } from './integrationService.js';
 
-dotenv.config();
-
 export class MetaService {
-  private clientId: string;
-  private clientSecret: string;
-  private redirectUri: string;
-
-  constructor() {
-    this.clientId = process.env.META_CLIENT_ID || '';
-    this.clientSecret = process.env.META_CLIENT_SECRET || '';
-    this.redirectUri = process.env.META_REDIRECT_URI || '';
-  }
-
-  getAuthUrl(state: string) {
-    const scopes = [
-      'instagram_basic',
-      'instagram_content_publish',
-      'pages_show_list',
-      'pages_read_engagement',
-      'public_profile',
-    ].join(',');
-
-    return `https://www.facebook.com/v18.0/dialog/oauth?client_id=${this.clientId}&redirect_uri=${this.redirectUri}&state=${state}&scope=${scopes}`;
-  }
+  private clientId = process.env.META_CLIENT_ID;
+  private clientSecret = process.env.META_CLIENT_SECRET;
+  private redirectUri = `${process.env.FRONTEND_URL}/auth/callback/meta`;
 
   async getAccessToken(code: string) {
     const response = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
@@ -36,8 +15,18 @@ export class MetaService {
         code,
       },
     });
-
     return response.data;
+  }
+
+  getAuthUrl(state: string) {
+    const scopes = [
+      'instagram_basic',
+      'instagram_content_publish',
+      'instagram_manage_insights',
+      'pages_show_list',
+      'pages_read_engagement'
+    ].join(',');
+    return `https://www.facebook.com/v18.0/dialog/oauth?client_id=${this.clientId}&redirect_uri=${this.redirectUri}&scope=${scopes}&state=${state}&response_type=code`;
   }
 
   async getLongLivedToken(shortLivedToken: string) {
@@ -49,7 +38,6 @@ export class MetaService {
         fb_exchange_token: shortLivedToken,
       },
     });
-
     return response.data;
   }
 
@@ -85,25 +73,45 @@ export class MetaService {
         access_token: accessToken,
       },
     });
+    return response.data;
+  }
 
+  async getInstagramInsights(userId: string, mediaId: string) {
+    const credentials = await integrationService.getCredentials(userId, 'meta');
+    if (!credentials || !credentials.accessToken) {
+      throw new Error('No Meta credentials found');
+    }
+
+    const response = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}/insights`, {
+      params: {
+        metric: 'engagement,impressions,reach,saved',
+        access_token: credentials.accessToken,
+      },
+    });
     return response.data;
   }
 
   async publishPost(userId: string, postData: any) {
     console.log(`[MetaService] Publishing to Instagram for user ${userId}`);
-    
     // 1. Fetch Credentials
     const credentials = await integrationService.getCredentials(userId, 'meta');
     if (!credentials) {
       throw new Error('No Meta credentials found');
     }
 
-    // 2. Publish
+    let finalCaption = postData.caption;
+
+    // 2. Inject Payment Link if provided
+    if (postData.paymentUrl) {
+      finalCaption = `${finalCaption}\n\n🛒 Buy it here: ${postData.paymentUrl}`;
+    }
+
+    // 3. Publish
     return this.postToInstagram(
       credentials.accessToken,
       credentials.instagramBusinessAccountId,
       postData.imageUrl,
-      postData.caption
+      finalCaption
     );
   }
 }
