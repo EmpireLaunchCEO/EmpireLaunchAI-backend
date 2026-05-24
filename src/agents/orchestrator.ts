@@ -75,9 +75,11 @@ const OrchestratorState = Annotation.Root({
 // Define the nodes
 const planNode = async (state: typeof OrchestratorState.State) => {
   console.log("Planning dynamically...");
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Planning dynamic strategy..." });
   
   if (!process.env.OPENAI_API_KEY) {
     console.warn("OPENAI_API_KEY missing, using fallback static plan.");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Using safe fallback plan (OpenAI Key missing)." });
     return {
       plan: [
         "Research trends", 
@@ -143,9 +145,11 @@ const planNode = async (state: typeof OrchestratorState.State) => {
 
 const criticNode = async (state: typeof OrchestratorState.State) => {
   console.log("Critiquing plan...");
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Critiquing proposed plan for logical consistency..." });
   
   if (!process.env.OPENAI_API_KEY || state.iterations > 3) {
     console.log("Bypassing critic.");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Bypassing critic (Limit reached or Key missing)." });
     return { nextStep: "execute" };
   }
 
@@ -203,25 +207,30 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
 
   const currentTask = state.plan[0];
   console.log(`Executing task: ${currentTask}`);
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: `Orchestrator: Executing task - ${currentTask}...` });
   
   let updatedContext = {};
 
   if (currentTask === "Research trends") {
     console.log("Delegating to Trend Research Agent...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Trend Agent: Scanning Etsy/TikTok for high-velocity niches..." });
     const goal = state.context.goal || (state.messages.length > 0 ? state.messages[state.messages.length - 1].content.toString() : "");
     const researchResult = await trendResearchAgent.analyzeTrends(goal);
     updatedContext = { research: researchResult };
   } else if (currentTask === "Analyze market intelligence") {
     console.log("Delegating to Market Intelligence Agent...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Intelligence Agent: Drafting product brief based on market research..." });
     const goal = state.context.goal || (state.messages.length > 0 ? state.messages[state.messages.length - 1].content.toString() : "");
     const brief = await marketIntelligenceAgent.generateProductBrief(goal);
     updatedContext = { marketBrief: brief };
   } else if (currentTask === "Analyze ROI") {
     console.log("Analyzing ROI and generating opportunity cards...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "ROI Oracle: Projecting financial impact and growth velocity..." });
     const cards = await roiAnalyticsService.generateOpportunityCards(state.userId);
     updatedContext = { opportunityCards: cards };
   } else if (currentTask === "Generate content") {
     console.log("Delegating to Content Service...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Content Agent: Generating social scripts and product copy..." });
     const goal = state.context.goal || "";
     const researchData = state.context.research || "";
     const marketBrief = state.context.marketBrief || null;
@@ -229,6 +238,7 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
     updatedContext = { drafts: drafts };
   } else if (currentTask === "Generate creative assets") {
     console.log("Delegating to Canva Service...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Visual Designer: Selecting Canva templates and autofilling designs..." });
     const marketBrief = state.context.marketBrief || {};
     const style = marketBrief.targetStyle || "Minimalist";
     const niche = marketBrief.niche || "General";
@@ -250,14 +260,17 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
 
       // 4. Anti-Copycat Validation
       console.log("Running Anti-Copycat validation...");
+      webSocketService.notifyUser(state.userId, 'ai-log', { message: "Sentinel: Running Perceptual Hashing to ensure design uniqueness..." });
       const response = await axios.get(exportUrl, { responseType: 'arraybuffer' });
       const imageBuffer = Buffer.from(response.data);
 
       try {
         await antiCopycatService.validateUniqueness(imageBuffer, niche);
         console.log("Anti-Copycat validation passed.");
+        webSocketService.notifyUser(state.userId, 'ai-log', { message: "Sentinel: Design uniqueness verified. No copyright overlap detected." });
       } catch (error: any) {
         console.error("Anti-Copycat validation failed:", error.message);
+        webSocketService.notifyUser(state.userId, 'ai-log', { message: `Sentinel Warning: ${error.message}` });
         // In a real scenario, we might trigger a 'Visual Pivot' here.
         // For now, we'll proceed with a warning in the context.
         updatedContext = { ...updatedContext, uniquenessWarning: error.message };
@@ -265,6 +278,7 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
 
       // 5. Asset Staging
       const stagedAsset = await assetService.stageAsset(exportUrl, state.userId, 'pdf');
+      webSocketService.notifyUser(state.userId, 'ai-log', { message: `Orchestrator: Asset staged at ${stagedAsset.url}` });
 
       updatedContext = {
         ...updatedContext,
@@ -279,6 +293,7 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
     }
   } else if (currentTask === "Request Approval") {
     console.log("Requesting user approval for content drafts...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Pausing for human-in-the-loop approval of drafts..." });
     await approvalService.createRequest(
         state.userId, 
         'content', 
@@ -295,12 +310,15 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
     return { plan: [], nextStep: "end" };
   } else if (currentTask === "Publish to Marketplaces") {
     console.log("Delegating to Universal Listing Engine...");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Listing Engine: Synchronizing product data with Etsy/Meta..." });
     const drafts = state.context.drafts || [];
     for (const draft of drafts) {
       try {
         if (['Etsy', 'Shopify', 'Amazon'].includes(draft.platform)) {
+          webSocketService.notifyUser(state.userId, 'ai-log', { message: `Listing Engine: Creating ${draft.platform} listing for ${draft.title}...` });
           await listingEngine.publishListing(state.userId, draft.platform, draft);
         } else if (draft.platform === 'Instagram') {
+          webSocketService.notifyUser(state.userId, 'ai-log', { message: `Social Agent: Posting content to Instagram...` });
           await metaService.publishPost(state.userId, draft);
         }
       } catch (error) {

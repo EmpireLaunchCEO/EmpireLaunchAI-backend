@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import { roiAnalyticsService } from '../services/roiAnalyticsService.js';
+import { db, schema } from '../db/index.js';
+import { eq, desc } from 'drizzle-orm';
 
 export const getPerformanceMetrics = async (req: Request, res: Response) => {
   try {
@@ -61,9 +63,17 @@ export const getEmpirePulse = async (req: Request, res: Response) => {
       status: health.status,
       description: `Your empire is currently ${health.status.replace('_', ' ')}. Growth score: ${health.growthScore}%.`,
       progress: health.growthScore,
+      health: {
+        revenue: health.totalLifetimeRevenue / 100, // backend uses cents
+        pendingDues: health.pendingDues / 100,
+        platformBreakdown: health.platformBreakdown.map((p: any) => ({
+          platform: p.platform,
+          revenue: p.total / 100
+        }))
+      },
       logs: [
-        { id: '1', message: `Total Revenue: ${health.totalLifetimeRevenue.toLocaleString()}`, type: 'info' },
-        { id: '2', message: `Pending Dues: ${health.pendingDues.toLocaleString()}`, type: health.pendingDues > 100 ? 'warning' : 'info' },
+        { id: '1', message: `Total Revenue: $${(health.totalLifetimeRevenue / 100).toLocaleString()}`, type: 'info' },
+        { id: '2', message: `Pending Dues: $${(health.pendingDues / 100).toLocaleString()}`, type: health.pendingDues > 10000 ? 'warning' : 'info' },
         { id: '3', message: `Profit Margin: ${health.profitMargin}%`, type: 'info' }
       ]
     };
@@ -71,6 +81,22 @@ export const getEmpirePulse = async (req: Request, res: Response) => {
     res.json(pulse);
   } catch (error: any) {
     console.error('Error fetching empire pulse:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getRevenueTransactions = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const transactions = await db.select()
+      .from(schema.revenueTransactions)
+      .where(eq(schema.revenueTransactions.userId, userId))
+      .orderBy(desc(schema.revenueTransactions.date))
+      .limit(20);
+    
+    res.json(transactions);
+  } catch (error: any) {
+    console.error('Error fetching revenue transactions:', error);
     res.status(500).json({ error: error.message });
   }
 };

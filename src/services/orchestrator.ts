@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { canvaService } from './canvaService.js';
 import { etsyService } from './etsyService.js';
 import { metaService } from './metaService.js';
-import { strategyOrchestrator } from './strategyOrchestrator.js';
 import { researchService } from './researchService.js';
 import { contentService } from './contentService.js';
 import { listingEngine } from './listingEngine.js';
@@ -143,7 +142,10 @@ export class EmpireOrchestrator {
     const [empire] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
     
     // 1. Get the current task to execute
-    const tasksToExecute = await strategyOrchestrator.getStrategicTasks(empireId);
+    const tasksToExecute = await db.select()
+      .from(tasks)
+      .where(eq(tasks.goalId, empireId))
+      .orderBy(tasks.priority);
     const currentTask = tasksToExecute.find((t: any) => t.status === 'pending_approval' || t.status === 'todo');
 
     if (!currentTask) {
@@ -176,7 +178,10 @@ export class EmpireOrchestrator {
     console.log(`[EmpireOrchestrator] State: PRODUCTION_ORCHESTRATION`);
     
     const [empire] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
-    const tasksToExecute = await strategyOrchestrator.getStrategicTasks(empireId);
+    const tasksToExecute = await db.select()
+      .from(tasks)
+      .where(eq(tasks.goalId, empireId))
+      .orderBy(tasks.priority);
     const currentTask = tasksToExecute.find((t: any) => t.status === 'pending_approval' || t.status === 'todo');
 
     if (!currentTask) return;

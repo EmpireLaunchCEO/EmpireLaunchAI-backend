@@ -4,7 +4,8 @@ import {
   getGrowthForecast, 
   getOpportunityCards, 
   syncAnalyticsData,
-  getEmpirePulse
+  getEmpirePulse,
+  getRevenueTransactions
 } from '../controllers/analyticsController.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
@@ -14,6 +15,7 @@ router.get('/performance', mobileAuth, getPerformanceMetrics);
 router.get('/forecast', mobileAuth, getGrowthForecast);
 router.get('/opportunities', mobileAuth, getOpportunityCards);
 router.get('/pulse', mobileAuth, getEmpirePulse);
+router.get('/transactions', mobileAuth, getRevenueTransactions);
 router.post('/sync', mobileAuth, syncAnalyticsData);
 
 export default router;
