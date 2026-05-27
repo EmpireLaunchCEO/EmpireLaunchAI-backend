@@ -22,6 +22,7 @@ import onboardingRoutes from './routes/onboardingRoutes.js';
 import paymentButtonRoutes from './routes/paymentButtonRoutes.js';
 import reviewRoutes from './routes/reviewRoutes.js';
 import paypalRoutes from './routes/paypalRoutes.js';
+import pushRoutes from './routes/pushRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -70,6 +71,7 @@ app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/payment-buttons', paymentButtonRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/paypal', paypalRoutes);
+app.use('/api/push', pushRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });

@@ -279,3 +279,14 @@ export const accessKeys = sqliteTable('access_keys', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const pushSubscriptions = sqliteTable('push_subscriptions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  type: text('type').notNull(), // 'WEB' or 'NATIVE'
+  token: text('token').notNull(), // Expo token or Web endpoint
+  authKey: text('auth_key'),
+  p256dhKey: text('p256dh_key'),
+  platform: text('platform'), // 'iOS', 'Android', 'Desktop'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});

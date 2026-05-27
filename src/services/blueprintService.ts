@@ -1,7 +1,7 @@
 import { db, schema } from '../db/index.js';
 const { blueprints } = schema;
 import { aiScriptingService } from './aiScriptingService.js';
-import { antiCopycatService } from './antiCopycatService.js';
+import { originalityService } from './originalityService.js';
 import { mediaService } from './mediaService.js';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
@@ -38,7 +38,7 @@ export class BlueprintService {
         const previewPath = await mediaService.createProductImage(req.productTitle, req.niche);
         const imageBuffer = await fs.readFile(previewPath);
         
-        await antiCopycatService.validateUniqueness(imageBuffer, 'kittl', req.productTitle);
+        await originalityService.validateUniqueness(imageBuffer, 'kittl');
         console.log("[BlueprintService] Empire Mode: Visual uniqueness validated.");
       } catch (error: any) {
         console.warn(`[BlueprintService] Empire Mode Validation failed: ${error.message}`);

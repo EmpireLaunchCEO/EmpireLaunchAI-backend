@@ -17,9 +17,11 @@ import { subscriptionGuard } from "../services/subscriptionGuard.js";
 import { listingEngine } from "../services/listingEngine.js";
 import { roiAnalyticsService } from "../services/roiAnalyticsService.js";
 import { canvaService } from "../services/canvaService.js";
+import { youtubeService } from "../services/youtubeService.js";
+import { tiktokService } from "../services/tiktokService.js";
+import { webSocketService } from "../services/websocketService.js";
+import { originalityService } from "../services/originalityService.js";
 import { assetService } from "../services/assetService.js";
-import { antiCopycatService } from "../services/antiCopycatService.js";
-import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -265,7 +267,7 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
       const imageBuffer = Buffer.from(response.data);
 
       try {
-        await antiCopycatService.validateUniqueness(imageBuffer, niche);
+        await originalityService.validateUniqueness(imageBuffer, niche);
         console.log("Anti-Copycat validation passed.");
         webSocketService.notifyUser(state.userId, 'ai-log', { message: "Sentinel: Design uniqueness verified. No copyright overlap detected." });
       } catch (error: any) {
@@ -308,23 +310,29 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
     // In a real LangGraph setup, we would use an interrupt here.
     // For this prototype, we'll stop the loop.
     return { plan: [], nextStep: "end" };
-  } else if (currentTask === "Publish to Marketplaces") {
-    console.log("Delegating to Universal Listing Engine...");
-    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Listing Engine: Synchronizing product data with Etsy/Meta..." });
-    const drafts = state.context.drafts || [];
-    for (const draft of drafts) {
-      try {
-        if (['Etsy', 'Shopify', 'Amazon'].includes(draft.platform)) {
-          webSocketService.notifyUser(state.userId, 'ai-log', { message: `Listing Engine: Creating ${draft.platform} listing for ${draft.title}...` });
-          await listingEngine.publishListing(state.userId, draft.platform, draft);
-        } else if (draft.platform === 'Instagram') {
-          webSocketService.notifyUser(state.userId, 'ai-log', { message: `Social Agent: Posting content to Instagram...` });
-          await metaService.publishPost(state.userId, draft);
+      } else if (currentTask === "Publish to Marketplaces") {
+        console.log("Delegating to Universal Listing Engine...");
+        webSocketService.notifyUser(state.userId, 'ai-log', { message: "Listing Engine: Synchronizing product data with Etsy/Meta/Socials..." });
+        const drafts = state.context.drafts || [];
+        for (const draft of drafts) {
+          try {
+            if (['Etsy', 'Shopify', 'Amazon'].includes(draft.platform)) {
+              webSocketService.notifyUser(state.userId, 'ai-log', { message: `Listing Engine: Creating ${draft.platform} listing for ${draft.title}...` });
+              await listingEngine.publishListing(state.userId, draft.platform, draft);
+            } else if (draft.platform === 'Instagram' || draft.platform === 'Facebook') {
+              webSocketService.notifyUser(state.userId, 'ai-log', { message: `Social Agent: Posting content to ${draft.platform}...` });
+              await metaService.publishPost(state.userId, draft);
+            } else if (draft.platform === 'TikTok') {
+              webSocketService.notifyUser(state.userId, 'ai-log', { message: `Social Agent: Publishing high-velocity video to TikTok...` });
+              await tiktokService.publishVideo(state.userId, draft.videoUrl || state.context.stagedAssetUrl, draft.title, draft.caption);
+            } else if (draft.platform === 'YouTube') {
+              webSocketService.notifyUser(state.userId, 'ai-log', { message: `Social Agent: Publishing Shorts to YouTube...` });
+              await youtubeService.publishShorts(state.userId, draft.videoUrl || state.context.stagedAssetUrl, draft.title, draft.caption);
+            }
+          } catch (error) {
+            console.error(`Failed to publish to ${draft.platform}:`, error);
+          }
         }
-      } catch (error) {
-        console.error(`Failed to publish to ${draft.platform}:`, error);
-      }
-    }
   }
   
   const remainingPlan = state.plan.slice(1);

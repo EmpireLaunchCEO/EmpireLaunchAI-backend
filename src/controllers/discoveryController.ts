@@ -11,11 +11,11 @@ export const runDiscovery = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    const result = await neuralDiscoveryService.discover(userId);
+    const count = await neuralDiscoveryService.discover(userId);
     res.json({
       status: 'success',
-      message: `Discovery completed. Found ${result.count} potential credentials.`,
-      count: result.count
+      message: `Discovery completed. Found ${count} potential credentials.`,
+      count: count
     });
   } catch (error: any) {
     console.error('Error running discovery:', error);
@@ -60,11 +60,11 @@ export const approveDiscovery = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'discoveryId is required' });
     }
 
-    const { vaultId } = await neuralDiscoveryService.approveDiscovery(discoveryId as string);
+    const result = await neuralDiscoveryService.approveDiscovery(discoveryId as string);
     res.json({
       status: 'success',
       message: 'Credential vaulted successfully.',
-      vaultId
+      ...result
     });
   } catch (error: any) {
     console.error('Error approving discovery:', error);

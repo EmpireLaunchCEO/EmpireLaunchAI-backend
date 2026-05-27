@@ -255,3 +255,14 @@ export const paymentButtons = pgTable('payment_buttons', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+export const pushSubscriptions = pgTable('push_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  type: text('type').notNull(), // 'WEB' or 'NATIVE'
+  token: text('token').notNull(), // Expo token or Web endpoint
+  authKey: text('auth_key'),
+  p256dhKey: text('p256dh_key'),
+  platform: text('platform'), // 'iOS', 'Android', 'Desktop'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});

@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db/index.js';
 const { notifications, users, goals } = schema;
 import { notificationService } from './notificationService.js';
@@ -37,11 +38,10 @@ export class EtsyWebhookService {
       const integration = results[0];
 
       if (integration) {
-        await notificationService.sendNotification(integration.userId, {
-            type: 'SALE_CONNECTED',
+        await notificationService.sendPushNotification(integration.userId, {
             title: 'New Etsy Sale!',
-            message: `You just made a sale on Etsy (Receipt #${receiptId}). AI is drafting a thank you email.`,
-            metadata: { receiptId, shopId }
+            body: `You just made a sale on Etsy (Receipt #${receiptId}). AI is drafting a thank you email.`,
+            data: { url: '/dashboard', type: 'SALE_ALERT' }
         });
         
         // 2. Trigger Post-Purchase Automation (Queue a task)
@@ -58,14 +58,31 @@ export class EtsyWebhookService {
               productName: "purchased item"
             });
 
-            console.log(`[EtsyWebhook] AI drafted email for user ${user.id}`);
+            // Store the draft in the Approvals table
+            const approvalId = uuidv4();
+            await db.insert(schema.approvals).values({
+              id: approvalId,
+              userId: integration.userId,
+              type: 'email',
+              status: 'pending',
+              payload: {
+                recipient: 'customer@example.com', // In real flow, get from receipt resource
+                subject: draft.split('\n')[0].replace('Subject: ', ''),
+                body: draft.split('\n').slice(1).join('\n').trim(),
+                platform: 'gmail',
+                receiptId
+              },
+              createdAt: new Date(),
+              updatedAt: new Date()
+            });
+
+            console.log(`[EtsyWebhook] AI drafted email and created approval ${approvalId} for user ${user.id}`);
             
-            // Store the draft as a notification or in a new table
-            await notificationService.sendNotification(user.id, {
-              type: 'EMAIL_DRAFT_READY',
+            // Store the draft as a notification
+            await notificationService.sendPushNotification(user.id, {
               title: 'Thank You Email Drafted',
-              message: `AI has prepared a thank you email for Receipt #${receiptId}. Review and send from the Gmail Assistant.`,
-              metadata: { draft, receiptId }
+              body: `AI has prepared a thank you email for Receipt #${receiptId}. Review and send from your Control Gates.`,
+              data: { url: '/dashboard', type: 'GENERAL' }
             });
           }
         } catch (error) {

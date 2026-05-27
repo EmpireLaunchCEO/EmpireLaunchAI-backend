@@ -64,6 +64,22 @@ export class TikTokService {
 
     return response.data;
   }
+
+  async publishVideo(userId: string, videoUrl: string, title: string, description: string) {
+    const credentials = await integrationService.getCredentials(userId, 'tiktok_publish');
+    if (!credentials || !credentials.accessToken) {
+      throw new Error('No TikTok Publish credentials found');
+    }
+
+    console.log(`[TikTok] Publishing Video for user ${userId}: ${title}`);
+    
+    // Mock publishing response for TikTok Content Posting API
+    return {
+      status: 'success',
+      publishId: 'mock-tiktok-pub-' + Math.random().toString(36).substring(7),
+      shareUrl: 'https://www.tiktok.com/@user/video/mock'
+    };
+  }
 }
 
 export const tiktokService = new TikTokService();

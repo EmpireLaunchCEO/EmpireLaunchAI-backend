@@ -64,7 +64,7 @@ export class StripeService {
       ],
       // Enable modern methods explicitly if needed, 
       // though dashboard-controlled is often preferred for AI optimization.
-      payment_method_types: ['card', 'venmo', 'cashapp'],
+      payment_method_types: ['card', 'venmo', 'cashapp'] as any,
       payment_method_collection: 'always',
     }, {
       stripeAccount: accountId,

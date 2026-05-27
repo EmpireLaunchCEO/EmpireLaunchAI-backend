@@ -61,7 +61,7 @@ export class NeuralMarketDiscoveryService {
     ]);
 
     try {
-      const result = await chain.invoke({ niche });
+      const result = await chain.invoke({ niche }) as any;
       
       // Save/Update in repository
       const [existing] = await db.select().from(nicheDnaRepository).where(eq(nicheDnaRepository.niche, niche)).limit(1);

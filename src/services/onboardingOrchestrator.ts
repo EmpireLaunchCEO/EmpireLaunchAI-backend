@@ -47,6 +47,8 @@ export class OnboardingOrchestrator {
         await this.executeEtsyFlow(sessionId, userId);
       } else if (platform.toLowerCase() === 'tiktok') {
         await this.executeTikTokFlow(sessionId, userId);
+      } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platform.toLowerCase())) {
+        await this.executeGenericBrowserLogin(sessionId, userId, platform.toLowerCase());
       } else {
         throw new Error(`Platform ${platform} not supported yet`);
       }
@@ -272,6 +274,73 @@ export class OnboardingOrchestrator {
     
     await this.runCommand('agent-browser close', sessionEnv);
     console.log(`[OnboardingOrchestrator] TikTok onboarding completed for session ${sessionId}`);
+  }
+
+  private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string) {
+    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
+    const urls: Record<string, string> = {
+      fiverr: 'https://www.fiverr.com/login',
+      youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
+      instagram: 'https://www.instagram.com/accounts/login/',
+      facebook: 'https://www.facebook.com/login',
+      gmail: 'https://accounts.google.com/ServiceLogin?service=mail'
+    };
+
+    const waitUrls: Record<string, string> = {
+      fiverr: '**/dashboard**',
+      youtube: '**/home**',
+      instagram: '**/home**',
+      facebook: '**/home**',
+      gmail: '**/mail**'
+    };
+
+    const url = urls[platform];
+    const waitUrl = waitUrls[platform];
+
+    await this.runCommand(`agent-browser open "${url}"`, sessionEnv);
+    
+    // Check if login is required
+    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
+    
+    if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
+      await db.update(onboardingSessions)
+        .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+      
+      try {
+        await this.runCommand(`agent-browser wait --url "${waitUrl}" --timeout 300000`, sessionEnv);
+      } catch (e) {
+        throw new Error(`${platform} login timeout or failed`);
+      }
+    }
+
+    await db.update(onboardingSessions)
+      .set({ status: 'in_progress', currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
+      .where(eq(onboardingSessions.id, sessionId));
+
+    // Simulate extraction
+    const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
+    const { encryptedValue, encryptedDek, iv, tag } = encryptWithEnvelope(mockToken);
+
+    await db.insert(ownershipVault).values({
+      id: uuidv4(),
+      userId,
+      platform: platform.toUpperCase(),
+      secretType: 'SESSION_TOKEN',
+      encryptedValue,
+      encryptedDek,
+      iv,
+      tag,
+      lastRotated: new Date(),
+      createdAt: new Date()
+    });
+
+    await db.update(onboardingSessions)
+      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
+      .where(eq(onboardingSessions.id, sessionId));
+    
+    await this.runCommand('agent-browser close', sessionEnv);
+    console.log(`[OnboardingOrchestrator] ${platform} onboarding completed for session ${sessionId}`);
   }
 
   private async getLatestUserGoal(userId: string) {

@@ -207,8 +207,8 @@ export class ROIAnalyticsService {
     // 2. Engagement Pulse (30%)
     // Mock: Based on view-to-like ratio.
     const metrics = await db.select().from(schema.engagementMetrics).where(eq(schema.engagementMetrics.userId, userId));
-    const totalViews = metrics.reduce((sum, m) => sum + m.viewCount, 0);
-    const totalLikes = metrics.reduce((sum, m) => sum + m.likeCount, 0);
+    const totalViews = metrics.reduce((sum: number, m: any) => sum + (m.viewCount || 0), 0);
+    const totalLikes = metrics.reduce((sum: number, m: any) => sum + (m.likeCount || 0), 0);
     const engagementPulse = totalViews > 0 ? Math.min(100, Math.round((totalLikes / totalViews) * 500)) : 50;
 
     // 3. Operational Consistency (20%)
@@ -251,6 +251,7 @@ export class ROIAnalyticsService {
       engagementPulse,
       operationalConsistency,
       platformBreakdown: platformRevenue,
+      profitMargin: 0, // Mocked or calculated if needed
       status: overallScore > 70 ? 'healthy' : overallScore > 40 ? 'stable' : 'at_risk'
     };
   }

@@ -171,7 +171,7 @@ export const redeemKey = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Access key already used' });
     }
 
-    await db.transaction(async (tx) => {
+    await db.transaction(async (tx: any) => {
       await tx.update(users)
         .set({ tier: accessKey.tier, accessKey: accessKey.key, updatedAt: new Date() })
         .where(eq(users.id, userId));

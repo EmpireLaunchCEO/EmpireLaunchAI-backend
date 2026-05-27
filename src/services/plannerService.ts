@@ -78,7 +78,7 @@ export class PlannerService {
       const result = await chain.invoke({
         title: goal.title,
         description: goal.description || "Scale this niche effectively.",
-      });
+      }) as any;
 
       const dagId = uuidv4();
       await db.insert(taskPlans).values({

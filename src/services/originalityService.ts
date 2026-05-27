@@ -54,6 +54,10 @@ export class OriginalityService {
     };
   }
 
+  async validateUniqueness(imageBuffer: Buffer, niche: string) {
+    return this.validateOriginality(imageBuffer, niche, 'system');
+  }
+
   /**
    * Generates a 64-bit Difference Hash (dHash) of the design.
    */
