@@ -39,10 +39,17 @@ const port = parseInt(process.env.PORT || '3000', 10);
 // Initialize WebSocket Service
 webSocketService.init(httpServer);
 
-// Start the distributed background worker & AI Queue Worker
-agentWorker.start();
-schedulerWorker.start();
-startAIWorker();
+if (process.env.NODE_ENV !== 'production') {
+  // Start the distributed background worker & AI Queue Worker
+  // Note: On serverless platforms like Vercel, these should be moved to separate worker processes
+  agentWorker.start();
+  schedulerWorker.start();
+  startAIWorker();
+
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
+  });
+}
 
 app.use(helmet({
   contentSecurityPolicy: false, // For easier testing with external assets/dashboard

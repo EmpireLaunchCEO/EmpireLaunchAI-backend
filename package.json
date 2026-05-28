@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "echo 'Vercel build skipped, using serverless entry point'",
+    "build-local": "tsc",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "smoke-test": "NODE_OPTIONS='--loader ts-node/esm' node src/smokeTest.ts"
