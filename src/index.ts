@@ -77,6 +77,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });
 });
 
-httpServer.listen(port, '0.0.0.0', () => {
-  console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
-});
+export default app;
+
+if (process.env.NODE_ENV !== 'production') {
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
+  });
+}

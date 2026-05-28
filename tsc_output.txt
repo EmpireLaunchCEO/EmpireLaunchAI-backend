@@ -1,1 +1,0 @@
-src/controllers/pushController.ts(25,16): error TS2783: 'status' is specified more than once, so this usage will be overwritten.
