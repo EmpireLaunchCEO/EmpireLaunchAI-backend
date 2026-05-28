@@ -16,6 +16,9 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "engines": {
+    "node": ">=20.x"
+  },
   "dependencies": {
     "@langchain/community": "^1.1.28",
     "@langchain/core": "^1.1.46",

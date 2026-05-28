@@ -51,7 +51,7 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-app.use(helmet({
+app.use((helmet as any)({
   contentSecurityPolicy: false, // For easier testing with external assets/dashboard
 }));
 app.use(cors());
