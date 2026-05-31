@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { notificationService } from './notificationService.js';
 import { metaService } from './metaService.js';
 import { tiktokService } from './tiktokService.js';
+import { distributionQueue } from './queueService.js';
 
 export class CampaignService {
   async createCampaign(userId: string, data: { name: string; tone: string; frequency: string; goalId?: string }) {
@@ -119,28 +120,22 @@ export class CampaignService {
         const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, post.campaignId)).limit(1);
         const userId = campaign.userId;
 
-        if (post.platform === 'instagram' || post.platform === 'facebook') {
-          await metaService.publishPost(userId, post.content);
-        } else if (post.platform === 'tiktok') {
-          // Assuming tiktokService.publishPost exists or will be implemented
-          // await tiktokService.publishPost(userId, post.content);
-          console.log(`[TikTok] Posting for user ${userId}... (Simulation)`);
-        }
+        // Queue as separate jobs for Identity Isolation and reliability
+        await distributionQueue.add(`distribute-${post.platform}-${post.id}`, {
+          postId: post.id,
+          userId,
+          platform: post.platform,
+          content: post.content
+        });
 
+        // Set status to queued so it's not picked up again by the scheduler
         await db.update(scheduledPosts)
-          .set({ status: 'posted', updatedAt: new Date() })
+          .set({ status: 'queued', updatedAt: new Date() })
           .where(eq(scheduledPosts.id, post.id));
-        
-        await notificationService.notifyUser(userId, `Your post to ${post.platform} has been published successfully!`);
+
+        console.log(`Queued distribution job for post ${post.id} on ${post.platform}`);
       } catch (error: any) {
-        console.error(`Failed to execute post ${post.id}:`, error.message);
-        await db.update(scheduledPosts)
-          .set({ status: 'failed', updatedAt: new Date() })
-          .where(eq(scheduledPosts.id, post.id));
-        
-        // Notify user about failure
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, post.campaignId)).limit(1);
-        await notificationService.notifyUser(campaign.userId, `Failed to publish your post to ${post.platform}: ${error.message}`);
+        console.error(`Failed to queue post ${post.id}:`, error.message);
       }
     }
   }

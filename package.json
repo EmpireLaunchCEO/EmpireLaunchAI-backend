@@ -50,6 +50,7 @@
     "morgan": "^1.10.1",
     "node-cron": "^4.2.1",
     "pg": "^8.20.0",
+    "playwright": "^1.60.0",
     "png-js": "^2.0.0",
     "rate-limit-redis": "^5.0.0",
     "sharp": "^0.34.5",

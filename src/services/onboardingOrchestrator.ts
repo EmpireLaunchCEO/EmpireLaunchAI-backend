@@ -4,9 +4,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { encryptWithEnvelope } from '../utils/encryption.js';
+import { onboardingQueue, aiTaskQueue } from './queueService.js';
+import { webSocketService } from './websocketService.js';
 
 const execPromise = promisify(exec);
-const { onboardingSessions, ownershipVault } = schema;
+const { onboardingSessions, ownershipVault, goals } = schema;
 
 export interface OnboardingAction {
   type: 'LOGIN_COMPLETE' | 'MFA_COMPLETE' | 'CANCEL';
@@ -29,16 +31,19 @@ export class OnboardingOrchestrator {
       updatedAt: new Date(),
     });
 
-    // Start browser agent in background
-    this.runBrowserAgent(sessionId, userId, platform).catch(err => {
-      console.error(`[OnboardingOrchestrator] Browser agent failed for session ${sessionId}:`, err);
+    // Add onboarding task to the queue
+    await onboardingQueue.add('onboarding-task', {
+      sessionId,
+      userId,
+      platform,
     });
 
     return { sessionId };
   }
 
-  private async runBrowserAgent(sessionId: string, userId: string, platform: string) {
-    console.log(`[OnboardingOrchestrator] Starting browser agent for ${platform} (Session: ${sessionId})`);
+  // Moved to onboardingWorker.ts for async execution
+  public async processOnboarding(sessionId: string, userId: string, platform: string) {
+    console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
     
     try {
       if (platform.toLowerCase() === 'canva') {
@@ -57,6 +62,63 @@ export class OnboardingOrchestrator {
         .set({ status: 'failed', error: error.message, updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
     }
+  }
+
+  public async initializeEmpire(userId: string, name: string, niche: string, angle: string, automationMode: string, goalId?: string) {
+    console.log(`[OnboardingOrchestrator] Initializing Empire for user ${userId}: ${name} (GoalId: ${goalId})`);
+    
+    webSocketService.notifyUser(userId, 'ai-log', { message: `[SYSTEM] Starting Empire initialization: ${name}` });
+    
+    let targetGoalId = goalId;
+
+    if (!targetGoalId) {
+      // Fallback: Create the primary goal (The Empire) if not already created
+      const [newGoal] = await db.insert(goals).values({
+        id: uuidv4(),
+        userId,
+        title: name,
+        description: `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`,
+        status: 'pending',
+        approvalRequired: automationMode !== 'full_autopilot',
+        autoPost: automationMode === 'full_autopilot',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }).returning();
+      targetGoalId = newGoal.id;
+    }
+
+    webSocketService.notifyUser(userId, 'ai-log', { message: `[NEURAL] Mapping growth architecture for ${niche}...` });
+
+    // 2. Queue the initial strategic job
+    await aiTaskQueue.add('goal-initial-job', {
+      goal: name,
+      userId,
+      context: {
+        goalId: targetGoalId,
+        goal: niche,
+        angle,
+        automationMode
+      }
+    });
+
+    webSocketService.notifyUser(userId, 'ai-log', { message: `[SYSTEM] Strategic roadmap generation queued.` });
+
+    // 3. Update status to 'active'
+    await db.update(goals)
+      .set({ status: 'active', updatedAt: new Date() })
+      .where(eq(goals.id, targetGoalId));
+
+    console.log(`[OnboardingOrchestrator] Empire initialized successfully for user ${userId}`);
+    
+    // Notify via WebSocket for completion
+    webSocketService.notifyUser(userId, 'empire-initialized', {
+      goalId: targetGoalId,
+      status: 'active'
+    });
+
+    webSocketService.notifyUser(userId, 'ai-log', { message: `[SYSTEM] Empire Sync Complete. Ready for takeoff.` });
+
+    return targetGoalId;
   }
 
   private async executeCanvaFlow(sessionId: string, userId: string) {

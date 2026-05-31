@@ -22,6 +22,7 @@ import { tiktokService } from "../services/tiktokService.js";
 import { webSocketService } from "../services/websocketService.js";
 import { originalityService } from "../services/originalityService.js";
 import { assetService } from "../services/assetService.js";
+import { hunterGathererService } from "../services/hunterGathererService.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -290,8 +291,25 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
       };
 
       console.log(`Creative asset staged at: ${stagedAsset.url}`);
-    } catch (error) {
-      console.error("Failed to generate creative assets via Canva:", error);
+    } catch (error: any) {
+      console.error("Failed to generate creative assets via Canva API:", error.message);
+      webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Canva API unavailable. Triggering Free Tier Hunter-Gatherer..." });
+      
+      const harvestingResult = await hunterGathererService.triggerHarvesting(state.userId, {
+        platform: 'canva',
+        objective: 'DOWNLOAD_ASSET',
+        params: { 
+            style, 
+            niche,
+            designId: state.context.canvaDesignId || 'NEW' 
+        }
+      });
+
+      updatedContext = {
+        ...updatedContext,
+        harvestingJobId: harvestingResult.jobId,
+        harvestingStatus: 'queued'
+      };
     }
   } else if (currentTask === "Request Approval") {
     console.log("Requesting user approval for content drafts...");

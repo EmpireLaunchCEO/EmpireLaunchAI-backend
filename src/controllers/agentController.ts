@@ -1,11 +1,60 @@
 import { Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
-import { aiTaskQueue } from '../services/queueService.js';
+import { aiTaskQueue, onboardingQueue } from '../services/queueService.js';
 import { fraudSentinel } from '../services/fraudSentinel.js';
 import { strategyOrchestrator } from '../services/strategyOrchestrator.js';
 import { inboxAssistantService } from '../services/inboxAssistantService.js';
 import { eq, and, count, inArray } from 'drizzle-orm';
 const { goals, users, approvals, tasks } = schema;
+
+export const initializeAgent = async (req: Request, res: Response) => {
+  try {
+    const { userId, name, niche, angle, automationMode } = req.body;
+    
+    if (!userId || !name || !niche) {
+      return res.status(400).json({ error: 'Missing required fields: userId, name, niche' });
+    }
+
+    // Security check: Fraud Sentinel
+    const isSuspicious = await fraudSentinel.scanForAbuse(userId, { name, niche, angle });
+    if (isSuspicious) {
+      return res.status(403).json({ error: 'Account locked due to suspicious activity' });
+    }
+
+    // 1. Create the primary goal (The Empire) with PENDING status immediately
+    // This allows the frontend to have an ID to track progress
+    const [newGoal] = await db.insert(goals).values({
+      userId,
+      title: name,
+      description: `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`,
+      status: 'pending', // Will be set to 'active' by the worker
+      approvalRequired: automationMode !== 'full_autopilot',
+      autoPost: automationMode === 'full_autopilot',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }).returning();
+
+    // 2. Add initialize-agent task to the queue for heavy processing (AI, provisioning)
+    const job = await onboardingQueue.add('initialize-agent', {
+      userId,
+      goalId: newGoal.id, // Pass the existing goal ID
+      name,
+      niche,
+      angle,
+      automationMode
+    });
+
+    res.json({
+      status: 'success',
+      jobId: job.id,
+      empire: newGoal,
+      message: 'Empire initialization has been queued'
+    });
+  } catch (error: any) {
+    console.error('Error initializing agent:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
 
 export const startAgent = async (req: Request, res: Response) => {
   try {

@@ -13,6 +13,38 @@ export const aiTaskQueue = new Queue('ai-tasks', {
   connection: redisConnection,
 });
 
+export const onboardingQueue = new Queue('onboarding-tasks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 5000,
+    },
+    removeOnComplete: true,
+  }
+});
+
+export const neuralBrowserQueue = new Queue('neural-browser-tasks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    removeOnComplete: true,
+  }
+});
+
+export const distributionQueue = new Queue('distribution-tasks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 5,
+    backoff: {
+      type: 'exponential',
+      delay: 10000,
+    },
+    removeOnComplete: true,
+  }
+});
+
 export const startAIWorker = () => {
   const worker = new Worker(
     'ai-tasks',

@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js';
 const { products, approvals, tasks } = schema;
 import { v4 as uuidv4 } from 'uuid';
 import { integrationService } from './integrationService.js';
+import { hunterGathererService } from './hunterGathererService.js';
 
 export class ListingEngine {
   async researchAndDraft(userId: string, goalId: string, niche: string) {
@@ -54,26 +55,47 @@ export class ListingEngine {
 
   async publishListing(userId: string, platform: string, draftPayload: any) {
     console.log(`[ListingEngine] Publishing listing to ${platform} for user ${userId}...`);
-    // This is a generic entry point for the orchestrator
-    if (platform.toLowerCase() === 'etsy') {
-       // In a real flow, the payload might already be the approval payload
-       // For now, we simulate the publication
-       const credentials = await integrationService.getCredentials(userId, 'etsy');
-       if (!credentials) throw new Error('Etsy integration not found');
+    
+    try {
+        if (platform.toLowerCase() === 'etsy') {
+            const credentials = await integrationService.getCredentials(userId, 'etsy');
+            
+            // FREE TIER HUNTER-GATHERER FALLBACK
+            if (!credentials || !credentials.accessToken || !this.clientIdExists()) {
+                console.log(`[ListingEngine] API unavailable for ${platform}. Triggering Free Tier Hunter-Gatherer...`);
+                return await hunterGathererService.triggerHarvesting(userId, {
+                    platform: 'etsy' as any,
+                    objective: 'OPTIMIZE_LISTING',
+                    params: draftPayload
+                });
+            }
 
-       return await etsyService.createListing(credentials.accessToken, credentials.shopId, {
-         title: draftPayload.title,
-         description: draftPayload.description,
-         price: (draftPayload.price / 100).toFixed(2),
-         quantity: 100,
-         state: 'active', // Publish immediately if called via orchestrator
-         taxonomy_id: 1,
-         who_made: 'i_did',
-         when_made: 'made_to_order',
-         is_supply: false,
-       });
+            return await etsyService.createListing(credentials.accessToken, credentials.shopId, {
+                title: draftPayload.title,
+                description: draftPayload.description,
+                price: (draftPayload.price / 100).toFixed(2),
+                quantity: 100,
+                state: 'active',
+                taxonomy_id: 1,
+                who_made: 'i_did',
+                when_made: 'made_to_order',
+                is_supply: false,
+            });
+        }
+    } catch (error: any) {
+        console.warn(`[ListingEngine] API Publication failed for ${platform}: ${error.message}. Falling back to Hunter-Gatherer.`);
+        return await hunterGathererService.triggerHarvesting(userId, {
+            platform: platform.toLowerCase() as any,
+            objective: 'OPTIMIZE_LISTING',
+            params: draftPayload
+        });
     }
+    
     throw new Error(`Platform ${platform} not supported for direct publication yet.`);
+  }
+
+  private clientIdExists(): boolean {
+    return !!process.env.ETSY_CLIENT_ID && !process.env.ETSY_CLIENT_ID.includes('MOCK');
   }
 
   async publishApprovedListing(userId: string, approvalId: string) {

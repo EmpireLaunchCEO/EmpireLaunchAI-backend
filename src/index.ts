@@ -26,6 +26,9 @@ import pushRoutes from './routes/pushRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
+import { onboardingWorker } from './workers/onboardingWorker.js';
+import { startNeuralBrowserWorker } from './workers/neuralBrowserWorker.js';
+import { startDistributionWorker } from './workers/distributionWorker.js';
 import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
@@ -45,6 +48,11 @@ if (process.env.NODE_ENV !== 'production') {
   agentWorker.start();
   schedulerWorker.start();
   startAIWorker();
+  startNeuralBrowserWorker();
+  startDistributionWorker();
+  
+  // Note: onboardingWorker starts automatically upon import
+  console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
 
   httpServer.listen(port, '0.0.0.0', () => {
     console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
@@ -85,9 +93,3 @@ app.get('/health', (req, res) => {
 });
 
 export default app;
-
-if (process.env.NODE_ENV !== 'production') {
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
-  });
-}
