@@ -14,31 +14,37 @@ export const startDistributionWorker = () => {
   const worker = new Worker(
     'distribution-tasks',
     async (job: Job) => {
-      const { postId, userId, platform, content } = job.data;
+      const { postId, userId, platform, content, requiresBrowser, browserSequenceHint } = job.data;
       console.log(`[DistributionWorker] Processing job ${job.id} for user ${userId}: ${platform}`);
 
       // Notify user via WebSocket
       webSocketService.notifyUser(userId, 'distribution-started', { jobId: job.id, platform, postId });
+
+      // Extract caption from content (supports both flat and content-object formats)
+      const caption = content.caption || content.content?.caption || '';
+      const videoUrl = content.videoUrl || content.content?.videoUrl;
+      const imageUrl = content.imageUrl || content.content?.imageUrl;
+      const title = content.title || content.content?.title || 'Empire Post';
 
       try {
         let result: any;
 
         try {
             if (platform === 'instagram' || platform === 'facebook') {
-                result = await metaService.publishPost(userId, content);
+                result = await metaService.publishPost(userId, { ...content, caption, imageUrl });
             } else if (platform === 'tiktok') {
                 result = await tiktokService.publishVideo(
                     userId, 
-                    content.videoUrl, 
-                    content.title || 'Empire Post', 
-                    content.caption || ''
+                    videoUrl, 
+                    title,
+                    caption
                 );
-            } else if (platform === 'youtube_shorts') {
+            } else if (platform === 'youtube' || platform === 'youtube_shorts') {
                 result = await youtubeService.publishShorts(
                     userId, 
-                    content.videoUrl, 
-                    content.title || 'Empire Shorts', 
-                    content.caption || ''
+                    videoUrl, 
+                    title,
+                    caption
                 );
             } else {
                 throw new Error(`Platform ${platform} not supported for distribution`);
@@ -50,10 +56,11 @@ export const startDistributionWorker = () => {
                 message: `[SYSTEM] API distribution restricted for ${platform}. Initiating Neural Browser Distribution (Hunter-Gatherer)...` 
             });
 
+            // If browserSequenceHint was provided (from Empire Studio), pass it through
             const harvestingResult = await hunterGathererService.triggerHarvesting(userId, {
                 platform: platform.toLowerCase() as any,
-                objective: 'OPTIMIZE_LISTING', // Reusing this for distribution trigger in MVP
-                params: { ...content, postId }
+                objective: 'OPTIMIZE_LISTING',
+                params: { ...content, postId, browserSequenceHint }
             });
 
             return { status: 'pivoted_to_browser', jobId: harvestingResult.jobId };

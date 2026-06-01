@@ -203,7 +203,7 @@ export const campaigns = sqliteTable('campaigns', {
 export const scheduledPosts = sqliteTable('scheduled_posts', {
   id: text('id').primaryKey(),
   campaignId: text('campaign_id').references(() => campaigns.id).notNull(),
-  platform: text('platform').notNull(), // 'instagram', 'tiktok'
+  platform: text('platform').notNull(), // 'instagram', 'tiktok', 'youtube', 'facebook', 'etsy'
   content: text('content', { mode: 'json' }).notNull(), // text, image_urls, etc.
   scheduledFor: integer('scheduled_at', { mode: 'timestamp' }).notNull(),
   status: text('status').default('pending').notNull(), // 'pending', 'approved', 'posted', 'failed'
@@ -252,6 +252,48 @@ export const onboardingSessions = sqliteTable('onboarding_sessions', {
   status: text('status').default('pending').notNull(), // 'pending', 'hitl_required', 'in_progress', 'completed', 'failed'
   currentState: text('current_state').notNull(),
   metadata: text('metadata', { mode: 'json' }),
+  error: text('error'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+// User Settings / Business Info persistence (replaces localStorage)
+export const userSettings = sqliteTable('user_settings', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull().unique(),
+  // Business Info
+  businessAngle: text('business_angle'),
+  businessNiche: text('business_niche'),
+  // Platform Permission levels
+  platformPermissions: text('platform_permissions', { mode: 'json' }), // { etsy: 'co-pilot'|'empire', ... }
+  // Connected Platforms
+  connectedPlatforms: text('connected_platforms', { mode: 'json' }), // string[]
+  // App Settings
+  theme: text('theme').default('light'),
+  language: text('language').default('en'),
+  currency: text('currency').default('USD'),
+  aiMode: text('ai_mode').default('co-pilot'), // 'co-pilot' | 'empire'
+  autoSendRetention: integer('auto_send_retention', { mode: 'boolean' }).default(false),
+  // Notifications
+  notificationSettings: text('notification_settings', { mode: 'json' }),
+  onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false),
+  linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false),
+  notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+// Master Video Assets & Style DNA persistence
+export const masterAssets = sqliteTable('master_assets', {
+  id: text('id').primaryKey(),
+  campaignId: text('campaign_id').references(() => campaigns.id),
+  userId: text('user_id').references(() => users.id).notNull(),
+  styleDna: text('style_dna', { mode: 'json' }).notNull(), // The StyleDNA object
+  masterVideoUrl: text('master_video_url'),
+  masterImageUrl: text('master_image_url'),
+  masterPdfUrl: text('master_pdf_url'),
+  assetType: text('asset_type').default('video').notNull(), // 'video', 'image', 'pdf'
+  status: text('status').default('pending').notNull(), // 'pending', 'processing', 'completed', 'failed'
   error: text('error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

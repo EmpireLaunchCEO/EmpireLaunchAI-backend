@@ -186,6 +186,8 @@ export const campaigns = sqliteTable('campaigns', {
   tone: text('tone').notNull(), // 'professional', 'playful', 'aggressive'
   frequency: text('frequency').notNull(), // 'daily', 'weekly', 'bi-weekly'
   status: text('status').default('active').notNull(), // 'active', 'paused', 'completed'
+  styleDna: text('style_dna', { mode: 'json' }), // colors, fonts, pacing, etc.
+  masterAssetUrl: text('master_asset_url'), // Link to the single video/image source
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

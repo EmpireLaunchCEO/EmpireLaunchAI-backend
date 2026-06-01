@@ -1,0 +1,117 @@
+import { Request, Response } from 'express';
+import { empireStudioService, StyleDNA } from '../services/empireStudioService.js';
+
+export class EmpireStudioController {
+  /**
+   * POST /api/studio/create
+   * Create a master asset and distribute to selected platforms.
+   */
+  async create(req: Request, res: Response) {
+    const userId = (req as any).userId;
+    const {
+      campaignId,
+      niche,
+      angle,
+      styleDna,
+      platforms,
+      title,
+      description,
+      price,
+      scheduleInMinutes,
+    } = req.body;
+
+    if (!niche || !angle || !styleDna || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
+      return res.status(400).json({
+        error: 'Missing required fields: niche, angle, styleDna, platforms (non-empty array)',
+      });
+    }
+
+    // Validate StyleDNA
+    if (!styleDna.colors || !styleDna.fonts || !styleDna.hooks || !styleDna.keywords || !styleDna.tone) {
+      return res.status(400).json({
+        error: 'styleDna must include: colors, fonts, hooks, keywords, tone',
+      });
+    }
+
+    // Validate platforms
+    const validPlatforms = ['tiktok', 'instagram', 'youtube', 'facebook'];
+    for (const p of platforms) {
+      if (!validPlatforms.includes(p)) {
+        return res.status(400).json({
+          error: `Invalid platform: ${p}. Valid options: ${validPlatforms.join(', ')}`,
+        });
+      }
+    }
+
+    try {
+      const result = await empireStudioService.createAndDistribute({
+        userId,
+        campaignId,
+        niche,
+        angle,
+        styleDna: styleDna as StyleDNA,
+        platforms,
+        title,
+        description,
+        price,
+        scheduleInMinutes,
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error('[EmpireStudioController] create failed:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/studio/assets/campaign/:campaignId
+   * Get all assets for a campaign.
+   */
+  async getCampaignAssets(req: Request, res: Response) {
+    const userId = (req as any).userId;
+    const { campaignId } = req.params;
+
+    try {
+      const assets = await empireStudioService.getCampaignAssets(userId, campaignId);
+      res.json(assets);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/studio/assets
+   * Get all user assets.
+   */
+  async getUserAssets(req: Request, res: Response) {
+    const userId = (req as any).userId;
+
+    try {
+      const assets = await empireStudioService.getUserAssets(userId);
+      res.json(assets);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/studio/assets/:assetId
+   * Get a single asset by ID.
+   */
+  async getAssetById(req: Request, res: Response) {
+    const { assetId } = req.params;
+
+    try {
+      const asset = await empireStudioService.getAssetById(assetId);
+      if (!asset) {
+        return res.status(404).json({ error: 'Asset not found' });
+      }
+      res.json(asset);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+}
+
+export const empireStudioController = new EmpireStudioController();
