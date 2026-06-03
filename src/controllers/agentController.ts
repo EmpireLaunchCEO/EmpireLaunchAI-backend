@@ -21,6 +21,22 @@ export const initializeAgent = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Account locked due to suspicious activity' });
     }
 
+    // Check for existing goal with same name to prevent duplicates on retry
+    const [existingGoal] = await db.select().from(goals).where(
+      and(
+        eq(goals.userId, userId),
+        eq(goals.title, name)
+      )
+    ).limit(1);
+
+    if (existingGoal) {
+      return res.json({
+        status: 'success',
+        empire: existingGoal,
+        message: 'Empire already exists, resuming sync'
+      });
+    }
+
     // 1. Create the primary goal (The Empire) with PENDING status immediately
     // This allows the frontend to have an ID to track progress
     const [newGoal] = await db.insert(goals).values({
