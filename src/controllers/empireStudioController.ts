@@ -58,9 +58,10 @@ export class EmpireStudioController {
       });
 
       res.json(result);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       console.error('[EmpireStudioController] create failed:', error);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: msg });
     }
   }
 
@@ -75,8 +76,9 @@ export class EmpireStudioController {
     try {
       const assets = await empireStudioService.getCampaignAssets(userId, campaignId as string);
       res.json(assets);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
     }
   }
 
@@ -90,8 +92,9 @@ export class EmpireStudioController {
     try {
       const assets = await empireStudioService.getUserAssets(userId);
       res.json(assets);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
     }
   }
 
@@ -105,11 +108,13 @@ export class EmpireStudioController {
     try {
       const asset = await empireStudioService.getAssetById(assetId as string);
       if (!asset) {
-        return res.status(404).json({ error: 'Asset not found' });
+        res.status(404).json({ error: 'Asset not found' });
+        return;
       }
       res.json(asset);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
     }
   }
 }
