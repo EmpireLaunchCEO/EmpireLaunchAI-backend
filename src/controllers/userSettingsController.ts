@@ -51,12 +51,12 @@ export class UserSettingsController {
       'notificationSettings',
     ];
 
-    if (!allowedFields.includes(field)) {
+    if (!allowedFields.includes(field as string)) {
       return res.status(400).json({ error: `Invalid field: ${field}` });
     }
 
     try {
-      await userSettingsService.updateField(userId, field, value);
+      await userSettingsService.updateField(userId, field as string, value);
       const settings = await userSettingsService.getSettings(userId);
       res.json(settings);
     } catch (error: any) {

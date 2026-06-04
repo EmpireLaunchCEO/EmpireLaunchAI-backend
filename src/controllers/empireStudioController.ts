@@ -73,7 +73,7 @@ export class EmpireStudioController {
     const { campaignId } = req.params;
 
     try {
-      const assets = await empireStudioService.getCampaignAssets(userId, campaignId);
+      const assets = await empireStudioService.getCampaignAssets(userId, campaignId as string);
       res.json(assets);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -103,7 +103,7 @@ export class EmpireStudioController {
     const { assetId } = req.params;
 
     try {
-      const asset = await empireStudioService.getAssetById(assetId);
+      const asset = await empireStudioService.getAssetById(assetId as string);
       if (!asset) {
         return res.status(404).json({ error: 'Asset not found' });
       }
