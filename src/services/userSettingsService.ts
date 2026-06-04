@@ -45,6 +45,9 @@ export interface UserSettingsDTO {
 
   // Empire notes (freeform text array)
   empireNotes?: string[];
+
+  // Protocol
+  protocolAccepted?: boolean;
 }
 
 export class UserSettingsService {
@@ -93,6 +96,7 @@ export class UserSettingsService {
         onboardingComplete: dto.onboardingComplete ?? false,
         linkingComplete: dto.linkingComplete ?? false,
         notificationModalDismissed: dto.notificationModalDismissed ?? false,
+        protocolAccepted: dto.protocolAccepted ?? false,
         createdAt: now,
         updatedAt: now,
       };
@@ -116,6 +120,9 @@ export class UserSettingsService {
     if (dto.linkingComplete !== undefined) updateData.linkingComplete = dto.linkingComplete;
     if (dto.notificationModalDismissed !== undefined) {
       updateData.notificationModalDismissed = dto.notificationModalDismissed;
+    }
+    if (dto.protocolAccepted !== undefined) {
+      updateData.protocolAccepted = dto.protocolAccepted;
     }
 
     await db.update(schema.userSettings)
@@ -198,6 +205,7 @@ export class UserSettingsService {
       aiMode: (row.aiMode as 'co-pilot' | 'empire') ?? 'co-pilot',
       autoSendRetention: row.autoSendRetention ?? false,
       notificationSettings: row.notificationSettings ?? { sales: true, approvals: true },
+      protocolAccepted: row.protocolAccepted ?? false,
     };
   }
 
@@ -209,6 +217,7 @@ export class UserSettingsService {
       onboardingComplete: false,
       linkingComplete: false,
       notificationModalDismissed: false,
+      protocolAccepted: false,
       connectedPlatforms: [],
       platformPermissions: {},
       theme: 'light',

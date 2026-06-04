@@ -48,7 +48,7 @@ export class UserSettingsController {
       'businessAngle', 'businessNiche', 'theme', 'language', 'currency',
       'aiMode', 'autoSendRetention', 'onboardingComplete', 'linkingComplete',
       'notificationModalDismissed', 'platformPermissions', 'connectedPlatforms',
-      'notificationSettings',
+      'notificationSettings', 'protocolAccepted',
     ];
 
     if (!allowedFields.includes(field as string)) {

@@ -261,6 +261,27 @@ export const paymentButtons = sqliteTable('payment_buttons', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
+export const userSettings = sqliteTable('user_settings', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull().unique(),
+  businessAngle: text('business_angle'),
+  businessNiche: text('business_niche'),
+  platformPermissions: text('platform_permissions', { mode: 'json' }),
+  connectedPlatforms: text('connected_platforms', { mode: 'json' }),
+  theme: text('theme').default('light'),
+  language: text('language').default('en'),
+  currency: text('currency').default('USD'),
+  aiMode: text('ai_mode').default('co-pilot'),
+  autoSendRetention: integer('auto_send_retention', { mode: 'boolean' }).default(false),
+  notificationSettings: text('notification_settings', { mode: 'json' }),
+  onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false),
+  linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false),
+  notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false),
+  protocolAccepted: integer('protocol_accepted', { mode: 'boolean' }).default(false),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
 export const reviews = sqliteTable('reviews', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),

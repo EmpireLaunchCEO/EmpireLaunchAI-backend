@@ -279,6 +279,7 @@ export const userSettings = sqliteTable('user_settings', {
   onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false),
   linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false),
   notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false),
+  protocolAccepted: integer('protocol_accepted', { mode: 'boolean' }).default(false),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
