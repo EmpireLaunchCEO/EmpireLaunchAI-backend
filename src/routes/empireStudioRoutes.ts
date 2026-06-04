@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { empireStudioController } from '../controllers/empireStudioController.js';
+import { studioVaultController } from '../controllers/studioVaultController.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
@@ -18,5 +19,14 @@ router.get('/assets/:assetId', mobileAuth, empireStudioController.getAssetById);
 
 // Generate a VisualSummary preview from DNA strand IDs or raw manifest
 router.post('/preview', mobileAuth, empireStudioController.getPreview);
+
+// ─── STUDIO VAULT (Inspiration Gallery) ────────────────────────────────
+
+// Get synthesized vault strands for the Studio page
+// Supports ?category=layout&limit=20&minScore=70
+router.get('/vault', mobileAuth, studioVaultController.getSynthesizedStrands);
+
+// Search vault by niche or category
+router.get('/vault/search', mobileAuth, studioVaultController.searchVault);
 
 export default router;

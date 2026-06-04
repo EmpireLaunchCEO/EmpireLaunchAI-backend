@@ -355,6 +355,8 @@ export class DnaHuntOrchestrator {
         // In production, this would be generated via OpenAI Embeddings API
         const syntheticEmbedding = this.generateSyntheticEmbedding(pattern);
 
+        const synthesisPrompt = `Create an original ${pattern.category} design inspired by ${pattern.subCategory || 'modern'} aesthetics. Use a ${pattern.manifest?.mood || 'professional'} tone with balanced composition. Minimalist, unique, no logos or text. Original digital artwork.`;
+
         return {
           category: pattern.category,
           subCategory: pattern.subCategory,
@@ -362,7 +364,15 @@ export class DnaHuntOrchestrator {
           manifest: (enrichment as any).manifest || pattern.manifest,
           performanceScore: (enrichment as any).performanceScore || pattern.estimatedPerformance || 70,
           sourcePlatform: platform,
-          metadata: (enrichment as any).metadata || { tags: [pattern.subCategory, pattern.category], brandTrait: 'discovered' },
+          isSynthesized: true,
+          synthesisPrompt,
+          metadata: {
+            ...((enrichment as any).metadata || {}),
+            tags: [...((enrichment as any).metadata?.tags || [pattern.subCategory, pattern.category].filter(Boolean)), 'ai-synthesized'],
+            brandTrait: (enrichment as any).metadata?.brandTrait || 'synthesized',
+            originalityBadge: 'ai-synthesized',
+            synthesisDate: new Date().toISOString(),
+          },
         };
       } catch (e) {
         console.warn('[DnaHunt] AI extraction failed, using pattern data directly:', (e as Error).message);
@@ -376,7 +386,14 @@ export class DnaHuntOrchestrator {
       manifest: pattern.manifest || { description: pattern.description, platform },
       performanceScore: pattern.estimatedPerformance || 70,
       sourcePlatform: platform,
-      metadata: { tags: [pattern.subCategory, pattern.category].filter(Boolean), brandTrait: 'auto_discovered' },
+      isSynthesized: true,
+      synthesisPrompt: `Original ${pattern.category} design: ${pattern.subCategory || 'modern'} style synthesized from design intelligence`,
+      metadata: {
+        tags: [pattern.subCategory, pattern.category, 'ai-synthesized'].filter(Boolean),
+        brandTrait: 'auto_synthesized',
+        originalityBadge: 'ai-synthesized',
+        synthesisDate: new Date().toISOString(),
+      },
     };
   }
 

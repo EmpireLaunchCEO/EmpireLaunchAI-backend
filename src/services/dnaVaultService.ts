@@ -269,6 +269,8 @@ export class DnaVaultService {
       sourcePlatform: row.sourcePlatform || undefined,
       externalId: row.externalId || undefined,
       metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
+      isSynthesized: row.isSynthesized !== undefined ? !!row.isSynthesized : true,
+      synthesisPrompt: row.synthesisPrompt || undefined,
       createdAt: row.createdAt ? (row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)) : undefined,
     };
   }
