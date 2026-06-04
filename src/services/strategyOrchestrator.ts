@@ -5,6 +5,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { StringOutputParser } from "@langchain/core/output_parsers";
+import { resolveModelForUser, getDefaultModel } from '../utils/resolveModel.js';
 import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
 
@@ -22,11 +23,12 @@ export class StrategyOrchestrator {
   private model: ChatOpenAI;
 
   constructor() {
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.7,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
+    this.model = getDefaultModel();
+  }
+
+  /** Resolve a tier-appropriate model for the given user */
+  private async getModel(userId: string): Promise<BaseChatModel> {
+    return resolveModelForUser(userId);
   }
 
   async generateGrowthRoadmap(empireId: string) {
@@ -73,9 +75,10 @@ export class StrategyOrchestrator {
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
+    const activeModel = await this.getModel(goal.userId);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      activeModel,
       new StringOutputParser(),
     ]);
 

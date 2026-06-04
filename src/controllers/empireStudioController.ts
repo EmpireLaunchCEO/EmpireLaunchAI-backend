@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import { empireStudioService, StyleDNA } from '../services/empireStudioService.js';
+import { visualProxyService } from '../services/visualProxyService.js';
+import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 
 export class EmpireStudioController {
   /**
@@ -71,10 +73,14 @@ export class EmpireStudioController {
    */
   async getCampaignAssets(req: Request, res: Response) {
     const userId = (req as any).userId;
-    const { campaignId } = req.params;
+    const campaignId = req.params.campaignId;
+
+    if (typeof campaignId !== 'string') {
+      return res.status(400).json({ error: 'campaignId must be a string' });
+    }
 
     try {
-      const assets = await empireStudioService.getCampaignAssets(userId, campaignId as string);
+      const assets = await empireStudioService.getCampaignAssets(userId, campaignId);
       res.json(assets);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
@@ -103,10 +109,14 @@ export class EmpireStudioController {
    * Get a single asset by ID.
    */
   async getAssetById(req: Request, res: Response) {
-    const { assetId } = req.params;
+    const assetId = req.params.assetId;
+
+    if (typeof assetId !== 'string') {
+      return res.status(400).json({ error: 'assetId must be a string' });
+    }
 
     try {
-      const asset = await empireStudioService.getAssetById(assetId as string);
+      const asset = await empireStudioService.getAssetById(assetId);
       if (!asset) {
         res.status(404).json({ error: 'Asset not found' });
         return;
@@ -114,6 +124,64 @@ export class EmpireStudioController {
       res.json(asset);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
+    }
+  }
+
+  /**
+   * POST /api/studio/preview
+   * Generate a VisualSummary from DNA strand IDs or a raw manifest.
+   * This lets the frontend show design 'vibe' previews before the user hits create.
+   * 
+   * Body options:
+   * - { strandIds: string[] } — fetch strands from the Vault and summarize them
+   * - { manifest: object } — pass a raw DnaStrand manifest directly
+   * - { strandIds: string[], manifest: object } — combine both
+   */
+  async getPreview(req: Request, res: Response) {
+    const userId = (req as any).userId;
+    const { strandIds, manifest } = req.body;
+
+    if (!strandIds && !manifest) {
+      return res.status(400).json({
+        error: 'Provide either strandIds (string[]) or manifest (object) to generate a preview',
+      });
+    }
+
+    try {
+      let visualSummary;
+
+      if (Array.isArray(strandIds) && strandIds.length > 0) {
+        // Fetch strands from the Vault
+        const strands: DnaStrand[] = [];
+        for (const id of strandIds) {
+          const strand = await dnaVaultService.getStrand(id as string);
+          if (strand) strands.push(strand);
+        }
+
+        if (strands.length === 0) {
+          return res.status(404).json({ error: 'No strands found for the given IDs' });
+        }
+
+        visualSummary = await visualProxyService.summarizeMultiple(userId, strands);
+      } else if (manifest) {
+        // Create a stub DnaStrand from the raw manifest
+        const stubStrand: DnaStrand = {
+          category: manifest.category || 'layout',
+          subCategory: manifest.subCategory || 'custom',
+          manifest: manifest,
+          performanceScore: manifest.performanceScore || 50,
+          sourcePlatform: manifest.sourcePlatform || 'studio',
+          metadata: manifest.metadata || { tags: ['custom'], brandTrait: 'user_defined' },
+        };
+
+        visualSummary = await visualProxyService.summarizeStrand(userId, stubStrand);
+      }
+
+      res.json(visualSummary);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[EmpireStudioController] preview failed:', error);
       res.status(500).json({ error: msg });
     }
   }

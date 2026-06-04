@@ -8,6 +8,8 @@ export interface AutomationStep {
   selector?: string;
   value?: string;
   url?: string;
+  multiple?: boolean;
+  fields?: Record<string, string>;
 }
 
 export class NeuralBrowserService {

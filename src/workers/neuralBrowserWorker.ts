@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { redisConnection } from '../config/redis.js';
 import { neuralBrowserService } from '../services/neuralBrowserService.js';
+import { dnaHuntOrchestrator } from '../services/dnaHuntOrchestrator.js';
 import { webSocketService } from '../services/websocketService.js';
 import { notificationService } from '../services/notificationService.js';
 
@@ -8,7 +9,45 @@ export const startNeuralBrowserWorker = () => {
   const worker = new Worker(
     'neural-browser-tasks',
     async (job: Job) => {
-      const { userId, steps, taskTitle } = job.data;
+      const { userId, steps, taskTitle, jobType } = job.data;
+
+      // Handle DNA Hunt jobs (bridging onboarding → DNA Lab → Universal Vault)
+      if (job.data.jobType === 'dna-hunt-auto') {
+        const { huntId, platform, niche } = job.data;
+        console.log(`[NeuralBrowserWorker] 🧬 Processing DNA Hunt ${huntId} for user ${userId} on ${platform}`);
+
+        webSocketService.notifyUser(userId, 'automation-started', {
+          jobId: job.id,
+          taskTitle: `Automated DNA Hunt on ${platform}`,
+        });
+
+        try {
+          const result = await dnaHuntOrchestrator.executeHunt(huntId, userId, platform, niche);
+
+          webSocketService.notifyUser(userId, 'automation-completed', {
+            jobId: job.id,
+            status: 'success',
+            strandsStored: result.strandsStored,
+          });
+
+          await notificationService.notifyUser(
+            userId,
+            `🧬 DNA Hunt complete! ${result.strandsStored} new Style DNA strands from ${platform} are now in the Universal Vault.`,
+            false
+          );
+
+          return { status: 'success', result };
+        } catch (error: any) {
+          console.error(`[NeuralBrowserWorker] DNA Hunt ${huntId} failed:`, error);
+          webSocketService.notifyUser(userId, 'automation-failed', {
+            jobId: job.id,
+            error: error.message,
+          });
+          throw error;
+        }
+      }
+
+      // Standard browser automation handling
       console.log(`[NeuralBrowserWorker] Processing job ${job.id} for user ${userId}: ${taskTitle}`);
 
       // Notify user via WebSocket

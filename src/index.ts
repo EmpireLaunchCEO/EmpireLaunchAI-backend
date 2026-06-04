@@ -25,12 +25,15 @@ import paypalRoutes from './routes/paypalRoutes.js';
 import pushRoutes from './routes/pushRoutes.js';
 import empireStudioRoutes from './routes/empireStudioRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
+import vaultRoutes from './routes/vaultRoutes.js';
+import verificationRoutes from './routes/verificationRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
 import { onboardingWorker } from './workers/onboardingWorker.js';
 import { startNeuralBrowserWorker } from './workers/neuralBrowserWorker.js';
 import { startDistributionWorker } from './workers/distributionWorker.js';
+import { startDnaLabWorker } from './workers/dnaLabWorker.js';
 import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
@@ -52,6 +55,7 @@ if (process.env.NODE_ENV !== 'production') {
   startAIWorker();
   startNeuralBrowserWorker();
   startDistributionWorker();
+  startDnaLabWorker();
   
   // Note: onboardingWorker starts automatically upon import
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
@@ -91,6 +95,8 @@ app.use('/api/paypal', paypalRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/studio', empireStudioRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/vault', vaultRoutes);
+app.use('/api/verification', verificationRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });

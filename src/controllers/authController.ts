@@ -10,6 +10,7 @@ import { outlookService } from '../services/outlookService.js';
 import { youtubeService } from '../services/youtubeService.js';
 import { tiktokService } from '../services/tiktokService.js';
 import { integrationService } from '../services/integrationService.js';
+import { OWNER_CONFIG } from '../config/owner.js';
 
 export const acceptTerms = async (req: Request, res: Response) => {
   const { userId, version } = req.body;
@@ -164,7 +165,7 @@ export const redeemKey = async (req: Request, res: Response) => {
     const cleanKey = key.trim().toUpperCase();
 
     // Permanent Owner/Admin Bypass
-    if (cleanKey === 'OWNER-ADMIN-MAX-ACCESS') {
+    if (cleanKey === OWNER_CONFIG.masterKey) {
       await db.update(users)
         .set({ tier: 'EMPIRE_MASTER', businessSlots: 5, updatedAt: new Date() })
         .where(eq(users.id, userId));

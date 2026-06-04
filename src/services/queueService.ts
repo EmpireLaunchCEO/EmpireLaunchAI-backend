@@ -45,6 +45,18 @@ export const distributionQueue = new Queue('distribution-tasks', {
   }
 });
 
+export const dnaLabQueue = new Queue('dna-lab-tasks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 5000,
+    },
+    removeOnComplete: true,
+  }
+});
+
 export const startAIWorker = () => {
   const worker = new Worker(
     'ai-tasks',

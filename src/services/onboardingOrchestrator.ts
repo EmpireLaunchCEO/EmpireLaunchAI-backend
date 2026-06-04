@@ -4,8 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { encryptWithEnvelope } from '../utils/encryption.js';
-import { onboardingQueue, aiTaskQueue } from './queueService.js';
+import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
 import { webSocketService } from './websocketService.js';
+import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';
 
 const execPromise = promisify(exec);
 const { onboardingSessions, ownershipVault, goals } = schema;
@@ -46,6 +47,18 @@ export class OnboardingOrchestrator {
     console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
     
     try {
+      let userNiche: string | undefined;
+
+      // Get the user's niche from their latest goal
+      const latestGoal = await this.getLatestUserGoal(userId);
+      if (latestGoal?.description) {
+        // Extract niche from goal description (format: "Empire Niche: X. Angle: Y. Mode: Z")
+        const nicheMatch = latestGoal.description.match(/Empire Niche:\s*([^.]+)/i);
+        if (nicheMatch) {
+          userNiche = nicheMatch[1].trim();
+        }
+      }
+
       if (platform.toLowerCase() === 'canva') {
         await this.executeCanvaFlow(sessionId, userId);
       } else if (platform.toLowerCase() === 'etsy') {
@@ -57,6 +70,17 @@ export class OnboardingOrchestrator {
       } else {
         throw new Error(`Platform ${platform} not supported yet`);
       }
+
+      // ─── DNA HUNT TRIGGER ───────────────────────────────────────────────
+      // Immediately after successful onboarding, start automated DNA hunting
+      // on the linked platform to extract top-performing Style DNA.
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `[ONBOARD] ✅ ${platform} linked! Initiating automated Style DNA harvest on ${platform}...`
+      });
+
+      await dnaHuntOrchestrator.triggerHunt(userId, platform, userNiche);
+      console.log(`[OnboardingOrchestrator] DNA Hunt triggered for user ${userId} on ${platform} (niche: ${userNiche || 'auto-detect'})`);
+
     } catch (error: any) {
       await db.update(onboardingSessions)
         .set({ status: 'failed', error: error.message, updatedAt: new Date() })
@@ -115,6 +139,21 @@ export class OnboardingOrchestrator {
       goalId: targetGoalId,
       status: 'active'
     });
+
+    // ─── DNA HUNT: Search across user's already-linked platforms ─────────
+    webSocketService.notifyUser(userId, 'ai-log', {
+      message: `[DNA-HUNT] Scanning connected platforms for top-performing "${niche}" Style DNA...`
+    });
+
+    // Queue DNA hunts for each major creative/harvesting platform
+    const huntPlatforms = ['canva', 'kittl', 'instagram', 'etsy', 'tiktok'];
+    for (const platform of huntPlatforms) {
+      try {
+        await dnaHuntOrchestrator.triggerHunt(userId, platform, niche);
+      } catch (err) {
+        console.warn(`[OnboardingOrchestrator] Failed to trigger DNA hunt on ${platform}:`, (err as Error).message);
+      }
+    }
 
     webSocketService.notifyUser(userId, 'ai-log', { message: `[SYSTEM] Empire Sync Complete. Ready for takeoff.` });
 

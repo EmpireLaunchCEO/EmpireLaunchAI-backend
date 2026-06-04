@@ -3,6 +3,7 @@ import { Expo } from 'expo-server-sdk';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { OWNER_CONFIG } from '../config/owner.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,10 +11,10 @@ dotenv.config();
 const { pushSubscriptions } = schema;
 const expo = new Expo();
 
-// Configure VAPID keys
+// Configure VAPID keys — uses owner email for web push subject
 if (process.env.WEB_PUSH_PUBLIC_KEY && process.env.WEB_PUSH_PRIVATE_KEY) {
   webpush.setVapidDetails(
-    process.env.WEB_PUSH_SUBJECT || 'mailto:admin@empirelaunch.ai',
+    process.env.WEB_PUSH_SUBJECT || `mailto:${OWNER_CONFIG.email}`,
     process.env.WEB_PUSH_PUBLIC_KEY,
     process.env.WEB_PUSH_PRIVATE_KEY
   );

@@ -23,6 +23,7 @@ import { webSocketService } from "../services/websocketService.js";
 import { originalityService } from "../services/originalityService.js";
 import { assetService } from "../services/assetService.js";
 import { hunterGathererService } from "../services/hunterGathererService.js";
+import { resolveModelForUser } from "../utils/resolveModel.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -32,6 +33,18 @@ const model = new ChatOpenAI({
   temperature: 0,
   openAIApiKey: process.env.OPENAI_API_KEY,
 });
+
+/** Resolve a tier-appropriate model for the given user */
+function getModelForTier(tier: string): ChatOpenAI {
+  if (tier === 'EMPIRE_MASTER') {
+    return new ChatOpenAI({
+      modelName: "gpt-4o",
+      temperature: 0,
+      openAIApiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+  return model; // default is already gpt-4o for the orchestrator, but STANDARD uses same
+}
 
 const AVAILABLE_CAPABILITIES = [
   "Research trends", 
@@ -77,12 +90,12 @@ const OrchestratorState = Annotation.Root({
 
 // Define the nodes
 const planNode = async (state: typeof OrchestratorState.State) => {
-  console.log("Planning dynamically...");
-  webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Planning dynamic strategy..." });
+  console.log(`[Orchestrator/Plan] Starting dynamic planning phase. User goal detected. Available capabilities: ${AVAILABLE_CAPABILITIES.length}. User ID: ${state.userId}`);
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: `[PLANNER] Analyzing goal "${(state.messages[state.messages.length-1]?.content as string)?.substring(0,60) || state.context.goal}" — running LLM-based capability selection...` });
   
   if (!process.env.OPENAI_API_KEY) {
-    console.warn("OPENAI_API_KEY missing, using fallback static plan.");
-    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Using safe fallback plan (OpenAI Key missing)." });
+    console.warn("[Orchestrator/Plan] OPENAI_API_KEY missing, using static fallback plan.");
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "[PLANNER] OpenAI key not configured. Using safe static plan (no AI capability matching)." });
     return {
       plan: [
         "Research trends", 
@@ -97,6 +110,14 @@ const planNode = async (state: typeof OrchestratorState.State) => {
   }
 
   const goal = state.context.goal || (state.messages.length > 0 ? state.messages[state.messages.length - 1].content.toString() : "Build a business");
+  
+  // Resolve tier-appropriate model for this user
+  const userTier = state.context._tier || 'STANDARD_USER';
+  const activeModel = userTier === 'EMPIRE_MASTER' ? model : new ChatOpenAI({
+    modelName: "gpt-4o-mini",
+    temperature: 0.3,
+    openAIApiKey: process.env.OPENAI_API_KEY,
+  });
   
   const template = `
     You are the Lead Strategist Agent for Bizrunner.
@@ -128,7 +149,7 @@ const planNode = async (state: typeof OrchestratorState.State) => {
   const prompt = PromptTemplate.fromTemplate(template);
   const chain = RunnableSequence.from([
     prompt,
-    model,
+    activeModel,
     new JsonOutputParser(),
   ]);
 
@@ -147,16 +168,24 @@ const planNode = async (state: typeof OrchestratorState.State) => {
 };
 
 const criticNode = async (state: typeof OrchestratorState.State) => {
-  console.log("Critiquing plan...");
-  webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Critiquing proposed plan for logical consistency..." });
+  console.log(`[Orchestrator/Critic] Evaluating ${state.plan.length}-step plan (iteration ${state.iterations + 1}) for logical consistency, ordering, and completeness...`);
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: `[CRITIC] Plan steps: ${state.plan.join(' → ')}. Checking execution ordering for logical validity...` });
   
   if (!process.env.OPENAI_API_KEY || state.iterations > 3) {
-    console.log("Bypassing critic.");
-    webSocketService.notifyUser(state.userId, 'ai-log', { message: "Orchestrator: Bypassing critic (Limit reached or Key missing)." });
+    console.log(`[Orchestrator/Critic] Bypassing. Reason: ${!process.env.OPENAI_API_KEY ? 'No API Key' : 'Max iterations (3) reached'}. Plan has ${state.plan.length} steps.`);
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: `[CRITIC] Bypassed (${!process.env.OPENAI_API_KEY ? 'No AI' : 'Reached limit'}). Proceeding to execute ${state.plan.length} steps.` });
     return { nextStep: "execute" };
   }
 
   const goal = state.context.goal || "Build a business";
+  
+  // Resolve tier-appropriate model for this user (critic uses same logic)
+  const criticTier = state.context._tier || 'STANDARD_USER';
+  const criticModel = criticTier === 'EMPIRE_MASTER' ? model : new ChatOpenAI({
+    modelName: "gpt-4o-mini",
+    temperature: 0.3,
+    openAIApiKey: process.env.OPENAI_API_KEY,
+  });
   
   const template = `
     You are the Strategic Critic for Bizrunner.
@@ -185,7 +214,7 @@ const criticNode = async (state: typeof OrchestratorState.State) => {
   const prompt = PromptTemplate.fromTemplate(template);
   const chain = RunnableSequence.from([
     prompt,
-    model,
+    criticModel,
     new JsonOutputParser(),
   ]);
 
@@ -203,14 +232,16 @@ const criticNode = async (state: typeof OrchestratorState.State) => {
 };
 
 const executeNode = async (state: typeof OrchestratorState.State) => {
-  console.log("Executing...");
   if (state.plan.length === 0) {
+    console.log("[Orchestrator/Execute] Plan empty — no more steps to execute. Ending.");
     return { nextStep: "end" };
   }
 
   const currentTask = state.plan[0];
-  console.log(`Executing task: ${currentTask}`);
-  webSocketService.notifyUser(state.userId, 'ai-log', { message: `Orchestrator: Executing task - ${currentTask}...` });
+  const totalSteps = state.plan.length;
+  const completedSteps = state.context._completedSteps || 0;
+  console.log(`[Orchestrator/Execute] Step ${completedSteps + 1}/${completedSteps + totalSteps}: "${currentTask}" starting...`);
+  webSocketService.notifyUser(state.userId, 'ai-log', { message: `[EXECUTOR] Step ${completedSteps + 1}/${completedSteps + totalSteps}: Initiating "${currentTask}"...` });
   
   let updatedContext = {};
 
@@ -357,7 +388,7 @@ const executeNode = async (state: typeof OrchestratorState.State) => {
   
   return {
     plan: remainingPlan,
-    context: updatedContext,
+    context: { ...updatedContext, _completedSteps: (state.context._completedSteps || 0) + 1 },
     nextStep: remainingPlan.length > 0 ? "execute" : "end",
   };
 };

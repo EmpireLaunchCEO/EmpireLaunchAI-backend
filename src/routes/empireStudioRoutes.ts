@@ -16,4 +16,7 @@ router.get('/assets', mobileAuth, empireStudioController.getUserAssets);
 // Get a single asset by ID
 router.get('/assets/:assetId', mobileAuth, empireStudioController.getAssetById);
 
+// Generate a VisualSummary preview from DNA strand IDs or raw manifest
+router.post('/preview', mobileAuth, empireStudioController.getPreview);
+
 export default router;

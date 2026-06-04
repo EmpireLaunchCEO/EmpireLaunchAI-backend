@@ -1,7 +1,8 @@
-import { ChatOpenAI } from "@langchain/openai";
+import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { StringOutputParser } from "@langchain/core/output_parsers";
+import { resolveModelForUser } from '../utils/resolveModel.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
@@ -12,14 +13,9 @@ dotenv.config();
 const { approvals } = schema;
 
 export class InboxAssistantService {
-  private model: ChatOpenAI;
-
-  constructor() {
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.7,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
+  /** Resolve a tier-appropriate model for the given user */
+  private async getModel(userId: string): Promise<BaseChatModel> {
+    return resolveModelForUser(userId);
   }
 
   async generateThankYouDraft(userId: string, customerName: string, itemName: string, platform: string) {
@@ -45,9 +41,10 @@ export class InboxAssistantService {
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
+    const activeModel = await this.getModel(userId);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      activeModel,
       new StringOutputParser(),
     ]);
 

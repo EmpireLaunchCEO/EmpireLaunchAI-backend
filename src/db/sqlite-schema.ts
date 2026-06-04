@@ -186,8 +186,9 @@ export const campaigns = sqliteTable('campaigns', {
   tone: text('tone').notNull(), // 'professional', 'playful', 'aggressive'
   frequency: text('frequency').notNull(), // 'daily', 'weekly', 'bi-weekly'
   status: text('status').default('active').notNull(), // 'active', 'paused', 'completed'
-  styleDna: text('style_dna', { mode: 'json' }), // colors, fonts, pacing, etc.
-  masterAssetUrl: text('master_asset_url'), // Link to the single video/image source
+  viralLinks: text('viral_links', { mode: 'json' }), // Array of URLs to harvest DNA from
+  styleDna: text('style_dna', { mode: 'json' }), // The generated/harvested DNA profile
+  masterAssetUrl: text('master_asset_url'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -261,27 +262,6 @@ export const paymentButtons = sqliteTable('payment_buttons', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
-export const userSettings = sqliteTable('user_settings', {
-  id: text('id').primaryKey(),
-  userId: text('user_id').references(() => users.id).notNull().unique(),
-  businessAngle: text('business_angle'),
-  businessNiche: text('business_niche'),
-  platformPermissions: text('platform_permissions', { mode: 'json' }),
-  connectedPlatforms: text('connected_platforms', { mode: 'json' }),
-  theme: text('theme').default('light'),
-  language: text('language').default('en'),
-  currency: text('currency').default('USD'),
-  aiMode: text('ai_mode').default('co-pilot'),
-  autoSendRetention: integer('auto_send_retention', { mode: 'boolean' }).default(false),
-  notificationSettings: text('notification_settings', { mode: 'json' }),
-  onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false),
-  linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false),
-  notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false),
-  protocolAccepted: integer('protocol_accepted', { mode: 'boolean' }).default(false),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
-
 export const reviews = sqliteTable('reviews', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),
@@ -311,5 +291,47 @@ export const pushSubscriptions = sqliteTable('push_subscriptions', {
   authKey: text('auth_key'),
   p256dhKey: text('p256dh_key'),
   platform: text('platform'), // 'iOS', 'Android', 'Desktop'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const handleVerifications = sqliteTable('handle_verifications', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(), // 'tiktok', 'instagram'
+  handle: text('handle').notNull(),
+  hash: text('hash').notNull(),
+  status: text('status').default('pending').notNull(), // 'pending', 'verified', 'failed'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const styleDna = sqliteTable('style_dna', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  styleDnaProfile: text('style_dna_profile', { mode: 'json' }).notNull(),
+  isApproved: integer('is_approved', { mode: 'boolean' }).default(false).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const nicheDnaRepository = sqliteTable('niche_dna_repository', {
+  id: text('id').primaryKey(),
+  niche: text('niche').notNull().unique(),
+  dnaElements: text('dna_elements', { mode: 'json' }).notNull(),
+  marketGaps: text('market_gaps', { mode: 'json' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const dnaStrands = sqliteTable('dna_strands', {
+  id: text('id').primaryKey(),
+  category: text('category').notNull(),
+  subCategory: text('sub_category'),
+  embedding: text('embedding'), // JSON string of float array
+  manifest: text('manifest').notNull(), // Logic Manifest JSON
+  performanceScore: integer('performance_score').notNull(),
+  sourcePlatform: text('source_platform'),
+  externalId: text('external_id'),
+  metadata: text('metadata'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });

@@ -1,7 +1,9 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
-import { StringOutputParser } from "@langchain/core/output_parsers";
+import { StringOutputParser, JsonOutputParser } from "@langchain/core/output_parsers";
+import { resolveModelForUser, resolveStudioReasoner, getDefaultModel } from "../utils/resolveModel.js";
+import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -12,24 +14,15 @@ export interface ScriptingContext {
   userGoal: string;
   productName?: string;
   tone?: string;
+  userId?: string;
 }
 
 export class AIScriptingService {
-  private model: ChatOpenAI;
-
-  constructor() {
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.7,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
-  }
-
+  /**
+   * Generates a professional email draft for customer support.
+   */
   async generateEmailDraft(context: ScriptingContext): Promise<string> {
-    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key') {
-      console.warn("OPENAI_API_KEY is missing or invalid. Returning mock email draft.");
-      return `Subject: Re: ${context.customerInquiry.substring(0, 20)}...\n\nHi there,\n\nThank you for reaching out regarding ${context.productName || 'our products'}. As a ${context.businessNiche} business, we aim to ${context.userGoal}.\n\nBest regards,\nBizrunner AI`;
-    }
+    const model = context.userId ? await resolveModelForUser(context.userId) : getDefaultModel();
 
     const template = `
       You are an expert Customer Success Agent for a {businessNiche} business.
@@ -55,32 +48,31 @@ export class AIScriptingService {
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      model,
       new StringOutputParser(),
     ]);
 
-    const result = await chain.invoke({
+    return await chain.invoke({
       businessNiche: context.businessNiche,
       userGoal: context.userGoal,
       productName: context.productName || "our latest offering",
       tone: context.tone || "professional and friendly",
       customerInquiry: context.customerInquiry,
     });
-
-    return result;
   }
 
+  /**
+   * Creates a comprehensive Design Blueprint using High-Intelligence reasoning.
+   * Uses Gemini 3 Flash logic for problem solving.
+   */
   async generateDesignBlueprint(context: ScriptingContext): Promise<string> {
-    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key') {
-      console.warn("OPENAI_API_KEY is missing or invalid. Returning mock blueprint.");
-      return `### Design Blueprint for ${context.productName}\n\n1. Use a minimalist layout.\n2. Choose primary colors from ${context.businessNiche} palette.\n3. Ensure text is readable.`;
-    }
+    const model = await resolveStudioReasoner();
 
     const template = `
-      You are a High-Intelligence Design Architect specializing in digital products for {businessNiche}.
-      Your task is to create a comprehensive Design Blueprint for a product called "{productName}".
+      You are the Empire Studio Intelligence Layer (High-Reasoning Designer).
+      Task: Create a comprehensive Design Blueprint for a product called "{productName}" in the {businessNiche} niche.
       
-      Target Audience: {customerInquiry}
+      Target Audience Context: {customerInquiry}
       Specific Goal: {userGoal}
       
       Provide a structured blueprint including:
@@ -90,13 +82,13 @@ export class AIScriptingService {
       4. Anti-Copycat Modifications (Specific ways to make this design technically unique from best-sellers)
       5. Step-by-Step Execution Plan (prioritizing free-tier tools and assets)
       
-      Be extremely analytical and precise. Use "Intellect Layer" thinking to find unique angles that boost sales traction.
+      Analyze the problem step-by-step. Use your high-intelligence reasoning to find unique market gaps.
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      model,
       new StringOutputParser(),
     ]);
 
@@ -108,53 +100,38 @@ export class AIScriptingService {
     });
   }
 
+  /**
+   * Generates high-converting marketplace SEO data.
+   */
   async generateListingSEO(niche: string, bestSellers: any[]): Promise<any> {
-    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key') {
-      return {
-        title: `Premium ${niche} Digital Product`,
-        description: `This high-quality ${niche} product is designed for success.`,
-        tags: [niche, 'digital', 'quality'],
-        price: 999
-      };
-    }
+    const model = await resolveStudioReasoner();
 
     const template = `
-      You are an expert Marketplace SEO Specialist. 
+      You are an expert Marketplace SEO Specialist powered by Empire Studio Intelligence.
       Analyze the following best-selling products in the {niche} niche:
       {bestSellersData}
       
-      Generate a set of SEO-optimized listing data for a "similar but unique" product:
-      1. A high-traction Title (max 140 chars)
-      2. An engaging Description focusing on benefits
-      3. 13 relevant Tags for marketplace search
-      4. A suggested Price in cents (integer)
+      Generate optimized listing data for a "similar but unique" product that avoids copyright issues and copycatting.
       
-      Return as a JSON object with keys: title, description, tags, price.
+      Return JSON:
+      - title: high-traction Title (max 140 chars)
+      - description: engaging Description focusing on benefits
+      - tags: string[] (exactly 13 relevant tags)
+      - price: suggested price in cents (integer)
+      - competitiveEdge: 1 sentence explaining why this listing will beat the competition
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
-      new StringOutputParser(),
+      model,
+      new JsonOutputParser(),
     ]);
 
-    const result = await chain.invoke({
+    return await chain.invoke({
       niche,
       bestSellersData: JSON.stringify(bestSellers.map(b => ({ title: b.title, description: b.description }))),
     });
-
-    try {
-      return JSON.parse(result);
-    } catch (e) {
-      // Fallback if AI didn't return perfect JSON
-      return {
-        title: result.substring(0, 140),
-        description: result,
-        tags: [niche],
-        price: 1500
-      };
-    }
   }
 }
 

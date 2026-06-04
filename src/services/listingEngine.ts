@@ -5,6 +5,7 @@ const { products, approvals, tasks } = schema;
 import { v4 as uuidv4 } from 'uuid';
 import { integrationService } from './integrationService.js';
 import { hunterGathererService } from './hunterGathererService.js';
+import { eq } from 'drizzle-orm';
 
 export class ListingEngine {
   async researchAndDraft(userId: string, goalId: string, niche: string) {
@@ -148,5 +149,4 @@ export class ListingEngine {
   }
 }
 
-import { eq } from 'drizzle-orm';
 export const listingEngine = new ListingEngine();

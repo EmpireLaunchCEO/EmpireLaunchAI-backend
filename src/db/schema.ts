@@ -266,3 +266,32 @@ export const pushSubscriptions = pgTable('push_subscriptions', {
   platform: text('platform'), // 'iOS', 'Android', 'Desktop'
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const handleVerifications = pgTable('handle_verifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(), // 'tiktok', 'instagram'
+  handle: text('handle').notNull(),
+  hash: text('hash').notNull(),
+  status: text('status').default('pending').notNull(), // 'pending', 'verified', 'failed'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const styleDna = pgTable('style_dna', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  styleDnaProfile: jsonb('style_dna_profile').notNull(),
+  isApproved: boolean('is_approved').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const nicheDnaRepository = pgTable('niche_dna_repository', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  niche: text('niche').notNull().unique(),
+  dnaElements: jsonb('dna_elements').notNull(),
+  marketGaps: jsonb('market_gaps').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
