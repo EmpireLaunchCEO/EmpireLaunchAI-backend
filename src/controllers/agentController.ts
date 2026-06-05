@@ -15,6 +15,20 @@ export const initializeAgent = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: userId, name, niche' });
     }
 
+    // 0. Ensure user exists (Upsert logic for onboarding)
+    const [existingUser] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!existingUser) {
+      await db.insert(users).values({
+        id: userId,
+        email: 'stacipeabody@gmail.com', // Default for onboarding
+        termsAcceptedVersion: 1,
+        businessSlots: 3,
+        tier: 'BETA_TESTER',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    }
+
     // Security check: Fraud Sentinel
     const isSuspicious = await fraudSentinel.scanForAbuse(userId, { name, niche, angle });
     if (isSuspicious) {
