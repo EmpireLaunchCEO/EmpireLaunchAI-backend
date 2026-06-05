@@ -26,7 +26,7 @@ if (isRedisDisabled) {
     redisConnection = new Redis(redisUrl, {
       maxRetriesPerRequest: null,
       lazyConnect: true,
-      enableOfflineQueue: false,
+      enableOfflineQueue: true,
       connectTimeout: 5000,
       retryStrategy: (times: number) => {
         if (times > 3) {
