@@ -2,8 +2,35 @@ import { Request, Response } from 'express';
 import { empireStudioService, StyleDNA } from '../services/empireStudioService.js';
 import { visualProxyService } from '../services/visualProxyService.js';
 import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
+import { cinemaEngineService } from '../services/cinemaEngineService.js';
 
 export class EmpireStudioController {
+  /**
+   * POST /api/studio/cinema/twin
+   * Create a Neural Twin video from a photo and script.
+   */
+  async createNeuralTwin(req: Request, res: Response) {
+    const userId = (req as any).userId;
+    const { photoUrl, script, voiceId } = req.body;
+
+    if (!photoUrl || !script) {
+      return res.status(400).json({ error: 'photoUrl and script are required' });
+    }
+
+    try {
+      const asset = await cinemaEngineService.createNeuralTwin({
+        userId,
+        photoUrl,
+        script,
+        voiceId
+      });
+      res.json(asset);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
+    }
+  }
+
   /**
    * POST /api/studio/create
    * Create a master asset and distribute to selected platforms.

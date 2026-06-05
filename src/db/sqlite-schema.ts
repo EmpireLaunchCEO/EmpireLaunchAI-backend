@@ -315,6 +315,16 @@ export const styleDna = sqliteTable('style_dna', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
+export const empireHealthLogs = sqliteTable('empire_health_logs', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  revenueVelocity: integer('revenue_velocity').notNull(),
+  engagementPulse: integer('engagement_pulse').notNull(),
+  operationalConsistency: integer('operational_consistency').notNull(),
+  overallScore: integer('overall_score').notNull(),
+  timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
+});
+
 export const nicheDnaRepository = sqliteTable('niche_dna_repository', {
   id: text('id').primaryKey(),
   niche: text('niche').notNull().unique(),

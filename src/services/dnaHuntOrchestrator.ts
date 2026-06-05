@@ -46,6 +46,13 @@ export class DnaHuntOrchestrator {
       message: `[DNA-HUNT] Initializing automated Style DNA hunt on ${platform}${niche ? ` for "${niche}"` : ''}...`
     });
 
+    // Special handling for Design Systems
+    if (platform === 'canva' || platform === 'bannerbear') {
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `🎨 [DNA-HUNT] Harvesting layout blueprints and design systems from ${platform.toUpperCase()}...`
+      });
+    }
+
     // Queue the hunt as a background job to avoid blocking onboarding
     await neuralBrowserQueue.add('dna-hunt-auto', {
       huntId,
@@ -193,6 +200,7 @@ export class DnaHuntOrchestrator {
           - Avatar styles (character designs, illustrated personas, faceless avatars)
           - Animal illustrations (pet portraits, wildlife art, mascots)
           - Background textures (gradients, organic textures, studio backdrops)
+          - Layout Blueprints (especially from Canva and Bannerbear design systems)
           
           For each pattern, return:
           - title: string (descriptive name of the pattern)

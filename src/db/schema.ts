@@ -288,6 +288,16 @@ export const styleDna = pgTable('style_dna', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const empireHealthLogs = pgTable('empire_health_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  revenueVelocity: integer('revenue_velocity').notNull(),
+  engagementPulse: integer('engagement_pulse').notNull(),
+  operationalConsistency: integer('operational_consistency').notNull(),
+  overallScore: integer('overall_score').notNull(),
+  timestamp: timestamp('timestamp').defaultNow().notNull(),
+});
+
 export const nicheDnaRepository = pgTable('niche_dna_repository', {
   id: uuid('id').primaryKey().defaultRandom(),
   niche: text('niche').notNull().unique(),

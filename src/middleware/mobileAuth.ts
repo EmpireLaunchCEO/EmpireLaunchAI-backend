@@ -13,11 +13,18 @@ export const mobileAuth = (req: Request, res: Response, next: NextFunction) => {
 
   const token = authHeader.split(' ')[1];
 
+  // Beta User ID for testing
+  const BETA_USER_ID = '00000000-0000-0000-0000-000000000000';
+
   // Mock verification logic
-  // In a real app: const decoded = jwt.verify(token, process.env.JWT_SECRET);
   if (token === 'mock-mobile-token' || token.length > 10) {
-    // Inject mock user info if needed
-    // req.user = { id: 'user-123' };
+    // Inject user info into request object for controllers
+    const userIdFromHeader = req.headers['x-user-id'] as string;
+    const finalUserId = userIdFromHeader || BETA_USER_ID;
+
+    (req as any).userId = finalUserId;
+    (req as any).user = { id: finalUserId };
+    
     return next();
   }
 

@@ -8,6 +8,9 @@ const router = Router();
 // Create master asset and distribute to platforms
 router.post('/create', mobileAuth, empireStudioController.create);
 
+// Cinema Engine: Create Neural Twin
+router.post('/cinema/twin', mobileAuth, empireStudioController.createNeuralTwin);
+
 // Get assets for a specific campaign
 router.get('/assets/campaign/:campaignId', mobileAuth, empireStudioController.getCampaignAssets);
 
