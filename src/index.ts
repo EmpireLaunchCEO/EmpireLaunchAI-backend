@@ -59,11 +59,11 @@ if (process.env.NODE_ENV !== 'production') {
   
   // Note: onboardingWorker starts automatically upon import
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
-
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
-  });
 }
+
+httpServer.listen(port, '0.0.0.0', () => {
+  console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
+});
 
 app.use((helmet as any)({
   contentSecurityPolicy: false, // For easier testing with external assets/dashboard
