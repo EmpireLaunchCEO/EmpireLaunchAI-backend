@@ -19,7 +19,8 @@ if (isRedisDisabled) {
   redisConnection = new Redis(redisUrl, {
     maxRetriesPerRequest: null,
     lazyConnect: true,
-    enableOfflineQueue: false,
+    enableOfflineQueue: true, // Re-enable this to prevent "Stream not writable" errors during init
+    connectTimeout: 10000
   });
   redisConnection.on('error', (err: any) => {
     console.error('Redis Connection Error:', err);
