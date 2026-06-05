@@ -40,7 +40,15 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
 // Alias for frontend compatibility
 router.get('/empire/:id', mobileAuth, async (req, res) => {
   try {
-    const [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, req.params.id)).limit(1);
+    let goalId = req.params.id;
+    
+    let [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+    
+    // If not found and ID is '1' (default), try to get the latest goal
+    if (!goal && goalId === '1') {
+      [goal] = await db.select().from(schema.goals).orderBy(desc(schema.goals.createdAt)).limit(1);
+    }
+    
     if (!goal) return res.status(404).json({ error: 'Empire not found' });
     res.json(goal);
   } catch (error: any) {
