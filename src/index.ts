@@ -38,11 +38,26 @@ import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
 
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { db } from './db/index.js';
+
 dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
 const port = parseInt(process.env.PORT || '3000', 10);
+
+// Auto-run migrations in production if flagged
+if (process.env.RUN_MIGRATIONS === 'true') {
+  console.log('[Database] Running migrations...');
+  try {
+    // Note: This assumes migrations are in the /drizzle folder
+    await migrate(db, { migrationsFolder: './drizzle' });
+    console.log('[Database] Migrations complete.');
+  } catch (err) {
+    console.error('[Database] Migration failed:', err);
+  }
+}
 
 // Initialize WebSocket Service
 webSocketService.init(httpServer);
