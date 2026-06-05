@@ -51,8 +51,10 @@ const port = parseInt(process.env.PORT || '3000', 10);
 if (process.env.RUN_MIGRATIONS === 'true') {
   console.log('[Database] Running migrations...');
   try {
-    // Note: This assumes migrations are in the /drizzle folder
-    await migrate(db, { migrationsFolder: './drizzle' });
+    const isSqlite = process.env.DATABASE_URL?.startsWith('file:') || process.env.DATABASE_URL?.startsWith('libsql:');
+    const folder = isSqlite ? './drizzle' : './drizzle-pg';
+    console.log(`[Database] Using migration folder: ${folder}`);
+    await migrate(db, { migrationsFolder: folder });
     console.log('[Database] Migrations complete.');
   } catch (err) {
     console.error('[Database] Migration failed:', err);
