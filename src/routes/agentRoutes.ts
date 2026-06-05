@@ -36,6 +36,17 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Alias for frontend compatibility
+router.get('/empire/:id', mobileAuth, async (req, res) => {
+  try {
+    const [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, req.params.id)).limit(1);
+    if (!goal) return res.status(404).json({ error: 'Empire not found' });
+    res.json(goal);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 router.post('/start', mobileAuth, startAgent);
 router.post('/goal', mobileAuth, createGoal);
 router.post('/goal/abandon', mobileAuth, abandonGoal);
