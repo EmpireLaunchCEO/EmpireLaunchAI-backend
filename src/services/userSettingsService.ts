@@ -97,6 +97,7 @@ export class UserSettingsService {
         linkingComplete: dto.linkingComplete ?? false,
         notificationModalDismissed: dto.notificationModalDismissed ?? false,
         protocolAccepted: dto.protocolAccepted ?? false,
+        isPaid: dto.isPaid ?? false,
         createdAt: now,
         updatedAt: now,
       };
@@ -123,6 +124,9 @@ export class UserSettingsService {
     }
     if (dto.protocolAccepted !== undefined) {
       updateData.protocolAccepted = dto.protocolAccepted;
+    }
+    if (dto.isPaid !== undefined) {
+      updateData.isPaid = dto.isPaid;
     }
 
     await db.update(schema.userSettings)
@@ -182,7 +186,14 @@ export class UserSettingsService {
    */
   async hydrateOnLogin(userId: string): Promise<UserSettingsDTO> {
     const settings = await this.getSettings(userId);
-    return { ...this.getDefaults(), ...settings };
+    const hydrated = { ...this.getDefaults(), ...settings };
+    
+    // Master Bypass: Force isPaid for the owner/admin user ID
+    if (userId === '00000000-0000-0000-0000-000000000000') {
+      hydrated.isPaid = true;
+    }
+    
+    return hydrated;
   }
 
   // ─── PRIVATE HELPERS ──────────────────────────────────────────────────
@@ -193,7 +204,7 @@ export class UserSettingsService {
       businessNiche: row.businessNiche ?? undefined,
       isOnboarded: row.onboardingComplete ?? false,
       isLinkingComplete: row.linkingComplete ?? false,
-      isPaid: false, // derived from payment system, not stored in settings
+      isPaid: row.isPaid ?? false,
       onboardingComplete: row.onboardingComplete ?? false,
       linkingComplete: row.linkingComplete ?? false,
       notificationModalDismissed: row.notificationModalDismissed ?? false,

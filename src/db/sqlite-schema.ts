@@ -345,3 +345,25 @@ export const dnaStrands = sqliteTable('dna_strands', {
   metadata: text('metadata'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const userSettings = sqliteTable('user_settings', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull().unique(),
+  businessAngle: text('business_angle'),
+  businessNiche: text('business_niche'),
+  theme: text('theme').default('light').notNull(),
+  language: text('language').default('en').notNull(),
+  currency: text('currency').default('USD').notNull(),
+  aiMode: text('ai_mode').default('co-pilot').notNull(),
+  autoSendRetention: integer('auto_send_retention', { mode: 'boolean' }).default(false).notNull(),
+  onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false).notNull(),
+  linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false).notNull(),
+  notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false).notNull(),
+  platformPermissions: text('platform_permissions', { mode: 'json' }),
+  connectedPlatforms: text('connected_platforms', { mode: 'json' }),
+  notificationSettings: text('notification_settings', { mode: 'json' }),
+  protocolAccepted: integer('protocol_accepted', { mode: 'boolean' }).default(false).notNull(),
+  isPaid: integer('is_paid', { mode: 'boolean' }).default(false).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});

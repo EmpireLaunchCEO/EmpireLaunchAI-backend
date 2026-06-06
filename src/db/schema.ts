@@ -305,3 +305,25 @@ export const nicheDnaRepository = pgTable('niche_dna_repository', {
   marketGaps: jsonb('market_gaps').notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+export const userSettings = pgTable('user_settings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull().unique(),
+  businessAngle: text('business_angle'),
+  businessNiche: text('business_niche'),
+  theme: text('theme').default('light').notNull(),
+  language: text('language').default('en').notNull(),
+  currency: text('currency').default('USD').notNull(),
+  aiMode: text('ai_mode').default('co-pilot').notNull(),
+  autoSendRetention: boolean('auto_send_retention').default(false).notNull(),
+  onboardingComplete: boolean('onboarding_complete').default(false).notNull(),
+  linkingComplete: boolean('linking_complete').default(false).notNull(),
+  notificationModalDismissed: boolean('notification_modal_dismissed').default(false).notNull(),
+  platformPermissions: jsonb('platform_permissions'),
+  connectedPlatforms: jsonb('connected_platforms'),
+  notificationSettings: jsonb('notification_settings'),
+  protocolAccepted: boolean('protocol_accepted').default(false).notNull(),
+  isPaid: boolean('is_paid').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
