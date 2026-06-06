@@ -72,9 +72,9 @@ export const getEmpirePulse = async (req: Request, res: Response) => {
         }))
       },
       logs: [
-        { id: '1', message: `Total Revenue: $${(health.totalLifetimeRevenue / 100).toLocaleString()}`, type: 'info' },
-        { id: '2', message: `Pending Dues: $${(health.pendingDues / 100).toLocaleString()}`, type: health.pendingDues > 10000 ? 'warning' : 'info' },
-        { id: '3', message: `Profit Margin: ${health.profitMargin}%`, type: 'info' }
+        `Total Revenue: ${(health.totalLifetimeRevenue / 100).toLocaleString()}`,
+        `Pending Dues: ${(health.pendingDues / 100).toLocaleString()}`,
+        `Profit Margin: ${health.profitMargin}%`
       ]
     };
 
