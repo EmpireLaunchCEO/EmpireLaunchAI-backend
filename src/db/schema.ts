@@ -350,6 +350,21 @@ export const userSettings = pgTable('user_settings', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+/**
+ * OAuth Session Store — production-grade PKCE state/verifier persistence.
+ * Generated during getAuthUrl and verified/consumed in the callback.
+ */
+export const oauthSessions = pgTable('oauth_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  state: text('state').notNull(),
+  codeVerifier: text('code_verifier').notNull(),
+  used: boolean('used').default(false).notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const inboxDrafts = pgTable('inbox_drafts', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
