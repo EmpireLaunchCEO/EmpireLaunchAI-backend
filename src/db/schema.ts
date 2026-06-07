@@ -144,6 +144,7 @@ export const revenueTransactions = pgTable('revenue_transactions', {
   platform: text('platform').notNull(), // 'etsy', 'stripe', 'shopify'
   amount: integer('amount').notNull(), // in cents
   currency: text('currency').default('usd').notNull(),
+  customer: text('customer'),
   externalTransactionId: text('external_transaction_id'),
   productId: uuid('product_id'),
   date: timestamp('date').notNull(),
@@ -345,6 +346,21 @@ export const userSettings = pgTable('user_settings', {
   notificationSettings: jsonb('notification_settings'),
   protocolAccepted: boolean('protocol_accepted').default(false).notNull(),
   isPaid: boolean('is_paid').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const inboxDrafts = pgTable('inbox_drafts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  subject: text('subject').notNull(),
+  body: text('body').notNull(),
+  to: text('to').notNull(),
+  type: text('type').notNull(), // 'THANK_YOU', 'FOLLOW_UP', 'REVIEW_REQUEST'
+  customer: text('customer').notNull(),
+  platform: text('platform').notNull(),
+  reasoning: text('reasoning'),
+  status: text('status').default('pending').notNull(), // 'pending', 'sent', 'rejected'
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

@@ -48,6 +48,9 @@ export interface UserSettingsDTO {
 
   // Protocol
   protocolAccepted?: boolean;
+
+  // Identity
+  email?: string;
 }
 
 export class UserSettingsService {
@@ -60,11 +63,20 @@ export class UserSettingsService {
       .where(eq(schema.userSettings.userId, userId))
       .limit(1);
 
+    const [user] = await db.select()
+      .from(schema.users)
+      .where(eq(schema.users.id, userId))
+      .limit(1);
+
     if (!settings) {
-      return this.getDefaults();
+      const defaults = this.getDefaults();
+      if (user) defaults.email = user.email;
+      return defaults;
     }
 
-    return this.mapRowToDTO(settings);
+    const dto = this.mapRowToDTO(settings);
+    if (user) dto.email = user.email;
+    return dto;
   }
 
   /**

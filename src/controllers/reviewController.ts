@@ -40,6 +40,26 @@ export class ReviewController {
       res.status(500).json({ error: error.message });
     }
   }
+
+  async getTrustPulse(req: Request, res: Response) {
+    try {
+      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const metrics = await reviewService.getTrustMetrics(userId);
+      res.json(metrics);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async getSentimentMap(req: Request, res: Response) {
+    try {
+      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const map = await reviewService.getSentimentMap(userId);
+      res.json(map);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 }
 
 export const reviewController = new ReviewController();

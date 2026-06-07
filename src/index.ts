@@ -27,6 +27,7 @@ import empireStudioRoutes from './routes/empireStudioRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
 import vaultRoutes from './routes/vaultRoutes.js';
 import verificationRoutes from './routes/verificationRoutes.js';
+import retentionRoutes from './routes/retentionRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -114,6 +115,7 @@ app.use('/api/studio', empireStudioRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/vault', vaultRoutes);
 app.use('/api/verification', verificationRoutes);
+app.use('/api/retention', retentionRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });

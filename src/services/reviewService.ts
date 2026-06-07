@@ -102,6 +102,42 @@ export class ReviewService {
 
     console.log(`Social proof post ${postId} queued successfully.`);
   }
+
+  async getTrustMetrics(userId: string) {
+    // @ts-ignore
+    const allReviews = await db.select().from(reviews).where(eq(reviews.userId, userId));
+    
+    const total = allReviews.length;
+    if (total === 0) return { score: 85, velocity: 80, sentiment: 80, agility: 90 };
+
+    const avgRating = allReviews.reduce((sum, r) => sum + r.rating, 0) / total;
+    const sentiment = Math.round((avgRating / 5) * 100);
+    
+    // Mock velocity and agility for now, but derived from actual count
+    const velocity = Math.min(100, 70 + (total * 2));
+    const agility = 94; // System response time constant
+
+    return {
+      score: Math.round((sentiment * 0.6) + (velocity * 0.4)),
+      sentiment,
+      velocity,
+      agility
+    };
+  }
+
+  async getSentimentMap(userId: string) {
+    // @ts-ignore
+    const allReviews = await db.select().from(reviews)
+      .where(eq(reviews.userId, userId))
+      .orderBy(desc(reviews.createdAt))
+      .limit(7);
+
+    return allReviews.map(r => ({
+      score: r.rating * 20,
+      date: r.createdAt,
+      label: r.rating >= 4 ? 'Positive' : 'Neutral'
+    })).reverse();
+  }
 }
 
 export const reviewService = new ReviewService();
