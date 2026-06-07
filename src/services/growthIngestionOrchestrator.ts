@@ -5,7 +5,6 @@ import { etsyService } from './etsyService.js';
 import { tiktokService } from './tiktokService.js';
 import { integrationService } from './integrationService.js';
 import { revenueOracle } from './revenueOracle.js';
-import { engagementMetrics } from '../db/sqlite-schema.js';
 
 /**
  * Growth Ingestion Orchestrator
@@ -42,7 +41,7 @@ export class GrowthIngestionOrchestrator {
         .where(eq(schema.integrations.isActive, true));
 
       // Group by userId to avoid duplicate processing
-      const userIds = [...new Set(integratedUsers.map((i: any) => i.userId))];
+      const userIds = [...new Set(integratedUsers.map((i: any) => i.userId as string))] as string[];
 
       for (const userId of userIds) {
         usersProcessed++;
@@ -146,7 +145,7 @@ export class GrowthIngestionOrchestrator {
       try {
         const videoId = video.id || `tt_${uuidv4()}`;
         
-        await db.insert(engagementMetrics).values({
+        await db.insert(schema.engagementMetrics).values({
           id: uuidv4(),
           userId,
           platform: 'tiktok',

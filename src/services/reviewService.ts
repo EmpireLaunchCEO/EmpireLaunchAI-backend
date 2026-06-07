@@ -110,7 +110,7 @@ export class ReviewService {
     const total = allReviews.length;
     if (total === 0) return { score: 85, velocity: 80, sentiment: 80, agility: 90 };
 
-    const avgRating = allReviews.reduce((sum, r) => sum + r.rating, 0) / total;
+    const avgRating = allReviews.reduce((sum: number, r: any) => sum + r.rating, 0) / total;
     const sentiment = Math.round((avgRating / 5) * 100);
     
     // Mock velocity and agility for now, but derived from actual count
@@ -132,7 +132,7 @@ export class ReviewService {
       .orderBy(desc(reviews.createdAt))
       .limit(7);
 
-    return allReviews.map(r => ({
+    return allReviews.map((r: any) => ({
       score: r.rating * 20,
       date: r.createdAt,
       label: r.rating >= 4 ? 'Positive' : 'Neutral'
