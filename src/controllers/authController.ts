@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { etsyService } from '../services/etsyService.js';
 import { metaService } from '../services/metaService.js';
 import { db, schema } from '../db/index.js';
-const { users } = schema;
+const { users, oauthSessions } = schema;
 import { eq } from 'drizzle-orm';
 import crypto from 'crypto';
 import { gmailService } from '../services/gmailService.js';
@@ -10,7 +10,9 @@ import { outlookService } from '../services/outlookService.js';
 import { youtubeService } from '../services/youtubeService.js';
 import { tiktokService } from '../services/tiktokService.js';
 import { integrationService } from '../services/integrationService.js';
+import { universalGatewayService } from '../services/universalGatewayService.js';
 import { OWNER_CONFIG } from '../config/owner.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export const acceptTerms = async (req: Request, res: Response) => {
   const { userId, version } = req.body;
@@ -29,24 +31,79 @@ export const acceptTerms = async (req: Request, res: Response) => {
   }
 };
 
-export const getEtsyAuthUrl = (req: Request, res: Response) => {
+export const getEtsyAuthUrl = async (req: Request, res: Response) => {
+  const userId = (req as any).userId;
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
   const state = crypto.randomBytes(16).toString('hex');
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-  // In a real app, we would store state and codeVerifier in session or redis
+  // Persist OAuth session server-side — never send codeVerifier to the frontend
+  const sessionId = uuidv4();
+  await db.insert(oauthSessions).values({
+    id: sessionId,
+    userId,
+    platform: 'etsy',
+    state,
+    codeVerifier,
+    used: false,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 min expiry
+    createdAt: new Date(),
+  });
+
   const url = etsyService.getAuthUrl(state, codeChallenge);
-  
-  res.json({ url, state, codeVerifier });
+
+  // Only return the URL and state — codeVerifier stays server-side
+  res.json({ url, state, sessionId });
 };
 
 export const etsyCallback = async (req: Request, res: Response) => {
-  const { code, codeVerifier, userId } = req.body;
+  const { code, state, sessionId } = req.body;
+  const userId = (req as any).userId;
+
+  if (!code || !state || !sessionId || !userId) {
+    return res.status(400).json({ error: 'Missing required fields: code, state, sessionId' });
+  }
 
   try {
-    const tokenData = await etsyService.getAccessToken(code, codeVerifier);
-    
-    // Fetch shop info to get shopId
+    // Retrieve and validate the OAuth session
+    const [session] = await db.select()
+      .from(oauthSessions)
+      .where(eq(oauthSessions.id, sessionId))
+      .limit(1);
+
+    if (!session) {
+      return res.status(400).json({ error: 'OAuth session not found. Please restart authorization.' });
+    }
+
+    if (session.used) {
+      return res.status(400).json({ error: 'OAuth session already used. Please restart authorization.' });
+    }
+
+    if (session.state !== state) {
+      return res.status(400).json({ error: 'State mismatch. Possible CSRF attack.' });
+    }
+
+    if (new Date() > new Date(session.expiresAt)) {
+      return res.status(400).json({ error: 'OAuth session expired. Please restart authorization.' });
+    }
+
+    if (session.userId !== userId) {
+      return res.status(403).json({ error: 'User ID mismatch.' });
+    }
+
+    // Mark session as used (prevent replay attacks)
+    await db.update(oauthSessions)
+      .set({ used: true })
+      .where(eq(oauthSessions.id, sessionId));
+
+    // Exchange code for tokens using the stored codeVerifier (never exposed to client)
+    const tokenData = await etsyService.getAccessToken(code, session.codeVerifier);
+
+    // Fetch shop info
     const shopData = await etsyService.getShop(tokenData.access_token);
     const shopId = shopData.results?.[0]?.shop_id;
 
@@ -58,101 +115,69 @@ export const etsyCallback = async (req: Request, res: Response) => {
   }
 };
 
-export const getMetaAuthUrl = (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  const url = metaService.getAuthUrl(state);
-  res.json({ url, state });
+// ─── UNIVERSAL GATEWAY HANDLERS ────────────────────────────────────
+// All platforms use the same secure OAuth pattern via universalGatewayService.
+
+export const getPlatformAuthUrl = async (req: Request, res: Response) => {
+  const userId = (req as any).userId;
+  if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+  const platform = req.params.platform;
+  const shopDomain = req.query.shop as string | undefined;
+
+  if (!universalGatewayService.getConfig(platform)) {
+    return res.status(400).json({ error: `Unsupported platform: ${platform}` });
+  }
+
+  try {
+    const result = await universalGatewayService.initiateOAuth(userId, platform, shopDomain);
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[Auth] ${platform} auth URL error:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const handlePlatformCallback = async (req: Request, res: Response) => {
+  const userId = (req as any).userId;
+  if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+  const platform = req.params.platform;
+  const { code, state, sessionId, shop } = req.body;
+
+  if (!code || !state || !sessionId) {
+    return res.status(400).json({ error: 'Missing required fields: code, state, sessionId' });
+  }
+
+  try {
+    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId, shop);
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[Auth] ${platform} callback error:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── LEGACY HANDLERS (delegate to Universal Gateway for TikTok/Meta) ──
+
+export const getMetaAuthUrl = async (req: Request, res: Response) => {
+  req.params = { platform: 'meta' };
+  return getPlatformAuthUrl(req, res);
 };
 
 export const metaCallback = async (req: Request, res: Response) => {
-  const { code, userId } = req.body;
-
-  try {
-    const shortLivedToken = await metaService.getAccessToken(code);
-    const longLivedToken = await metaService.getLongLivedToken(shortLivedToken.access_token);
-    
-    await integrationService.saveIntegration(userId, 'meta', longLivedToken);
-    res.json({ status: 'success', message: 'Meta integrated successfully' });
-  } catch (error: any) {
-    console.error('Meta callback error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to integrate Meta' });
-  }
+  req.params = { platform: 'meta' };
+  return handlePlatformCallback(req, res);
 };
 
-export const getGmailAuthUrl = (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  const url = gmailService.getAuthUrl(state);
-  res.json({ url, state });
-};
-
-export const gmailCallback = async (req: Request, res: Response) => {
-  const { code, userId } = req.body;
-
-  try {
-    const tokenData = await gmailService.getAccessToken(code);
-    await integrationService.saveIntegration(userId, 'gmail', tokenData);
-    res.json({ status: 'success', message: 'Gmail integrated successfully' });
-  } catch (error: any) {
-    console.error('Gmail callback error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to integrate Gmail' });
-  }
-};
-
-export const getOutlookAuthUrl = (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  const url = outlookService.getAuthUrl(state);
-  res.json({ url, state });
-};
-
-export const outlookCallback = async (req: Request, res: Response) => {
-  const { code, userId } = req.body;
-
-  try {
-    const tokenData = await outlookService.getAccessToken(code);
-    await integrationService.saveIntegration(userId, 'outlook', tokenData);
-    res.json({ status: 'success', message: 'Outlook integrated successfully' });
-  } catch (error: any) {
-    console.error('Outlook callback error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to integrate Outlook' });
-  }
-};
-
-export const getYouTubeAuthUrl = (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  const url = youtubeService.getAuthUrl(state);
-  res.json({ url, state });
-};
-
-export const youtubeCallback = async (req: Request, res: Response) => {
-  const { code, userId } = req.body;
-
-  try {
-    const tokenData = await youtubeService.getAccessToken(code);
-    await integrationService.saveIntegration(userId, 'youtube', tokenData);
-    res.json({ status: 'success', message: 'YouTube integrated successfully' });
-  } catch (error: any) {
-    console.error('YouTube callback error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to integrate YouTube' });
-  }
-};
-
-export const getTikTokAuthUrl = (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  const url = tiktokService.getAuthUrl(state);
-  res.json({ url, state });
+export const getTikTokAuthUrl = async (req: Request, res: Response) => {
+  req.params = { platform: 'tiktok' };
+  return getPlatformAuthUrl(req, res);
 };
 
 export const tiktokCallback = async (req: Request, res: Response) => {
-  const { code, userId } = req.body;
-
-  try {
-    const tokenData = await tiktokService.getAccessToken(code);
-    await integrationService.saveIntegration(userId, 'tiktok_display', tokenData);
-    res.json({ status: 'success', message: 'TikTok integrated successfully' });
-  } catch (error: any) {
-    console.error('TikTok callback error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to integrate TikTok' });
-  }
+  req.params = { platform: 'tiktok' };
+  return handlePlatformCallback(req, res);
 };
 
 export const redeemKey = async (req: Request, res: Response) => {

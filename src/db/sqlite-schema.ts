@@ -388,3 +388,18 @@ export const userSettings = sqliteTable('user_settings', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+/**
+ * OAuth Session Store — production-grade PKCE state/verifier persistence.
+ * Generated during getAuthUrl and verified/consumed in the callback.
+ */
+export const oauthSessions = sqliteTable('oauth_sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  state: text('state').notNull(),
+  codeVerifier: text('code_verifier').notNull(),
+  used: integer('used', { mode: 'boolean' }).default(false).notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
