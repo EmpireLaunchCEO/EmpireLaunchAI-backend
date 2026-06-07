@@ -8,6 +8,9 @@ const router = Router();
 // Create master asset and distribute to platforms
 router.post('/create', mobileAuth, empireStudioController.create);
 
+// Conversational Consultant chat
+router.post('/chat', mobileAuth, empireStudioController.chat);
+
 // Cinema Engine: Create Neural Twin
 router.post('/cinema/twin', mobileAuth, empireStudioController.createNeuralTwin);
 

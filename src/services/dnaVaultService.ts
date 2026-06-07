@@ -230,6 +230,23 @@ export class DnaVaultService {
   }
 
   /**
+   * Search strands by niche/tags in metadata or category.
+   */
+  async searchStrands(query: string, limit: number = 10): Promise<DnaStrand[]> {
+    // Basic implementation searching metadata tags or category
+    const rows = await db.select().from(dnaStrands);
+    
+    const results = rows.filter((row: any) => {
+      const metadata = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+      const tags = metadata.tags || [];
+      const searchableText = `${row.category} ${row.subCategory} ${tags.join(' ')}`.toLowerCase();
+      return searchableText.includes(query.toLowerCase());
+    });
+
+    return results.slice(0, limit).map((row: any) => this.rowToStrand(row));
+  }
+
+  /**
    * Update a strand's performance score (from sales/viral data).
    */
   async updatePerformanceScore(id: string, score: number) {

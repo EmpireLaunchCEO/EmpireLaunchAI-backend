@@ -3,8 +3,31 @@ import { empireStudioService, StyleDNA } from '../services/empireStudioService.j
 import { visualProxyService } from '../services/visualProxyService.js';
 import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
+import { reasoningEngine } from '../services/reasoningEngine.js';
 
 export class EmpireStudioController {
+  /**
+   * POST /api/studio/chat
+   * Conversational consultant for design goals.
+   */
+  async chat(req: Request, res: Response) {
+    const userId = (req as any).userId;
+    const { message } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: 'message is required' });
+    }
+
+    try {
+      const result = await reasoningEngine.consult(userId, message);
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[EmpireStudioController] chat failed:', error);
+      res.status(500).json({ error: msg });
+    }
+  }
+
   /**
    * POST /api/studio/cinema/twin
    * Create a Neural Twin video from a photo and script.

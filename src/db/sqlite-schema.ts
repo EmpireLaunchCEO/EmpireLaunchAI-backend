@@ -346,6 +346,27 @@ export const dnaStrands = sqliteTable('dna_strands', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 
+export const stylePreviews = sqliteTable('style_previews', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  niche: text('niche').notNull(),
+  dnaStrandIds: text('dna_strand_ids', { mode: 'json' }).notNull(),
+  primaryVibe: text('primary_vibe').notNull(),
+  colorScheme: text('color_scheme').notNull(),
+  typographyMood: text('typography_mood').notNull(),
+  designPersonality: text('design_personality').notNull(),
+  synthesisPrompt: text('synthesis_prompt').notNull(),
+  mockupUrl: text('mockup_url'),
+  performanceScore: integer('performance_score').default(0).notNull(),
+  trendDirection: text('trend_direction').default('stable').notNull(),
+  vibeTags: text('vibe_tags', { mode: 'json' }).notNull(),
+  difficulty: text('difficulty').default('instant').notNull(),
+  sourceImageDiscarded: integer('source_image_discarded', { mode: 'boolean' }).default(true).notNull(),
+  previewGenerationMethod: text('preview_generation_method').notNull(),
+  metadata: text('metadata', { mode: 'json' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
 export const userSettings = sqliteTable('user_settings', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull().unique(),

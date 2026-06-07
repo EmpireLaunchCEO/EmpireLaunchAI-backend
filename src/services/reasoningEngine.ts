@@ -1,6 +1,7 @@
 import { resolveStudioReasoner, getModelConfig } from '../utils/resolveModel.js';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { stylePreviewService } from './stylePreviewService.js';
 
 /**
  * Reasoning Engine Service
@@ -76,12 +77,18 @@ export class ReasoningEngine {
 
   /**
    * Conversational Consultant Bridge
-   * Translates natural language intent into Studio commands.
+   * Translates natural language intent into Studio commands and provides style suggestions.
    */
-  async consult(userId: string, message: string): Promise<string> {
+  async consult(userId: string, message: string): Promise<{ message: string; stylePreviews?: any[] }> {
     const model = await this.getReasoner();
     const systemPrompt = `You are the Empire Studio Conversational Consultant. 
     Talk to the user about their business goals. Suggest visual style directions (abstractly).
+    
+    If the user mentions a niche or business type (e.g., "digital planners", "fitness coaching"), 
+    identify it and start your message with [NICHE: <niche_name>].
+    
+    Example: "[NICHE: digital planners] Great choice! I've analyzed the trends..."
+    
     NEVER show original source images. Only discuss synthesized styles.`;
 
     const response = await model.invoke([
@@ -89,7 +96,20 @@ export class ReasoningEngine {
       new HumanMessage(message)
     ]);
 
-    return response.content as string;
+    const content = response.content as string;
+    let nicheMatch = content.match(/\[NICHE:\s*([^\]]+)\]/);
+    let finalMessage = content.replace(/\[NICHE:\s*[^\]]+\]/, '').trim();
+    let stylePreviews: any[] | undefined;
+
+    if (nicheMatch) {
+      const niche = nicheMatch[1].trim();
+      stylePreviews = await stylePreviewService.getStylesForNiche(userId, niche);
+    }
+
+    return {
+      message: finalMessage,
+      stylePreviews
+    };
   }
 }
 

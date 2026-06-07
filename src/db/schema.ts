@@ -306,6 +306,27 @@ export const nicheDnaRepository = pgTable('niche_dna_repository', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const stylePreviews = pgTable('style_previews', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  niche: text('niche').notNull(),
+  dnaStrandIds: jsonb('dna_strand_ids').notNull(),
+  primaryVibe: text('primary_vibe').notNull(),
+  colorScheme: text('color_scheme').notNull(),
+  typographyMood: text('typography_mood').notNull(),
+  designPersonality: text('design_personality').notNull(),
+  synthesisPrompt: text('synthesis_prompt').notNull(),
+  mockupUrl: text('mockup_url'),
+  performanceScore: integer('performance_score').default(0).notNull(),
+  trendDirection: text('trend_direction').default('stable').notNull(),
+  vibeTags: jsonb('vibe_tags').notNull(),
+  difficulty: text('difficulty').default('instant').notNull(),
+  sourceImageDiscarded: boolean('source_image_discarded').default(true).notNull(),
+  previewGenerationMethod: text('preview_generation_method').notNull(),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const userSettings = pgTable('user_settings', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull().unique(),
