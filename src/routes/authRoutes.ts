@@ -20,7 +20,7 @@ const router = Router();
 
 router.post('/terms/accept', acceptTerms);
 router.post('/redeem-key', redeemKey);
-router.get('/etsy/url', getEtsyAuthUrl);
+router.post('/etsy/url', getEtsyAuthUrl);
 router.post('/etsy/callback', etsyCallback);
 
 router.get('/meta/url', getMetaAuthUrl);

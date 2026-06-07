@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { integrations } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { integrations } = schema;
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../utils/security.js';
 import { v4 as uuidv4 } from 'uuid';
