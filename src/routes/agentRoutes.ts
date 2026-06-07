@@ -57,6 +57,22 @@ router.get('/empire/:id', mobileAuth, async (req, res) => {
 });
 router.post('/start', mobileAuth, startAgent);
 router.post('/goal', mobileAuth, createGoal);
+router.patch('/goal/:id', mobileAuth, async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    await db.update(schema.goals)
+      .set({ 
+        title, 
+        description, 
+        updatedAt: new Date() 
+      })
+      .where(eq(schema.goals.id, req.params.id));
+    
+    res.json({ status: 'success', message: 'Empire updated' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 router.post('/goal/abandon', mobileAuth, abandonGoal);
 router.post('/slots/purchase', mobileAuth, purchaseSlot);
 
