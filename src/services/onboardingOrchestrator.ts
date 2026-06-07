@@ -132,6 +132,15 @@ export class OnboardingOrchestrator {
       .set({ status: 'active', updatedAt: new Date() })
       .where(eq(goals.id, targetGoalId));
 
+    // 3.5 Sync to User Settings for global memory
+    await db.update(schema.userSettings)
+      .set({
+        businessNiche: niche,
+        businessAngle: angle,
+        updatedAt: new Date()
+      })
+      .where(eq(schema.userSettings.userId, userId));
+
     console.log(`[OnboardingOrchestrator] Empire initialized successfully for user ${userId}`);
     
     // Notify via WebSocket for completion

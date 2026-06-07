@@ -59,17 +59,55 @@ router.post('/start', mobileAuth, startAgent);
 router.post('/goal', mobileAuth, createGoal);
 router.patch('/goal/:id', mobileAuth, async (req, res) => {
   try {
-    const { title, description } = req.body;
-    await db.update(schema.goals)
-      .set({ 
-        title, 
-        description, 
-        updatedAt: new Date() 
-      })
-      .where(eq(schema.goals.id, req.params.id));
+    const { title, description, name, niche, angle } = req.body;
+    const goalId = req.params.id;
+
+    // 1. Update the Goal (Primary Identity)
+    const updateData: any = { updatedAt: new Date() };
+    if (title || name) updateData.title = title || name;
     
-    res.json({ status: 'success', message: 'Empire updated' });
+    // If niche/angle are provided, we should update the description as well
+    if (niche || angle) {
+      const [existingGoal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+      let newDesc = description || existingGoal?.description || '';
+      if (niche) {
+        if (newDesc.includes('Empire Niche:')) {
+          newDesc = newDesc.replace(/Empire Niche: (.*?)\./, `Empire Niche: ${niche}.`);
+        } else {
+          newDesc += ` Empire Niche: ${niche}.`;
+        }
+      }
+      if (angle) {
+        if (newDesc.includes('Angle:')) {
+          newDesc = newDesc.replace(/Angle: (.*?)\./, `Angle: ${angle}.`);
+        } else {
+          newDesc += ` Angle: ${angle}.`;
+        }
+      }
+      updateData.description = newDesc;
+    } else if (description) {
+      updateData.description = description;
+    }
+
+    await db.update(schema.goals)
+      .set(updateData)
+      .where(eq(schema.goals.id, goalId));
+
+    // 2. Persist to Global User Settings for "Memory"
+    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
+    const settingsUpdate: any = { updatedAt: new Date() };
+    if (niche) settingsUpdate.businessNiche = niche;
+    if (angle) settingsUpdate.businessAngle = angle;
+
+    if (Object.keys(settingsUpdate).length > 1) {
+      await db.update(schema.userSettings)
+        .set(settingsUpdate)
+        .where(eq(schema.userSettings.userId, userId));
+    }
+    
+    res.json({ status: 'success', message: 'Empire updated and persisted' });
   } catch (error: any) {
+    console.error('Update Empire Error:', error);
     res.status(500).json({ error: error.message });
   }
 });

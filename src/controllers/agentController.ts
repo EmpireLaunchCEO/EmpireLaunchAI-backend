@@ -64,6 +64,15 @@ export const initializeAgent = async (req: Request, res: Response) => {
       updatedAt: new Date()
     }).returning();
 
+    // 1.5 Sync to User Settings for global memory
+    await db.update(schema.userSettings)
+      .set({
+        businessNiche: niche,
+        businessAngle: angle,
+        updatedAt: new Date()
+      })
+      .where(eq(schema.userSettings.userId, userId));
+
     // 2. Add initialize-agent task to the queue for heavy processing (AI, provisioning)
     const job = await onboardingQueue.add('initialize-agent', {
       userId,
