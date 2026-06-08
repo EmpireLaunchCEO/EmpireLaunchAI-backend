@@ -404,3 +404,80 @@ export const strategySuggestions = sqliteTable('strategy_suggestions', {
       roiImpact: integer('roi_impact'), // Estimated profit increase in cents
       createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     });
+
+export const handleVerifications = sqliteTable('handle_verifications', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(), // 'tiktok', 'instagram'
+  handle: text('handle').notNull(),
+  hash: text('hash').notNull(),
+  status: text('status').default('pending').notNull(), // 'pending', 'verified', 'failed'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const styleDna = sqliteTable('style_dna', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  styleDnaProfile: text('style_dna_profile', { mode: 'json' }).notNull(),
+  isApproved: integer('is_approved', { mode: 'boolean' }).default(false).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const dnaStrands = sqliteTable('dna_strands', {
+  id: text('id').primaryKey(),
+  category: text('category').notNull(),
+  subCategory: text('sub_category'),
+  embedding: text('embedding'), // JSON string of float array
+  manifest: text('manifest').notNull(), // Logic Manifest JSON
+  performanceScore: integer('performance_score').notNull(),
+  sourcePlatform: text('source_platform'),
+  externalId: text('external_id'),
+  metadata: text('metadata'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const stylePreviews = sqliteTable('style_previews', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  niche: text('niche').notNull(),
+  dnaStrandIds: text('dna_strand_ids', { mode: 'json' }).notNull(),
+  primaryVibe: text('primary_vibe').notNull(),
+  colorScheme: text('color_scheme').notNull(),
+  typographyMood: text('typography_mood').notNull(),
+  designPersonality: text('design_personality').notNull(),
+  synthesisPrompt: text('synthesis_prompt').notNull(),
+  mockupUrl: text('mockup_url'),
+  performanceScore: integer('performance_score').default(0).notNull(),
+  trendDirection: text('trend_direction').default('stable').notNull(),
+  vibeTags: text('vibe_tags', { mode: 'json' }).notNull(),
+  difficulty: text('difficulty').default('instant').notNull(),
+  sourceImageDiscarded: integer('source_image_discarded', { mode: 'boolean' }).default(true).notNull(),
+  previewGenerationMethod: text('preview_generation_method').notNull(),
+  metadata: text('metadata', { mode: 'json' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const userSettings = sqliteTable('user_settings', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull().unique(),
+  businessAngle: text('business_angle'),
+  businessNiche: text('business_niche'),
+  theme: text('theme').default('light').notNull(),
+  language: text('language').default('en').notNull(),
+  currency: text('currency').default('USD').notNull(),
+  aiMode: text('ai_mode').default('co-pilot').notNull(),
+  autoSendRetention: integer('auto_send_retention', { mode: 'boolean' }).default(false).notNull(),
+  onboardingComplete: integer('onboarding_complete', { mode: 'boolean' }).default(false).notNull(),
+  linkingComplete: integer('linking_complete', { mode: 'boolean' }).default(false).notNull(),
+  notificationModalDismissed: integer('notification_modal_dismissed', { mode: 'boolean' }).default(false).notNull(),
+  platformPermissions: text('platform_permissions', { mode: 'json' }),
+  connectedPlatforms: text('connected_platforms', { mode: 'json' }),
+  notificationSettings: text('notification_settings', { mode: 'json' }),
+  protocolAccepted: integer('protocol_accepted', { mode: 'boolean' }).default(false).notNull(),
+  isPaid: integer('is_paid', { mode: 'boolean' }).default(false).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});

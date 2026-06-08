@@ -69,7 +69,7 @@ class UniversalGatewayService {
         clientId: () => process.env.TIKTOK_SHOP_CLIENT_ID || '',
         clientSecret: () => process.env.TIKTOK_SHOP_CLIENT_SECRET || '',
         redirectUri: () => process.env.TIKTOK_SHOP_REDIRECT_URI || '',
-        extraAuthParams: { response_type: 'code', service_type: 1 },
+        extraAuthParams: { response_type: 'code', service_type: '1' },
         extraTokenParams: { grant_type: 'authorization_code' },
         tokenHeaders: { 'Content-Type': 'application/json' },
       },

@@ -154,7 +154,7 @@ export class ProductionWorker {
           result = {
             success: true,
             data: { bridgeResult, platform, niche },
-            externalId: bridgeResult?.designId || bridgeResult?.vaultStrandId,
+            externalId: bridgeResult?.templateId || bridgeResult?.strandId,
           };
 
           // Notify the user
@@ -162,7 +162,7 @@ export class ProductionWorker {
             type: 'CONTENT_CREATED',
             title: `🎨 ${platform} design created`,
             message: `AI designed a "${niche}" asset on ${platform}`,
-            metadata: { platform, niche, designId: bridgeResult?.designId },
+            metadata: { platform, niche, designId: bridgeResult?.templateId },
           });
           break;
         }

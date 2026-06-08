@@ -365,6 +365,19 @@ export const oauthSessions = pgTable('oauth_sessions', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const dnaStrands = pgTable('dna_strands', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  category: text('category').notNull(),
+  subCategory: text('sub_category'),
+  embedding: jsonb('embedding'), // JSON string of float array
+  manifest: jsonb('manifest').notNull(), // Logic Manifest JSON
+  performanceScore: integer('performance_score').notNull(),
+  sourcePlatform: text('source_platform'),
+  externalId: text('external_id'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const inboxDrafts = pgTable('inbox_drafts', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),

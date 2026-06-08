@@ -223,10 +223,10 @@ export class PlatformRouter {
         case 'create_listing': {
           const result = await shopifyService.createListing(creds.shop_name || creds.subdomain, creds.access_token, {
             title: params.productName || 'New Product',
-            bodyHtml: `<p>${params.productName || 'AI product'}</p>`,
+            body_html: `<p>${params.productName || 'AI product'}</p>`,
             vendor: 'Bizrunner AI',
-            productType: 'Digital',
-            variants: [{ price: '9.99', title: 'Default' }],
+            product_type: 'Digital',
+            variants: [{ price: '9.99' }],
           });
           return { success: true, data: { shopifyProduct: result }, externalId: result?.id?.toString() };
         }

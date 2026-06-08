@@ -68,7 +68,8 @@ export class ContentCreatorBridge {
       });
 
       // Phase 2: Apply DNA to best template
-      const bestTemplateId = templates[0].id || templates[0].url?.split('/').pop();
+      const templateList = templates as any;
+      const bestTemplateId = templateList[0]?.id || templateList[0]?.url?.split('/').pop();
       if (!bestTemplateId) throw new Error('Could not determine template ID');
 
       const appliedDna = styleDna || await this.resolveDnaForNiche(userId, niche);

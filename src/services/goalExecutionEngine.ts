@@ -252,7 +252,7 @@ export class GoalExecutionEngine {
     const integrationRows = await db.select({ platform: integrations.platform })
       .from(integrations)
       .where(and(eq(integrations.userId, goal.userId), eq(integrations.isActive, true)));
-    const connectedPlatforms = [...new Set(integrationRows.map(r => r.platform))];
+    const connectedPlatforms = [...new Set(integrationRows.map((r: any) => r.platform))] as string[];
 
     // Recent decisions
     const recentDecisions = await db.select()
