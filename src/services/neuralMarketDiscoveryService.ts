@@ -3,10 +3,10 @@ const { nicheDnaRepository } = schema;
 import { originalityService } from './originalityService.js';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
+import { resolveStudioReasoner } from "../utils/resolveModel.js";
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -18,21 +18,15 @@ export interface NicheDna {
 }
 
 export class NeuralMarketDiscoveryService {
-  private model: ChatOpenAI;
-
-  constructor() {
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.4,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
-  }
+  constructor() {}
 
   /**
    * Scans a niche to extract success DNA and identify market gaps.
    */
   async discoverNicheDna(niche: string) {
     console.log(`[NeuralMarketDiscovery] Extracting DNA for niche: ${niche}`);
+
+    const model = await resolveStudioReasoner();
 
     const template = `
       You are the "Neural Market Discovery" Agent for EmpireLaunchAI.
@@ -56,7 +50,7 @@ export class NeuralMarketDiscoveryService {
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      model,
       new JsonOutputParser(),
     ]);
 
@@ -99,6 +93,8 @@ export class NeuralMarketDiscoveryService {
     
     console.log(`[NeuralMarketDiscovery] Generating Neural Remix for user ${userId} in ${niche}`);
 
+    const model = await resolveStudioReasoner();
+
     const template = `
       You are the "Neural Remix" Architect.
       Create a unique product concept by combining successful DNA elements with a "Unique Pivot".
@@ -127,7 +123,7 @@ export class NeuralMarketDiscoveryService {
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      model,
       new JsonOutputParser(),
     ]);
 

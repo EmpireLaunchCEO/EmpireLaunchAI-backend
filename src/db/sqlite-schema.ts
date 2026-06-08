@@ -481,3 +481,25 @@ export const userSettings = sqliteTable('user_settings', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const productionScripts = sqliteTable('production_scripts', {
+  id: text('id').primaryKey(),
+  campaignId: text('campaign_id').references(() => campaigns.id).notNull(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  title: text('title').notNull(),
+  niche: text('niche').notNull(),
+  angle: text('angle'),
+  strategicReasoning: text('strategic_reasoning', { mode: 'json' }).notNull(),
+  scenes: text('scenes', { mode: 'json' }).notNull(),
+  totalDurationSeconds: integer('total_duration_seconds'),
+  pacing: text('pacing'),
+  backgroundAudioUrl: text('background_audio_url'),
+  styleDnaUsed: text('style_dna_used', { mode: 'json' }),
+  dnaStrandIds: text('dna_strand_ids', { mode: 'json' }),
+  uniquenessHash: text('uniqueness_hash'),
+  status: text('status').default('draft').notNull(),
+  renderedAssetUrl: text('rendered_asset_url'),
+  error: text('error'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});

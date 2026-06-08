@@ -2,24 +2,16 @@ import { db, schema } from '../db/index.js';
 const { goals, taskPlans, tasks, taskReasoning } = schema;
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
+import { resolveStudioReasoner } from "../utils/resolveModel.js";
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 export class PlannerService {
-  private model: ChatOpenAI;
-
-  constructor() {
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.2,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
-  }
+  constructor() {}
 
   /**
    * Decomposes a high-level goal into a Dynamic Execution Graph (DEG).
@@ -29,6 +21,8 @@ export class PlannerService {
     if (!goal) throw new Error(`Goal ${goalId} not found`);
 
     console.log(`[PlannerService] Decomposing goal into DEG: ${goal.title}`);
+
+    const model = await resolveStudioReasoner();
 
     const template = `
       You are the "Strategic Intellect" Planner for EmpireLaunchAI.
@@ -70,7 +64,7 @@ export class PlannerService {
     const prompt = PromptTemplate.fromTemplate(template);
     const chain = RunnableSequence.from([
       prompt,
-      this.model,
+      model,
       new JsonOutputParser(),
     ]);
 

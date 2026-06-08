@@ -4,11 +4,11 @@ import { eq } from 'drizzle-orm';
 /**
  * Tier definitions — maps user tiers to model names and capability flags.
  * 
- * EMPIRE_MASTER = gpt-4o (highest intelligence, full automation)
- * STANDARD_USER = gpt-4o-mini (cost-optimized, co-pilot mode)
+ * EMPIRE_MASTER = gemini-1.5-pro (highest intelligence, full automation)
+ * STANDARD_USER = gemini-1.5-flash (cost-optimized, co-pilot mode)
  */
 export interface TierConfig {
-  modelName: string;           // OpenAI model identifier
+  modelName: string;           // Gemini model identifier
   temperature: number;         // Creativity level
   maxConcurrency: number;      // Background job concurrency
   autoApproveListings: boolean; // Skip human approval for listings
@@ -19,7 +19,7 @@ export interface TierConfig {
 
 const TIER_CONFIGS: Record<string, TierConfig> = {
   EMPIRE_MASTER: {
-    modelName: 'gpt-4o',
+    modelName: 'gemini-1.5-pro',
     temperature: 0.3,
     maxConcurrency: 10,
     autoApproveListings: true,
@@ -28,7 +28,7 @@ const TIER_CONFIGS: Record<string, TierConfig> = {
     maxBusinessSlots: 5,
   },
   STANDARD_USER: {
-    modelName: 'gpt-4o-mini',
+    modelName: 'gemini-1.5-flash',
     temperature: 0.5,
     maxConcurrency: 2,
     autoApproveListings: false,
@@ -82,17 +82,15 @@ export class TierService {
   }
 
   /**
-   * Build a ChatOpenAI constructor options object based on the user's tier.
-   * Default: gpt-4o-mini, temperature 0.5
-   * EMPIRE_MASTER: gpt-4o, temperature 0.3
+   * Build a model constructor options object based on the user's tier.
+   * Default: gemini-1.5-flash, temperature 0.5
+   * EMPIRE_MASTER: gemini-1.5-pro, temperature 0.3
    */
-  buildModelConfig(userId: string): { modelName: string; temperature: number; openAIApiKey?: string } {
-    // Synchronous version for use in constructors — loads config async later if needed
-    // The actual model resolution happens when the service calls openAIApiKey from env
+  buildModelConfig(userId: string): { modelName: string; temperature: number; apiKey?: string } {
     return {
-      modelName: 'gpt-4o-mini',   // Safe default
+      modelName: 'gemini-1.5-flash',   // Safe default
       temperature: 0.5,
-      openAIApiKey: process.env.OPENAI_API_KEY,
+      apiKey: process.env.GOOGLE_API_KEY,
     };
   }
 }

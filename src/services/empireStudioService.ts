@@ -12,10 +12,10 @@ import { dnaVaultService } from './dnaVaultService.js';
 import { aiScriptingService } from './aiScriptingService.js';
 import { resolveModelForUser, getModelConfig, resolveStudioReasoner } from '../utils/resolveModel.js';
 import { uniquenessService } from './uniquenessService.js';
-import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 /**
  * StyleDNA — parameterizes AI generation across all creative tools.
@@ -239,9 +239,8 @@ export class EmpireStudioService {
     const patternStrands = await dnaVaultService.findTopPerformers('niche_pattern', 70, 5);
 
     // Phase 2: AI-powered synthesis — combine vault data with niche intelligence
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const model = await resolveModelForUser(userId);
+    try {
+      const model = await resolveModelForUser(userId);
 
         const template = `
           You are a Style DNA Architect for the "{niche}" niche (angle: "{angle}").
@@ -290,10 +289,9 @@ export class EmpireStudioService {
             tone: result.tone || 'professional',
           };
         }
-      } catch (e) {
+        } catch (e) {
         console.warn('[EmpireStudio] Vault DNA synthesis failed:', (e as Error).message);
-      }
-    }
+        }
 
     // Fallback: Synthesize directly from vault strands
     const fallbackColors = paletteStrands.length > 0
@@ -357,7 +355,7 @@ export class EmpireStudioService {
   }> {
     // Get tier config to determine reasoning depth
     const modelConfig = await getModelConfig(userId);
-    const isDeepReasoning = modelConfig.modelName === 'gpt-4o';
+    const isDeepReasoning = modelConfig.modelName === 'gemini-1.5-pro';
 
     webSocketService.notifyUser(userId, 'ai-log', {
       message: `🧠 Studio Intelligence: High-Reasoning Layer Activated (Gemini 3 Flash logic)`

@@ -4,11 +4,10 @@ import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
-import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
-import { resolveModelForUser } from '../utils/resolveModel.js';
+import { resolveModelForUser, getDefaultModel } from '../utils/resolveModel.js';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -16,20 +15,10 @@ import path from 'path';
 dotenv.config();
 
 export class DnaLabService {
-  private model: ChatOpenAI;
-
-  constructor() {
-    // Default model for background processes where userId isn't immediately available
-    // or as a fallback before tier resolution.
-    this.model = new ChatOpenAI({
-      modelName: "gpt-4o",
-      temperature: 0.2,
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
-  }
+  constructor() {}
 
   /** Resolve a tier-appropriate model for the given user */
-  private async getModel(userId: string): Promise<ChatOpenAI> {
+  private async getModel(userId: string): Promise<any> {
     return resolveModelForUser(userId);
   }
 

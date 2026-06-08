@@ -1,0 +1,332 @@
+import { v4 as uuidv4 } from 'uuid';
+import { db } from '../db/index.js';
+import { productionScripts } from '../db/sqlite-schema.js';
+import { eq } from 'drizzle-orm';
+import { resolveStudioReasoner } from '../utils/resolveModel.js';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface TextOverlay {
+  text: string;
+  position: 'top' | 'center' | 'bottom' | 'bottom_third';
+  fontStyle: string;
+  fontSize: number;
+  color: string;
+  animation: 'fade_in' | 'slide_up' | 'typewriter' | 'pop';
+  showAtSeconds: number;
+  duration: number;
+}
+
+export interface ProductionScene {
+  sceneId: string;
+  durationSeconds: number;
+  transition: 'fade' | 'slide_left' | 'slide_right' | 'zoom_in' | 'none';
+  imagePrompt: string;
+  textOverlays: TextOverlay[];
+  generatedImageUrl?: string;
+  audioSyncPoint?: number;
+}
+
+export interface StrategicReasoning {
+  whyThisAngle: string;
+  targetPlatform: string;
+  hookStrategy: string;
+  viralPotential: number;
+  antiCopycatNote: string;
+}
+
+export interface ProductionScriptData {
+  title: string;
+  niche: string;
+  angle?: string;
+  strategicReasoning: StrategicReasoning;
+  scenes: ProductionScene[];
+  totalDurationSeconds: number;
+  pacing: 'fast' | 'moderate' | 'slow';
+  styleDnaUsed?: Record<string, any>;
+  dnaStrandIds?: string[];
+}
+
+/**
+ * Production Director — THE STRATEGIST.
+ * Uses Gemini 1.5 Flash to create complete Production Scripts
+ * scene-by-scene with DALL-E prompts, text overlays, and transitions.
+ *
+ * Implements:
+ * - Zero-Source-Image: No competitor images are referenced or stored
+ * - Anti-Copycat: Gemini is instructed to create unique, non-infringing concepts
+ * - Free-First design approach
+ */
+export class ProductionDirector {
+
+  /**
+   * Main entry point: Gemini reasons about the niche and generates a full script.
+   */
+  async direct(params: {
+    campaignId: string;
+    userId: string;
+    niche: string;
+    angle?: string;
+    styleDna?: Record<string, any>;
+    platform?: string;
+  }): Promise<ProductionScriptData> {
+    const platform = params.platform || 'tiktok';
+    const styleDna = params.styleDna || { colors: ['#2D4F1E', '#E4D5B7'], pacing: 'fast' };
+
+    // Use Gemini via the existing STUDIO_INTEL configuration (gemini-1.5-flash)
+    const model = await resolveStudioReasoner();
+
+    const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video promoting a digital product.
+
+CRITICAL RULES:
+1. Each scene MUST have a detailed DALL-E image generation prompt — describe the scene visually (lighting, colors, composition, mood)
+2. NEVER include text, logos, or product names in the image prompt
+3. Text overlays are specified SEPARATELY — the image prompt must be text-free
+4. Scene transitions must create a smooth visual narrative
+5. Total video length: 10-30 seconds (platform-appropriate)
+6. Zero references to competitors, brand names, or platforms in prompts
+7. Anti-Copycat: Create UNIQUE concepts — never replicate existing best-sellers
+
+Return ONLY valid JSON with no markdown formatting.`;
+
+    const userPrompt = `Create a Production Script for "${params.niche}"${params.angle ? ` with angle: "${params.angle}"` : ''}.
+
+Brand DNA: ${JSON.stringify(styleDna)}
+Target Platform: ${platform}
+Total scenes: 4
+
+Return JSON with:
+{
+  "title": "string",
+  "angle": "string",
+  "strategicReasoning": {
+    "whyThisAngle": "string",
+    "targetPlatform": "string",
+    "hookStrategy": "string",
+    "viralPotential": number (0-100),
+    "antiCopycatNote": "string"
+  },
+  "scenes": [
+    {
+      "sceneId": "scene_01_hook",
+      "durationSeconds": number (2-5),
+      "transition": "fade|slide_left|slide_right|zoom_in|none",
+      "imagePrompt": "Detailed DALL-E prompt with lighting, colors, composition, NO TEXT",
+      "textOverlays": [
+        {
+          "text": "string",
+          "position": "top|center|bottom|bottom_third",
+          "fontStyle": "sans-serif-bold|serif-elegant|sans-serif-light",
+          "fontSize": number (24-72),
+          "color": "hex color",
+          "animation": "fade_in|slide_up|typewriter|pop",
+          "showAtSeconds": number,
+          "duration": number
+        }
+      ]
+    }
+  ],
+  "totalDurationSeconds": number,
+  "pacing": "fast|moderate|slow"
+}`;
+
+    const response = await model.invoke([
+      { role: 'system', content: systemPrompt },
+      { role: 'human', content: userPrompt },
+    ]);
+
+    const content = typeof response.content === 'string'
+      ? response.content
+      : JSON.stringify(response.content);
+
+    // Parse Gemini's JSON response
+    const script = this.parseScript(content, params);
+
+    return script;
+  }
+
+  /**
+   * Save a Production Script to the database.
+   */
+  async saveScript(
+    script: ProductionScriptData,
+    campaignId: string,
+    userId: string,
+  ): Promise<string> {
+    const id = uuidv4();
+    const now = new Date();
+
+    await db.insert(productionScripts).values({
+      id,
+      campaignId,
+      userId,
+      title: script.title,
+      niche: script.niche,
+      angle: script.angle || null,
+      strategicReasoning: JSON.parse(JSON.stringify(script.strategicReasoning)),
+      scenes: JSON.parse(JSON.stringify(script.scenes)),
+      totalDurationSeconds: script.totalDurationSeconds,
+      pacing: script.pacing,
+      backgroundAudioUrl: null,
+      styleDnaUsed: script.styleDnaUsed ? JSON.parse(JSON.stringify(script.styleDnaUsed)) : null,
+      dnaStrandIds: script.dnaStrandIds ? JSON.parse(JSON.stringify(script.dnaStrandIds)) : null,
+      uniquenessHash: null,
+      status: 'draft',
+      renderedAssetUrl: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return id;
+  }
+
+  /**
+   * Update script status.
+   */
+  async updateStatus(scriptId: string, status: string, error?: string, renderedAssetUrl?: string): Promise<void> {
+    const update: any = { status, updatedAt: new Date() };
+    if (error) update.error = error;
+    if (renderedAssetUrl) update.renderedAssetUrl = renderedAssetUrl;
+    await db.update(productionScripts)
+      .set(update)
+      .where(eq(productionScripts.id, scriptId));
+  }
+
+  /**
+   * Get a script by ID.
+   */
+  async getScript(scriptId: string) {
+    const results = await db.select()
+      .from(productionScripts)
+      .where(eq(productionScripts.id, scriptId))
+      .limit(1);
+    return results[0] || null;
+  }
+
+  /**
+   * Parse Gemini's JSON response into a ProductionScriptData object.
+   */
+  private parseScript(content: string, params: any): ProductionScriptData {
+    try {
+      // Strip markdown code blocks if present
+      let json = content;
+      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) json = jsonMatch[1];
+
+      const parsed = JSON.parse(json);
+
+      return {
+        title: parsed.title || `${params.niche} Promotion`,
+        niche: params.niche,
+        angle: parsed.angle || params.angle,
+        strategicReasoning: parsed.strategicReasoning || {
+          whyThisAngle: 'AI-generated strategy',
+          targetPlatform: params.platform || 'tiktok',
+          hookStrategy: 'Problem-solution format',
+          viralPotential: 70,
+          antiCopycatNote: 'Unique AI-generated concept',
+        },
+        scenes: parsed.scenes || [],
+        totalDurationSeconds: parsed.totalDurationSeconds || 12,
+        pacing: parsed.pacing || 'fast',
+        styleDnaUsed: params.styleDna,
+        dnaStrandIds: params.dnaStrandIds,
+      };
+    } catch (err) {
+      console.error('[ProductionDirector] Failed to parse Gemini response:', err);
+      // Return a fallback script
+      return this.createFallbackScript(params.niche, params.angle);
+    }
+  }
+
+  /**
+   * Create a fallback script if Gemini parsing fails.
+   */
+  private createFallbackScript(niche: string, angle?: string): ProductionScriptData {
+    return {
+      title: `${niche} Promotion`,
+      niche,
+      angle,
+      strategicReasoning: {
+        whyThisAngle: `Auto-generated strategy for ${niche}`,
+        targetPlatform: 'tiktok',
+        hookStrategy: 'Hook with problem, show solution, call to action',
+        viralPotential: 65,
+        antiCopycatNote: 'Generated from AI analysis of market trends',
+      },
+      scenes: [
+        {
+          sceneId: 'scene_01_hook',
+          durationSeconds: 3,
+          transition: 'fade',
+          imagePrompt: `Flat lay composition featuring ${niche} themed items on a wooden desk, soft natural lighting, warm earth tones, minimalist aesthetic, no text, no logos`,
+          textOverlays: [{
+            text: `The #1 ${niche} secret`,
+            position: 'center',
+            fontStyle: 'sans-serif-bold',
+            fontSize: 48,
+            color: '#FFFFFF',
+            animation: 'typewriter',
+            showAtSeconds: 0.5,
+            duration: 2.5,
+          }],
+        },
+        {
+          sceneId: 'scene_02_problem',
+          durationSeconds: 3,
+          transition: 'slide_left',
+          imagePrompt: `Close-up of hands arranging ${niche} materials, warm cozy atmosphere, coffee shop vibes, soft bokeh background, no text`,
+          textOverlays: [{
+            text: 'Most people get this wrong',
+            position: 'bottom_third',
+            fontStyle: 'sans-serif-light',
+            fontSize: 32,
+            color: '#2D4F1E',
+            animation: 'fade_in',
+            showAtSeconds: 0.5,
+            duration: 2.5,
+          }],
+        },
+        {
+          sceneId: 'scene_03_solution',
+          durationSeconds: 4,
+          transition: 'fade',
+          imagePrompt: `Beautiful organized display of ${niche} products, pastel color palette, morning light streaming through window, hygge aesthetic`,
+          textOverlays: [{
+            text: 'The AI-powered solution',
+            position: 'top',
+            fontStyle: 'serif-elegant',
+            fontSize: 36,
+            color: '#5C4033',
+            animation: 'slide_up',
+            showAtSeconds: 0.3,
+            duration: 3.7,
+          }],
+        },
+        {
+          sceneId: 'scene_04_cta',
+          durationSeconds: 3,
+          transition: 'zoom_in',
+          imagePrompt: `Digital device showing ${niche} content, modern workspace, plants and warm lighting, dark academia aesthetic`,
+          textOverlays: [{
+            text: 'Link in bio → Get yours',
+            position: 'bottom_third',
+            fontStyle: 'sans-serif-bold',
+            fontSize: 40,
+            color: '#FFFFFF',
+            animation: 'pop',
+            showAtSeconds: 1,
+            duration: 2,
+          }],
+        },
+      ],
+      totalDurationSeconds: 13,
+      pacing: 'fast',
+    };
+  }
+}
+
+// ─── Singleton ──────────────────────────────────────────────────────────────
+
+export const productionDirector = new ProductionDirector();

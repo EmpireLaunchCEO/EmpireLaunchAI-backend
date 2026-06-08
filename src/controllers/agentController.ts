@@ -45,10 +45,24 @@ export const initializeAgent = async (req: Request, res: Response) => {
     ).limit(1);
 
     if (existingGoal) {
+      // UPDATE existing goal with new details to ensure sync
+      const description = `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`;
+      await db.update(goals)
+        .set({ 
+          description,
+          updatedAt: new Date() 
+        })
+        .where(eq(goals.id, existingGoal.id));
+
+      await userSettingsService.saveSettings(userId, {
+        businessNiche: niche,
+        businessAngle: angle
+      });
+
       return res.json({
         status: 'success',
-        empire: existingGoal,
-        message: 'Empire already exists, resuming sync'
+        empire: { ...existingGoal, description },
+        message: 'Empire details updated and synchronized'
       });
     }
 

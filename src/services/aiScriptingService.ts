@@ -1,9 +1,9 @@
-import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { StringOutputParser, JsonOutputParser } from "@langchain/core/output_parsers";
 import { resolveModelForUser, resolveStudioReasoner, getDefaultModel } from "../utils/resolveModel.js";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { getMasterBriefing } from "./strategicDirective.js";
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -24,12 +24,17 @@ export class AIScriptingService {
   async generateEmailDraft(context: ScriptingContext): Promise<string> {
     const model = context.userId ? await resolveModelForUser(context.userId) : getDefaultModel();
 
+    const masterBriefing = getMasterBriefing({
+      niche: context.businessNiche,
+      goal: context.userGoal,
+      userTier: 'Customer Success Specialist'
+    });
+
     const template = `
-      You are an expert Customer Success Agent for a {businessNiche} business.
-      Your goal is to draft a professional and helpful email response to a customer inquiry.
+      ${masterBriefing}
       
-      User Goal: {userGoal}
-      Business Niche: {businessNiche}
+      Task: Draft a professional and helpful email response to a customer inquiry.
+      
       Product Name: {productName}
       Tone: {tone}
       
@@ -37,8 +42,7 @@ export class AIScriptingService {
       {customerInquiry}
       
       Draft a complete email including a subject line and body. 
-      Ensure the response aligns with the user's goal and business niche.
-      If a tone is specified, use that tone. Otherwise, be professional and friendly.
+      Ensure the response aligns with the master strategic directives.
       
       IMPORTANT: All generated emails MUST include the following placeholder for legal compliance at the end:
       [SENDER_IDENTITY_PLACEHOLDER]
@@ -53,8 +57,6 @@ export class AIScriptingService {
     ]);
 
     return await chain.invoke({
-      businessNiche: context.businessNiche,
-      userGoal: context.userGoal,
       productName: context.productName || "our latest offering",
       tone: context.tone || "professional and friendly",
       customerInquiry: context.customerInquiry,
@@ -63,17 +65,22 @@ export class AIScriptingService {
 
   /**
    * Creates a comprehensive Design Blueprint using High-Intelligence reasoning.
-   * Uses Gemini 3 Flash logic for problem solving.
    */
   async generateDesignBlueprint(context: ScriptingContext): Promise<string> {
     const model = await resolveStudioReasoner();
 
+    const masterBriefing = getMasterBriefing({
+      niche: context.businessNiche,
+      goal: context.userGoal,
+      userTier: 'High-Reasoning Designer'
+    });
+
     const template = `
-      You are the Empire Studio Intelligence Layer (High-Reasoning Designer).
-      Task: Create a comprehensive Design Blueprint for a product called "{productName}" in the {businessNiche} niche.
+      ${masterBriefing}
+      
+      Task: Create a comprehensive Design Blueprint for a product called "{productName}".
       
       Target Audience Context: {customerInquiry}
-      Specific Goal: {userGoal}
       
       Provide a structured blueprint including:
       1. Recommended Visual Style (Colors, Typography, Mood)
@@ -82,7 +89,7 @@ export class AIScriptingService {
       4. Anti-Copycat Modifications (Specific ways to make this design technically unique from best-sellers)
       5. Step-by-Step Execution Plan (prioritizing free-tier tools and assets)
       
-      Analyze the problem step-by-step. Use your high-intelligence reasoning to find unique market gaps.
+      Analyze the problem step-by-step according to the Strategic Directive.
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
@@ -93,10 +100,8 @@ export class AIScriptingService {
     ]);
 
     return await chain.invoke({
-      businessNiche: context.businessNiche,
       productName: context.productName || "Unspecified Product",
       customerInquiry: context.customerInquiry,
-      userGoal: context.userGoal,
     });
   }
 
@@ -106,8 +111,15 @@ export class AIScriptingService {
   async generateListingSEO(niche: string, bestSellers: any[]): Promise<any> {
     const model = await resolveStudioReasoner();
 
+    const masterBriefing = getMasterBriefing({
+      niche,
+      goal: "Generate high-traction SEO data for a marketplace listing.",
+      userTier: 'Marketplace SEO Specialist'
+    });
+
     const template = `
-      You are an expert Marketplace SEO Specialist powered by Empire Studio Intelligence.
+      ${masterBriefing}
+      
       Analyze the following best-selling products in the {niche} niche:
       {bestSellersData}
       
@@ -118,7 +130,7 @@ export class AIScriptingService {
       - description: engaging Description focusing on benefits
       - tags: string[] (exactly 13 relevant tags)
       - price: suggested price in cents (integer)
-      - competitiveEdge: 1 sentence explaining why this listing will beat the competition
+      - competitiveEdge: 1 sentence explaining why this listing will beat the competition (Strategic Reasoning)
     `;
 
     const prompt = PromptTemplate.fromTemplate(template);
