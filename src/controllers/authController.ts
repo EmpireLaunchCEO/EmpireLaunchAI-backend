@@ -125,7 +125,7 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
   const platform = req.params.platform as string;
   const shopDomain = req.query.shop as string | undefined;
 
-  if (!universalGatewayService.getConfig(platform)) {
+  if (typeof platform !== 'string' || !universalGatewayService.getConfig(platform)) {
     return res.status(400).json({ error: `Unsupported platform: ${platform}` });
   }
 
@@ -145,8 +145,8 @@ export const handlePlatformCallback = async (req: Request, res: Response) => {
   const platform = req.params.platform as string;
   const { code, state, sessionId, shop } = req.body;
 
-  if (!code || !state || !sessionId) {
-    return res.status(400).json({ error: 'Missing required fields: code, state, sessionId' });
+  if (typeof platform !== 'string' || !code || !state || !sessionId) {
+    return res.status(400).json({ error: 'Missing required fields: platform, code, state, sessionId' });
   }
 
   try {
