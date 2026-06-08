@@ -5,7 +5,7 @@ import { fraudSentinel } from '../services/fraudSentinel.js';
 import { strategyOrchestrator } from '../services/strategyOrchestrator.js';
 import { inboxAssistantService } from '../services/inboxAssistantService.js';
 import { eq, and, count, inArray } from 'drizzle-orm';
-import { userSettingsService } from './userSettingsController.js';
+import { userSettingsService } from '../services/userSettingsService.js';
 const { goals, users, approvals, tasks } = schema;
 
 export const initializeAgent = async (req: Request, res: Response) => {

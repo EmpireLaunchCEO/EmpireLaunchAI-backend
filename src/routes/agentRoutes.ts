@@ -13,6 +13,7 @@ import {
   approveInboxDraft,
   initializeAgent
 } from '../controllers/agentController.js';
+import { userSettingsService } from '../services/userSettingsService.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
