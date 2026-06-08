@@ -50,6 +50,7 @@ export interface UserSettingsDTO {
   protocolAccepted?: boolean;
 
   // Identity
+  userId?: string;
   email?: string;
 }
 
@@ -212,6 +213,7 @@ export class UserSettingsService {
 
   private mapRowToDTO(row: any): UserSettingsDTO {
     return {
+      userId: row.userId,
       businessAngle: row.businessAngle ?? undefined,
       businessNiche: row.businessNiche ?? undefined,
       isOnboarded: row.onboardingComplete ?? false,

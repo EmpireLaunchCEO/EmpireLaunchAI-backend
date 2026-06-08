@@ -150,7 +150,7 @@ export const handlePlatformCallback = async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId, shop);
+    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId, shop as string);
     res.json(result);
   } catch (error: any) {
     console.error(`[Auth] ${platform} callback error:`, error.message);

@@ -71,18 +71,19 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
     if (niche || angle) {
       const [existingGoal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
       let newDesc = description || existingGoal?.description || '';
+      
       if (niche) {
-        if (newDesc.includes('Empire Niche:')) {
-          newDesc = newDesc.replace(/Empire Niche: (.*?)\./, `Empire Niche: ${niche}.`);
+        if (/Empire Niche:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+          newDesc = newDesc.replace(/Empire Niche:\s*(.*?)(?:\.|$)/, `Empire Niche: ${niche}.`);
         } else {
-          newDesc += ` Empire Niche: ${niche}.`;
+          newDesc = `Empire Niche: ${niche}. ${newDesc}`.trim();
         }
       }
       if (angle) {
-        if (newDesc.includes('Angle:')) {
-          newDesc = newDesc.replace(/Angle: (.*?)\./, `Angle: ${angle}.`);
+        if (/Angle:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+          newDesc = newDesc.replace(/Angle:\s*(.*?)(?:\.|$)/, `Angle: ${angle}.`);
         } else {
-          newDesc += ` Angle: ${angle}.`;
+          newDesc = `${newDesc} Angle: ${angle}.`.trim();
         }
       }
       updateData.description = newDesc;
