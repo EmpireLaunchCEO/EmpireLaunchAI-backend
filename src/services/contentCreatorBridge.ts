@@ -58,7 +58,9 @@ export class ContentCreatorBridge {
 
     try {
       // Phase 1: Free-First Template Search
-      const templates = await this.searchFreeTemplates(userId, platform, niche);
+      const templatesResult = await this.searchFreeTemplates(userId, platform, niche) as any;
+      const templates = (templatesResult?.templates || []) as any[];
+      
       if (!templates || templates.length === 0) {
         throw new Error(`No free templates found for ${niche} on ${platform}`);
       }
@@ -85,7 +87,7 @@ export class ContentCreatorBridge {
         message: `📤 ${platform}: Exporting final design...`
       });
 
-      const exportResult = await this.exportDesign(userId, platform, bestTemplateId);
+      const exportResult = await this.exportDesign(userId, platform, bestTemplateId) as any;
 
       // Phase 4: Store DNA strand in Vault (NOT the exported image)
       const dnaStrand: DnaStrand = {
@@ -130,7 +132,7 @@ export class ContentCreatorBridge {
         platform,
         niche,
         templateId: bestTemplateId,
-        exportUrl: exportResult?.url,
+        exportUrl: exportResult?.url || exportResult?.exportUrl,
         strandId,
         visualSummary,
         status: 'completed',
