@@ -5,6 +5,7 @@ import { fraudSentinel } from '../services/fraudSentinel.js';
 import { strategyOrchestrator } from '../services/strategyOrchestrator.js';
 import { inboxAssistantService } from '../services/inboxAssistantService.js';
 import { eq, and, count, inArray } from 'drizzle-orm';
+import { userSettingsService } from './userSettingsController.js';
 const { goals, users, approvals, tasks } = schema;
 
 export const initializeAgent = async (req: Request, res: Response) => {
@@ -65,13 +66,10 @@ export const initializeAgent = async (req: Request, res: Response) => {
     }).returning();
 
     // 1.5 Sync to User Settings for global memory
-    await db.update(schema.userSettings)
-      .set({
-        businessNiche: niche,
-        businessAngle: angle,
-        updatedAt: new Date()
-      })
-      .where(eq(schema.userSettings.userId, userId));
+    await userSettingsService.saveSettings(userId, {
+      businessNiche: niche,
+      businessAngle: angle
+    });
 
     // 2. Add initialize-agent task to the queue for heavy processing (AI, provisioning)
     const job = await onboardingQueue.add('initialize-agent', {
