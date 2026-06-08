@@ -59,7 +59,7 @@ export class ContentCreatorBridge {
     try {
       // Phase 1: Free-First Template Search
       const templatesResult: any = await this.searchFreeTemplates(userId, platform, niche);
-      const templates: any[] = templatesResult?.templates || [];
+      const templates: any[] = (templatesResult as any)?.templates || [];
       
       if (!templates || templates.length === 0) {
         throw new Error(`No free templates found for ${niche} on ${platform}`);

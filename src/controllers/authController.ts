@@ -122,7 +122,8 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
   const userId = (req as any).userId;
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
 
-  const platform = req.params.platform as string;
+  const platformParam = req.params.platform;
+  const platform = (Array.isArray(platformParam) ? platformParam[0] : platformParam) as string;
   const shopDomain = req.query.shop as string | undefined;
 
   if (typeof platform !== 'string' || !universalGatewayService.getConfig(platform)) {
@@ -142,7 +143,8 @@ export const handlePlatformCallback = async (req: Request, res: Response) => {
   const userId = (req as any).userId;
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
 
-  const platform = req.params.platform as string;
+  const platformParam = req.params.platform;
+  const platform = (Array.isArray(platformParam) ? platformParam[0] : platformParam) as string;
   const { code, state, sessionId, shop } = req.body;
 
   if (typeof platform !== 'string' || !code || !state || !sessionId) {
