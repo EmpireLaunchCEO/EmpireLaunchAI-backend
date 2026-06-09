@@ -392,3 +392,16 @@ export const inboxDrafts = pgTable('inbox_drafts', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+export const infrastructureCosts = pgTable('infrastructure_costs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  provider: text('provider').notNull(), // 'railway', 'openai', 'gemini'
+  amount: integer('amount').notNull(), // in cents
+  currency: text('currency').default('usd').notNull(),
+  status: text('status').default('active').notNull(), // 'active', 'free_tier', 'limit_reached'
+  metadata: jsonb('metadata'), // e.g. usage metrics
+  date: timestamp('date').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});

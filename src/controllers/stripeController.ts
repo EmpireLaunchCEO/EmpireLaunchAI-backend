@@ -182,3 +182,35 @@ export const triggerInstantPayout = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+export const createPlatformCheckout = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string;
+    const { returnUrl } = req.body;
+    if (!userId) return res.status(401).json({ error: 'Auth required' });
+
+    const session = await stripeService.createPlatformCheckoutSession(userId, returnUrl);
+    res.json({ url: session.url });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const verifyPlatformPayment = async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.query;
+    if (!sessionId) return res.status(400).json({ error: 'Session ID required' });
+
+    const session = await stripeService.getSession(sessionId as string);
+    if (session.payment_status === 'paid') {
+      const userId = session.client_reference_id;
+      if (userId) {
+        await db.update(users).set({ tier: 'STANDARD_USER', updatedAt: new Date() }).where(eq(users.id, userId));
+      }
+      return res.json({ status: 'paid' });
+    }
+    res.json({ status: 'unpaid' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};

@@ -2,8 +2,8 @@ import { Request, Response } from 'express';
 import { etsyService } from '../services/etsyService.js';
 import { metaService } from '../services/metaService.js';
 import { db, schema } from '../db/index.js';
-const { users, oauthSessions } = schema;
-import { eq } from 'drizzle-orm';
+const { users, oauthSessions, userSettings } = schema;
+import { eq, and } from 'drizzle-orm';
 import crypto from 'crypto';
 import { gmailService } from '../services/gmailService.js';
 import { outlookService } from '../services/outlookService.js';
@@ -13,6 +13,68 @@ import { integrationService } from '../services/integrationService.js';
 import { universalGatewayService } from '../services/universalGatewayService.js';
 import { OWNER_CONFIG } from '../config/owner.js';
 import { v4 as uuidv4 } from 'uuid';
+
+// Simple password hashing using Node's crypto
+function hashPassword(password: string): string {
+  return crypto.pbkdf2Sync(password, 'empire-launch-salt', 1000, 64, 'sha512').toString('hex');
+}
+
+export const registerUser = async (req: Request, res: Response) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  try {
+    const existingUser = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (existingUser.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    const userId = uuidv4();
+    const passwordHash = hashPassword(password);
+
+    await db.insert(users).values({
+      id: userId,
+      email,
+      passwordHash,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      tier: 'STANDARD_USER',
+    });
+
+    // Create default settings
+    await db.insert(userSettings).values({
+      id: uuidv4(),
+      userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    res.json({ status: 'success', userId });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Failed to register' });
+  }
+};
+
+export const loginUser = async (req: Request, res: Response) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  try {
+    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!user || user.passwordHash !== hashPassword(password)) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    res.json({ status: 'success', userId: user.id });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
 
 export const acceptTerms = async (req: Request, res: Response) => {
   const { userId, version } = req.body;
@@ -32,7 +94,7 @@ export const acceptTerms = async (req: Request, res: Response) => {
 };
 
 export const getEtsyAuthUrl = async (req: Request, res: Response) => {
-  const userId = (req as any).userId;
+  const userId = (req as any).userId || req.headers['x-user-id'];
   if (!userId) {
     return res.status(401).json({ error: 'Authentication required' });
   }
@@ -41,7 +103,6 @@ export const getEtsyAuthUrl = async (req: Request, res: Response) => {
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-  // Persist OAuth session server-side — never send codeVerifier to the frontend
   const sessionId = uuidv4();
   await db.insert(oauthSessions).values({
     id: sessionId,
@@ -50,117 +111,64 @@ export const getEtsyAuthUrl = async (req: Request, res: Response) => {
     state,
     codeVerifier,
     used: false,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 min expiry
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     createdAt: new Date(),
   });
 
   const url = etsyService.getAuthUrl(state, codeChallenge);
-
-  // Only return the URL and state — codeVerifier stays server-side
   res.json({ url, state, sessionId });
 };
 
 export const etsyCallback = async (req: Request, res: Response) => {
   const { code, state, sessionId } = req.body;
-  const userId = (req as any).userId;
+  const userId = (req as any).userId || req.headers['x-user-id'];
 
   if (!code || !state || !sessionId || !userId) {
-    return res.status(400).json({ error: 'Missing required fields: code, state, sessionId' });
+    return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
-    // Retrieve and validate the OAuth session
-    const [session] = await db.select()
-      .from(oauthSessions)
-      .where(eq(oauthSessions.id, sessionId))
-      .limit(1);
-
-    if (!session) {
-      return res.status(400).json({ error: 'OAuth session not found. Please restart authorization.' });
+    const [session] = await db.select().from(oauthSessions).where(eq(oauthSessions.id, sessionId)).limit(1);
+    if (!session || session.used || session.state !== state || new Date() > new Date(session.expiresAt) || session.userId !== userId) {
+      return res.status(400).json({ error: 'Invalid or expired session' });
     }
 
-    if (session.used) {
-      return res.status(400).json({ error: 'OAuth session already used. Please restart authorization.' });
-    }
-
-    if (session.state !== state) {
-      return res.status(400).json({ error: 'State mismatch. Possible CSRF attack.' });
-    }
-
-    if (new Date() > new Date(session.expiresAt)) {
-      return res.status(400).json({ error: 'OAuth session expired. Please restart authorization.' });
-    }
-
-    if (session.userId !== userId) {
-      return res.status(403).json({ error: 'User ID mismatch.' });
-    }
-
-    // Mark session as used (prevent replay attacks)
-    await db.update(oauthSessions)
-      .set({ used: true })
-      .where(eq(oauthSessions.id, sessionId));
-
-    // Exchange code for tokens using the stored codeVerifier (never exposed to client)
+    await db.update(oauthSessions).set({ used: true }).where(eq(oauthSessions.id, sessionId));
     const tokenData = await etsyService.getAccessToken(code, session.codeVerifier);
-
-    // Fetch shop info
     const shopData = await etsyService.getShop(tokenData.access_token);
     const shopId = shopData.results?.[0]?.shop_id;
 
     await integrationService.saveIntegration(userId, 'etsy', tokenData, shopId?.toString());
-    res.json({ status: 'success', message: 'Etsy integrated successfully' });
-  } catch (error: any) {
-    console.error('Etsy callback error:', error.response?.data || error.message);
+    res.json({ status: 'success' });
+  } catch (error) {
     res.status(500).json({ error: 'Failed to integrate Etsy' });
   }
 };
 
-// ─── UNIVERSAL GATEWAY HANDLERS ────────────────────────────────────
-// All platforms use the same secure OAuth pattern via universalGatewayService.
-
 export const getPlatformAuthUrl = async (req: Request, res: Response) => {
-  const userId = (req as any).userId;
+  const userId = (req as any).userId || req.headers['x-user-id'];
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
-
-  const platformParam = req.params.platform;
-  const platform = (Array.isArray(platformParam) ? platformParam[0] : platformParam) as string;
-  const shopDomain = req.query.shop as string | undefined;
-
-  if (typeof platform !== 'string' || !universalGatewayService.getConfig(platform)) {
-    return res.status(400).json({ error: `Unsupported platform: ${platform}` });
-  }
-
+  const platform = req.params.platform;
   try {
-    const result = await universalGatewayService.initiateOAuth(userId, platform, shopDomain);
+    const result = await universalGatewayService.initiateOAuth(userId, platform);
     res.json(result);
   } catch (error: any) {
-    console.error(`[Auth] ${platform} auth URL error:`, error.message);
     res.status(500).json({ error: error.message });
   }
 };
 
 export const handlePlatformCallback = async (req: Request, res: Response) => {
-  const userId = (req as any).userId;
+  const userId = (req as any).userId || req.headers['x-user-id'];
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
-
-  const platformParam = req.params.platform;
-  const platform = (Array.isArray(platformParam) ? platformParam[0] : platformParam) as string;
-  const { code, state, sessionId, shop } = req.body;
-
-  if (typeof platform !== 'string' || !code || !state || !sessionId) {
-    return res.status(400).json({ error: 'Missing required fields: platform, code, state, sessionId' });
-  }
-
+  const platform = req.params.platform;
+  const { code, state, sessionId } = req.body;
   try {
-    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId, shop as string);
+    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId);
     res.json(result);
   } catch (error: any) {
-    console.error(`[Auth] ${platform} callback error:`, error.message);
     res.status(500).json({ error: error.message });
   }
 };
-
-// ─── LEGACY HANDLERS (delegate to Universal Gateway for TikTok/Meta) ──
 
 export const getMetaAuthUrl = async (req: Request, res: Response) => {
   req.params = { platform: 'meta' };
@@ -184,45 +192,21 @@ export const tiktokCallback = async (req: Request, res: Response) => {
 
 export const redeemKey = async (req: Request, res: Response) => {
   const { userId, key } = req.body;
-  if (!userId || !key) {
-    return res.status(400).json({ error: 'UserId and key are required' });
-  }
-
+  if (!userId || !key) return res.status(400).json({ error: 'Missing userId or key' });
   try {
     const cleanKey = key.trim().toUpperCase();
-
-    // Permanent Owner/Admin Bypass
     if (cleanKey === OWNER_CONFIG.masterKey) {
-      await db.update(users)
-        .set({ tier: 'EMPIRE_MASTER', businessSlots: 5, updatedAt: new Date() })
-        .where(eq(users.id, userId));
-      
-      return res.json({ status: 'success', message: 'Master access granted. Welcome, Admin.' });
+      await db.update(users).set({ tier: 'EMPIRE_MASTER', businessSlots: 5, updatedAt: new Date() }).where(eq(users.id, userId));
+      return res.json({ status: 'success', message: 'Master access granted' });
     }
-
     const [accessKey] = await db.select().from(schema.accessKeys).where(eq(schema.accessKeys.key, key)).limit(1);
-    
-    if (!accessKey) {
-      return res.status(404).json({ error: 'Invalid access key' });
-    }
-    
-    if (accessKey.isUsed) {
-      return res.status(400).json({ error: 'Access key already used' });
-    }
-
+    if (!accessKey || accessKey.isUsed) return res.status(400).json({ error: 'Invalid or used key' });
     await db.transaction(async (tx: any) => {
-      await tx.update(users)
-        .set({ tier: accessKey.tier, accessKey: accessKey.key, updatedAt: new Date() })
-        .where(eq(users.id, userId));
-      
-      await tx.update(schema.accessKeys)
-        .set({ isUsed: true, usedBy: userId, updatedAt: new Date() })
-        .where(eq(schema.accessKeys.id, accessKey.id));
+      await tx.update(users).set({ tier: accessKey.tier, accessKey: accessKey.key, updatedAt: new Date() }).where(eq(users.id, userId));
+      await tx.update(schema.accessKeys).set({ isUsed: true, usedBy: userId, updatedAt: new Date() }).where(eq(schema.accessKeys.id, accessKey.id));
     });
-
-    res.json({ status: 'success', message: `Key redeemed. Account upgraded to ${accessKey.tier}.` });
+    res.json({ status: 'success' });
   } catch (error) {
-    console.error('Error redeeming key:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

@@ -12,6 +12,7 @@ export const users = sqliteTable('users', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   tier: text('tier').default('STANDARD_USER').notNull(),
   accessKey: text('access_key').unique(),
+  passwordHash: text('password_hash'),
 });
 
 export const products = sqliteTable('products', {

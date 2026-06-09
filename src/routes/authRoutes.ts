@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { 
+  registerUser,
+  loginUser,
   acceptTerms,
   redeemKey,
   getEtsyAuthUrl, 
@@ -14,6 +16,8 @@ import {
 
 const router = Router();
 
+router.post('/register', registerUser);
+router.post('/login', loginUser);
 router.post('/terms/accept', acceptTerms);
 router.post('/redeem-key', redeemKey);
 
