@@ -106,7 +106,7 @@ export class RenderingEngine {
       style: 'vivid',
     });
 
-    const imageUrl = response.data[0]?.url;
+    const imageUrl = response.data?.[0]?.url;
     if (!imageUrl) throw new Error('DALL-E returned no image URL');
 
     // Download the image
