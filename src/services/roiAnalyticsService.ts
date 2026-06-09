@@ -211,6 +211,24 @@ export class ROIAnalyticsService {
       const [milestone] = await db.select().from(revenueMilestones).where(eq(revenueMilestones.userId, userId));
       totalRevenue = milestone?.totalRevenue || 0;
     }
+
+    // Calculate Monthly Revenue (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    let monthlyRevenue = 0;
+    if (revenueTransactions) {
+      const monthlyRes = await db.select({
+        total: sql<number>`sum(${revenueTransactions.amount})`,
+      })
+      .from(revenueTransactions)
+      .where(and(
+        eq(revenueTransactions.userId, userId),
+        gte(revenueTransactions.date, thirtyDaysAgo)
+      ));
+      monthlyRevenue = monthlyRes[0]?.total || 0;
+    }
+
     const revenueVelocity = Math.min(100, Math.round((totalRevenue / 100000) * 10)); // $10k = 100 score
 
     // 2. Engagement Pulse (30%)
@@ -264,6 +282,7 @@ export class ROIAnalyticsService {
 
     return {
       totalLifetimeRevenue: totalRevenue,
+      recentMonthlyRevenue: monthlyRevenue,
       pendingDues: dues.total,
       growthScore: overallScore,
       revenueVelocity,

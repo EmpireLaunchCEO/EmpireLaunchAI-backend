@@ -65,6 +65,7 @@ export const getEmpirePulse = async (req: Request, res: Response) => {
       progress: health.growthScore,
       health: {
         revenue: health.totalLifetimeRevenue / 100, // backend uses cents
+        monthlyRevenue: health.recentMonthlyRevenue / 100,
         pendingDues: health.pendingDues / 100,
         platformBreakdown: health.platformBreakdown.map((p: any) => ({
           platform: p.platform,
