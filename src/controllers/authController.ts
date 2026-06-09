@@ -148,7 +148,7 @@ export const etsyCallback = async (req: Request, res: Response) => {
 export const getPlatformAuthUrl = async (req: Request, res: Response) => {
   const userId = (req as any).userId || req.headers['x-user-id'];
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
-  const platform = req.params.platform;
+  const platform = req.params.platform as string;
   try {
     const result = await universalGatewayService.initiateOAuth(userId, platform);
     res.json(result);
@@ -160,7 +160,7 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
 export const handlePlatformCallback = async (req: Request, res: Response) => {
   const userId = (req as any).userId || req.headers['x-user-id'];
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
-  const platform = req.params.platform;
+  const platform = req.params.platform as string;
   const { code, state, sessionId } = req.body;
   try {
     const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId);
