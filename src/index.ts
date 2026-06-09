@@ -28,6 +28,7 @@ import settingsRoutes from './routes/settingsRoutes.js';
 import vaultRoutes from './routes/vaultRoutes.js';
 import verificationRoutes from './routes/verificationRoutes.js';
 import retentionRoutes from './routes/retentionRoutes.js';
+import revenueRoutes from './routes/revenueRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -116,6 +117,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/vault', vaultRoutes);
 app.use('/api/verification', verificationRoutes);
 app.use('/api/retention', retentionRoutes);
+app.use('/api/revenue', revenueRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });
