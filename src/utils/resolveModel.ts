@@ -43,10 +43,20 @@ export async function resolveModelForUser(userId?: string): Promise<BaseChatMode
   const config = MODEL_MAP[tier] || DEFAULT_MODEL;
 
   if (config.provider === 'google') {
+    if (!process.env.GOOGLE_API_KEY) {
+      console.warn('[resolveModel] GOOGLE_API_KEY missing, falling back to OpenAI if available');
+      if (process.env.OPENAI_API_KEY) {
+        return new ChatOpenAI({
+          modelName: 'gpt-4o-mini',
+          temperature: config.temperature,
+          openAIApiKey: process.env.OPENAI_API_KEY,
+        });
+      }
+    }
     return new ChatGoogleGenerativeAI({
       model: config.modelName,
       temperature: config.temperature,
-      apiKey: process.env.GOOGLE_API_KEY,
+      apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
     });
   }
 
@@ -59,18 +69,32 @@ export async function resolveModelForUser(userId?: string): Promise<BaseChatMode
 
 export async function resolveStudioReasoner(): Promise<BaseChatModel> {
   const config = MODEL_MAP.STUDIO_INTEL;
+  if (!process.env.GOOGLE_API_KEY && process.env.OPENAI_API_KEY) {
+    return new ChatOpenAI({
+      modelName: 'gpt-4o-mini',
+      temperature: config.temperature,
+      openAIApiKey: process.env.OPENAI_API_KEY,
+    });
+  }
   return new ChatGoogleGenerativeAI({
     model: config.modelName,
     temperature: config.temperature,
-    apiKey: process.env.GOOGLE_API_KEY,
+    apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
   });
 }
 
 export function getDefaultModel(): BaseChatModel {
+  if (!process.env.GOOGLE_API_KEY && process.env.OPENAI_API_KEY) {
+    return new ChatOpenAI({
+      modelName: 'gpt-4o-mini',
+      temperature: 0.5,
+      openAIApiKey: process.env.OPENAI_API_KEY,
+    });
+  }
   return new ChatGoogleGenerativeAI({
     model: 'gemini-1.5-flash',
     temperature: 0.5,
-    apiKey: process.env.GOOGLE_API_KEY,
+    apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
   });
 }
 
