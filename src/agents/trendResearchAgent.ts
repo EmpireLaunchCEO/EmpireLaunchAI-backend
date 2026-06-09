@@ -14,13 +14,26 @@ export class TrendResearchAgent {
   private embeddings: GoogleGenerativeAIEmbeddings;
 
   constructor() {
-    this.embeddings = new GoogleGenerativeAIEmbeddings({
-      apiKey: process.env.GOOGLE_API_KEY,
-      modelName: "embedding-001", // Default Google embedding model
-    });
+    if (!process.env.GOOGLE_API_KEY) {
+      console.warn('[TrendResearchAgent] GOOGLE_API_KEY not found. Agent will operate in reduced mode.');
+      // Initialize with a dummy key to prevent crash if not used immediately
+      this.embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: 'DUMMY_KEY',
+        modelName: "embedding-001",
+      });
+    } else {
+      this.embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: process.env.GOOGLE_API_KEY,
+        modelName: "embedding-001",
+      });
+    }
   }
 
   async analyzeTrends(goal: string, userId?: string) {
+    if (!process.env.GOOGLE_API_KEY) {
+       console.error('[TrendResearchAgent] Cannot analyze trends: GOOGLE_API_KEY is missing.');
+       return JSON.stringify({ trendingNiches: [], suggestedStrategy: "Market research requires a configured GOOGLE_API_KEY." });
+    }
     console.log("Ingesting trend data...");
     const rawData = await researchService.getAllTrends();
 
