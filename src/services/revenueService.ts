@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { revenueMilestones, transactionHashes, users } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { revenueMilestones, transactionHashes, users } = schema;
 import { eq, and, sql } from 'drizzle-orm';
 import { hashTransactionId } from '../utils/security.js';
 import { v4 as uuidv4 } from 'uuid';

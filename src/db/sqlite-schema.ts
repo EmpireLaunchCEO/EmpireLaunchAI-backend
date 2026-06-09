@@ -505,3 +505,16 @@ export const productionScripts = sqliteTable('production_scripts', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const infrastructureCosts = sqliteTable('infrastructure_costs', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  provider: text('provider').notNull(), // 'railway', 'openai', 'gemini'
+  amount: integer('amount').notNull(), // in cents
+  currency: text('currency').default('usd').notNull(),
+  status: text('status').default('active').notNull(), // 'active', 'free_tier', 'limit_reached'
+  metadata: text('metadata', { mode: 'json' }), // e.g. usage metrics
+  date: integer('date', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
