@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { styleDna } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { styleDna } = schema;
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import sharp from 'sharp';

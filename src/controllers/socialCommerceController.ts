@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import { metaCatalogService } from '../services/metaCatalogService.js';
 import { tiktokShopService } from '../services/tiktokShopService.js';
-import { db } from '../db/index.js';
-import { products } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { products } = schema;
 import { eq } from 'drizzle-orm';
 
 export const syncMetaCatalog = async (req: Request, res: Response) => {

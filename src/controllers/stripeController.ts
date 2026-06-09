@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import { stripeService } from '../services/stripeService.js';
 import { paymentButtonService } from '../services/paymentButtonService.js';
-import { db } from '../db/index.js';
-import { users, products, paymentLinks } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { users, products, paymentLinks } = schema;
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 

@@ -1,7 +1,7 @@
 import cron from 'node-cron';
-import { db } from '../db/index.js';
+import { db, schema } from '../db/index.js';
+const { goals } = schema;
 import { eq } from 'drizzle-orm';
-import { goals } from '../db/sqlite-schema.js';
 import { getEngine } from '../services/goalExecutionEngine.js';
 import { getRouter } from '../services/platformRouter.js';
 import { getProductionWorker } from '../services/productionWorker.js';

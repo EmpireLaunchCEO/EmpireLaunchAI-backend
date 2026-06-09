@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { paymentButtons } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { paymentButtons } = schema;
 import { eq, and } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 

@@ -1,5 +1,5 @@
 import { db, schema } from '../db/index.js';
-import { campaigns, scheduledPosts } from '../db/sqlite-schema.js';
+const { campaigns, scheduledPosts } = schema;
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { canvaService } from './canvaService.js';

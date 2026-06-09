@@ -1,7 +1,7 @@
-import { db } from '../db/index.js';
+import { db, schema } from '../db/index.js';
+const { marketSignals, integrations, users } = schema;
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { marketSignals, integrations, users } from '../db/sqlite-schema.js';
 import { marketIntelligenceService } from './marketIntelligenceService.js';
 import { neuralMarketDiscoveryService } from './neuralMarketDiscoveryService.js';
 import { approvalService } from './approvalService.js';

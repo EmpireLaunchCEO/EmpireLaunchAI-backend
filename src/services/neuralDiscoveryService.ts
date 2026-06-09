@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { discoveryResults, ownershipVault } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { discoveryResults, ownershipVault } = schema;
 import { gmailService } from './gmailService.js';
 import { imapGatewayService, ImapConfig } from './imapGatewayService.js';
 import { encrypt, decrypt, encryptWithEnvelope } from '../utils/encryption.js';

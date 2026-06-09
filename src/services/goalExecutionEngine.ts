@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { goals, tasks, approvals, integrations, marketSignals, executionDecisions, historicalPerformance, engagementMetrics, revenueTransactions, strategySuggestions } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { goals, tasks, approvals, integrations, marketSignals, executionDecisions, historicalPerformance, engagementMetrics, revenueTransactions, strategySuggestions } = schema;
 import { eq, and, desc, lte, gte, inArray, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 

@@ -1,5 +1,5 @@
 import { db, schema } from '../db/index.js';
-import { dnaStrands } from '../db/sqlite-schema.js';
+const { dnaStrands } = schema;
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 

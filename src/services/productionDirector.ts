@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/index.js';
-import { productionScripts } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { productionScripts } = schema;
 import { eq } from 'drizzle-orm';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 

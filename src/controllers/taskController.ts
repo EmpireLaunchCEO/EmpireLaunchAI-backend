@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import { db } from '../db/index.js';
-import { tasks, goals } from '../db/schema.js';
+import { db, schema } from '../db/index.js';
+const { tasks, goals } = schema;
 import { eq, and, sql } from 'drizzle-orm';
 
 export const getTasks = async (req: Request, res: Response) => {

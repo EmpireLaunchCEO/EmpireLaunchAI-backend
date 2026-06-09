@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { neuralDiscoveryService } from '../services/neuralDiscoveryService.js';
-import { db } from '../db/index.js';
-import { discoveryResults } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { discoveryResults } = schema;
 import { eq, and } from 'drizzle-orm';
 
 export const runDiscovery = async (req: Request, res: Response) => {

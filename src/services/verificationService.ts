@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { handleVerifications } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { handleVerifications } = schema;
 import { neuralBrowserService } from './neuralBrowserService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { eq, and } from 'drizzle-orm';

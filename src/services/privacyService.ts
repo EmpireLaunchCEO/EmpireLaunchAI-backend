@@ -1,5 +1,5 @@
-import { db } from '../db/index.js';
-import { users, goals, tasks, products, paymentLinks, integrations, approvals, revenueMilestones, transactionHashes } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { users, goals, tasks, products, paymentLinks, integrations, approvals, revenueMilestones, transactionHashes } = schema;
 import { eq } from 'drizzle-orm';
 import { auditService } from './auditService.js';
 

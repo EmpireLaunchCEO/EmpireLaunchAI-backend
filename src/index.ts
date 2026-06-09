@@ -40,7 +40,8 @@ import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
 
-import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { migrate as migratePg } from 'drizzle-orm/node-postgres/migrator';
+import { migrate as migrateLibsql } from 'drizzle-orm/libsql/migrator';
 import { db } from './db/index.js';
 
 dotenv.config();
@@ -54,9 +55,13 @@ if (process.env.RUN_MIGRATIONS === 'true') {
   console.log('[Database] Running migrations...');
   try {
     const isSqlite = process.env.DATABASE_URL?.startsWith('file:') || process.env.DATABASE_URL?.startsWith('libsql:');
-    const folder = isSqlite ? './drizzle' : './drizzle-pg';
-    console.log(`[Database] Using migration folder: ${folder}`);
-    await migrate(db, { migrationsFolder: folder });
+    if (isSqlite) {
+      console.log(`[Database] Using LibSQL migration folder: ./drizzle`);
+      await migrateLibsql(db, { migrationsFolder: './drizzle' });
+    } else {
+      console.log(`[Database] Using Postgres migration folder: ./drizzle-pg`);
+      await migratePg(db, { migrationsFolder: './drizzle-pg' });
+    }
     console.log('[Database] Migrations complete.');
   } catch (err) {
     console.error('[Database] Migration failed:', err);

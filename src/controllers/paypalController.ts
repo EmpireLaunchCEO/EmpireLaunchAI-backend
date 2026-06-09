@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { paypalService } from '../services/paypalService.js';
-import { db } from '../db/index.js';
-import { users } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { users } = schema;
 import { eq } from 'drizzle-orm';
 
 export const onboardUser = async (req: Request, res: Response) => {
