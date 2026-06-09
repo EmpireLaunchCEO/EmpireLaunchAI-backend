@@ -99,6 +99,7 @@ export const revenueMilestones = sqliteTable('revenue_milestones', {
   userId: text('user_id').references(() => users.id).notNull(),
   totalRevenue: integer('total_revenue').default(0).notNull(), // Aggregate sum in cents
   lastMilestoneHit: integer('last_milestone_hit').default(0).notNull(), // Multiple of $1000 in cents
+  lastImminentMilestoneNotified: integer('last_imminent_milestone_notified').default(0).notNull(), // Multiple of $1000 in cents (triggered at $900)
   lifetimeSurchargesPaid: integer('lifetime_surcharges_paid').default(0).notNull(), // Total paid success fees in cents
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
