@@ -86,7 +86,7 @@ export class EmpireStudioController {
     }
 
     // Validate platforms
-    const validPlatforms = ['tiktok', 'instagram', 'youtube', 'facebook'];
+    const validPlatforms = ['tiktok', 'instagram', 'youtube', 'facebook', 'etsy', 'fiverr', 'shopify'];
     for (const p of platforms) {
       if (!validPlatforms.includes(p)) {
         return res.status(400).json({

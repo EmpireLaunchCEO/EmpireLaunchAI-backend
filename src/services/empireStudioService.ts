@@ -31,9 +31,9 @@ export interface StyleDNA {
 }
 
 /**
- * Supported social platforms for distribution.
+ * Supported social and marketplace platforms for distribution.
  */
-export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube' | 'facebook';
+export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube' | 'facebook' | 'etsy' | 'fiverr' | 'shopify';
 
 /**
  * Strategy for creating the master asset.
@@ -706,6 +706,29 @@ export class EmpireStudioService {
           { action: 'click', selector: '[aria-label="Create a post"]' },
           { action: 'type', selector: '[aria-label="What\'s on your mind?"]', value: content.caption },
           { action: 'click', selector: '[aria-label="Post"]' },
+        ],
+        required: true,
+      };
+    }
+    if (platform === 'etsy') {
+      return {
+        steps: [
+          { action: 'navigate', url: 'https://www.etsy.com/your/shops/me/listings/create' },
+          { action: 'type', selector: '#title-input', value: content.title },
+          { action: 'type', selector: '#description-input', value: content.caption },
+          { action: 'type', selector: '#price-input', value: (content.price / 100).toString() },
+          { action: 'click', selector: 'button[data-e2e="publish-button"]' },
+        ],
+        required: true,
+      };
+    }
+    if (platform === 'fiverr') {
+      return {
+        steps: [
+          { action: 'navigate', url: 'https://www.fiverr.com/start_selling' },
+          { action: 'type', selector: 'input[name="gig_title"]', value: content.title },
+          { action: 'type', selector: 'textarea[name="gig_description"]', value: content.caption },
+          { action: 'click', selector: 'button[type="submit"]' },
         ],
         required: true,
       };

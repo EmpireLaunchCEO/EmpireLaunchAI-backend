@@ -46,6 +46,10 @@ export const startDistributionWorker = () => {
                     title,
                     caption
                 );
+            } else if (platform === 'etsy' || platform === 'fiverr' || platform === 'shopify') {
+                // Route Marketplace listings through the ListingEngine or Hunter-Gatherer
+                console.log(`[DistributionWorker] Routing ${platform} to neural browser...`);
+                throw new Error(`API distribution restricted for ${platform}. Triggering Browser Agent.`);
             } else {
                 throw new Error(`Platform ${platform} not supported for distribution`);
             }
