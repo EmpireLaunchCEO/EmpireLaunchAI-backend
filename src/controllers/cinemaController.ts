@@ -10,17 +10,17 @@ const UPLOAD_DIR = path.join(process.cwd(), 'public', 'assets', 'cinema', 'uploa
 const PHOTO_DIR = path.join(process.cwd(), 'public', 'assets', 'cinema', 'facial_dna');
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
+  destination: (req: any, file: any, cb: any) => {
     const isPhoto = file.fieldname === 'photo';
     cb(null, isPhoto ? PHOTO_DIR : UPLOAD_DIR);
   },
-  filename: (req, file, cb) => {
+  filename: (req: any, file: any, cb: any) => {
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `${uuidv4()}${ext}`);
   },
 });
 
-const fileFilter = (req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+const fileFilter = (req: any, file: any, cb: any) => {
   const isPhoto = file.fieldname === 'photo';
   const allowedPhoto = ['.jpg', '.jpeg', '.png', '.webp'];
   const allowedVideo = ['.mp4', '.mov', '.avi', '.webm', '.mkv'];
@@ -35,10 +35,7 @@ export const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: isPhotoField => {
-      // This is handled in the route handler instead
-      return 200 * 1024 * 1024; // 200MB max
-    },
+    fileSize: 200 * 1024 * 1024, // 200MB max
   },
 });
 
@@ -52,12 +49,12 @@ export class CinemaController {
    */
   async uploadPhoto(req: Request, res: Response): Promise<void> {
     try {
-      if (!req.file) {
+      if (!(req as any).file) {
         res.status(400).json({ error: 'No photo uploaded' });
         return;
       }
 
-      const filePath = req.file.path;
+      const filePath = (req as any).file.path;
       const validation = cinemaEngineService.validateUpload(filePath, 'photo');
       if (!validation.valid) {
         res.status(400).json({ error: validation.error });
@@ -85,12 +82,12 @@ export class CinemaController {
    */
   async uploadVideo(req: Request, res: Response): Promise<void> {
     try {
-      if (!req.file) {
+      if (!(req as any).file) {
         res.status(400).json({ error: 'No video uploaded' });
         return;
       }
 
-      const filePath = req.file.path;
+      const filePath = (req as any).file.path;
       const validation = cinemaEngineService.validateUpload(filePath, 'video');
       if (!validation.valid) {
         res.status(400).json({ error: validation.error });
@@ -103,7 +100,7 @@ export class CinemaController {
         success: true,
         videoUrl: storedPath,
         filename: path.basename(storedPath),
-        fileSize: req.file.size,
+        fileSize: (req as any).file.size,
         message: 'Video uploaded successfully. Ready for AI Empire Style editing.',
       });
     } catch (error: any) {
@@ -120,14 +117,15 @@ export class CinemaController {
       const { photoPath, script, voiceStyle } = req.body;
       const userId = (req as any).user?.id || 'system';
 
-      if (!photoPath || !script) {
-        res.status(400).json({ error: 'photoPath and script are required' });
+      if (!photoPath && !req.body.photoUrl) {
+        res.status(400).json({ error: 'photoPath or photoUrl and script are required' });
         return;
       }
 
       const result = await cinemaEngineService.createNeuralTwin({
         userId,
         photoPath,
+        photoUrl: req.body.photoUrl,
         script,
         voiceStyle,
       });

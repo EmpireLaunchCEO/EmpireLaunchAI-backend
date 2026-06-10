@@ -12,9 +12,11 @@ import { JsonOutputParser } from '@langchain/core/output_parsers';
 
 export interface TwinCreationRequest {
   userId: string;
-  photoPath: string;   // Path to uploaded photo
+  photoPath?: string;   // Path to uploaded photo (legacy)
+  photoUrl?: string;    // URL to uploaded photo
   script: string;      // What the twin should say
   voiceStyle?: string; // 'natural' | 'energetic' | 'calm'
+  voiceId?: string;
 }
 
 export interface CinemaAsset {
@@ -62,13 +64,16 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, script, voiceStyle } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle } = request;
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
+    const inputPath = photoPath || photoUrl || '';
 
     try {
+      if (!inputPath) throw new Error('No input photo provided');
+
       // Step 1: Extract Facial DNA from photo using Gemini Vision
-      const facialDna = await this.extractFacialDna(userId, photoPath);
+      const facialDna = await this.extractFacialDna(userId, inputPath);
 
       // Step 2: Generate lip-sync phoneme mapping
       const lipSyncData = await this.generateLipSyncReasoning(script);
@@ -89,7 +94,7 @@ export class CinemaEngineService {
       return {
         id: assetId,
         videoUrl: `/assets/cinema/renders/twin_${assetId}.mp4`,
-        thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(photoPath)}`,
+        thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
         status: 'completed',
         metadata: {
           script,
@@ -103,7 +108,7 @@ export class CinemaEngineService {
       return {
         id: assetId,
         videoUrl: '',
-        thumbnailUrl: photoPath,
+        thumbnailUrl: inputPath,
         status: 'failed',
         metadata: {},
         error: error.message,

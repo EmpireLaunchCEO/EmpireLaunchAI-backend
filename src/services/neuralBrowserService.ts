@@ -60,8 +60,8 @@ export class NeuralBrowserService {
           case 'extract':
             if (step.selector) {
               if (step.multiple) {
-                const elements = await page.$(step.selector);
-                const extractedData = await Promise.all(elements.map(async (el) => {
+                const elements = await page.$$(step.selector);
+                const extractedData = await Promise.all(elements.map(async (el: any) => {
                   const data: Record<string, string | boolean> = {};
                   if (step.fields) {
                     for (const [key, subSelector] of Object.entries(step.fields)) {

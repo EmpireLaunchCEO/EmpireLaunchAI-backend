@@ -28,6 +28,8 @@ export interface HarvestStats {
 
 // ─── 250 Harvest Niches ─────────────────────────────────────────────────────
 
+const PLATFORM_SOURCES: string[] = ['etsy', 'creativemarket', 'pinterest', 'instagram', 'tiktok'];
+
 const HARVEST_NICHES: string[] = [
   // Digital Products
   'digital planner', 'digital journal', 'digital notebook', 'budget planner', 'meal planner',
