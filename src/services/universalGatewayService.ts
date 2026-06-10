@@ -415,11 +415,42 @@ class UniversalGatewayService {
 
     const tokenData = response.data;
 
-    // Save integration
-    const shopId = tokenData.shop_id || tokenData.sub?.toString();
-    await integrationService.saveIntegration(userId, platform, tokenData, shopId);
+    // Fetch account profile for confirmation (Neural Handshake Verification)
+    let accountHandle: string | undefined;
+    let accountId: string | undefined = tokenData.shop_id || tokenData.sub?.toString();
 
-    return { status: 'success', message: `${platform} integrated successfully` };
+    try {
+      if (platform === 'tiktok') {
+        const profileRes = await axios.get('https://open.tiktokapis.com/v2/user/info/?fields=username', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+        accountHandle = `@${profileRes.data.data.user.username}`;
+        accountId = profileRes.data.data.user.open_id;
+      } else if (platform === 'google') {
+        const profileRes = await axios.get('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+        accountHandle = profileRes.data.items?.[0]?.snippet?.title;
+        accountId = profileRes.data.items?.[0]?.id;
+      } else if (platform === 'meta') {
+        const profileRes = await axios.get('https://graph.facebook.com/v18.0/me?fields=name', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+        accountHandle = profileRes.data.name;
+        accountId = profileRes.data.id;
+      }
+    } catch (profileError) {
+      console.warn(`[UniversalGateway] Failed to fetch profile for ${platform}:`, profileError);
+    }
+
+    // Save integration
+    await integrationService.saveIntegration(userId, platform, tokenData, accountId, accountHandle);
+
+    return { 
+      status: 'success', 
+      message: `${platform} integrated successfully`,
+      handle: accountHandle
+    };
   }
 }
 

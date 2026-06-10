@@ -6,6 +6,7 @@ import { getEngine } from '../services/goalExecutionEngine.js';
 import { getRouter } from '../services/platformRouter.js';
 import { getProductionWorker } from '../services/productionWorker.js';
 import { marketResearcher } from '../services/autonomousMarketResearcher.js';
+import { massDnaHarvester } from '../services/massDnaHarvestWorker.js';
 import { campaignService } from '../services/campaignService.js';
 import { etsyPollingService } from '../services/etsyPollingService.js';
 
@@ -50,6 +51,27 @@ export class SchedulerWorker {
         await this.tickAllActiveGoals();
       } catch (error) {
         console.error('[SchedulerWorker] Error in engine tick:', error);
+      }
+    });
+
+    // Mass DNA Harvest — process 50 niches every 12 hours
+    // Targets 500,000 strands across 250+ Etsy niches
+    cron.schedule('0 */12 * * *', async () => {
+      console.log('[SchedulerWorker] Running Mass DNA Harvest...');
+      try {
+        const stats = massDnaHarvester.getStats();
+        if (!stats.isRunning) {
+          // Start asynchronously — don't block the cron
+          massDnaHarvester.start().then(result => {
+            console.log(`[SchedulerWorker] Mass DNA Harvest complete: ${result.totalStrandsStored} strands across ${result.nichesProcessed}/${result.nichesTotal} niches`);
+          }).catch(err => {
+            console.error('[SchedulerWorker] Mass DNA Harvest error:', err);
+          });
+        } else {
+          console.log('[SchedulerWorker] Mass DNA Harvest already running, skipping...');
+        }
+      } catch (error) {
+        console.error('[SchedulerWorker] Error starting Mass DNA Harvest:', error);
       }
     });
   }

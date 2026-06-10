@@ -59,8 +59,29 @@ export class NeuralBrowserService {
             break;
           case 'extract':
             if (step.selector) {
+              if (step.multiple) {
+                const elements = await page.$(step.selector);
+                const extractedData = await Promise.all(elements.map(async (el) => {
+                  const data: Record<string, string | boolean> = {};
+                  if (step.fields) {
+                    for (const [key, subSelector] of Object.entries(step.fields)) {
+                      const subEl = await el.$(subSelector);
+                      if (subSelector.includes('--best-seller') || subSelector.startsWith('.')) {
+                        data[key] = subEl !== null;
+                      } else {
+                        data[key] = subEl ? (await subEl.textContent())?.trim() || '' : '';
+                      }
+                    }
+                  } else {
+                    return (await el.textContent())?.trim() || '';
+                  }
+                  return data;
+                }));
+                results[step.selector] = JSON.stringify(extractedData);
+              } else {
                 const value = await page.textContent(step.selector);
-                results[step.selector] = value;
+                results[step.selector] = value?.trim() || null;
+              }
             }
             break;
           case 'screenshot':

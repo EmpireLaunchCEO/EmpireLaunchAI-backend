@@ -21,20 +21,20 @@ export class MarketIntelligenceService {
     try {
       const results = await neuralBrowserService.executeAutomation('system', [
         { action: 'navigate', url: `https://www.etsy.com/search?q=${encodeURIComponent(niche)}+best+seller` },
-        { action: 'wait', value: '.v2-listing-card' },
+        { action: 'wait', value: '[data-listing-id]' },
         { 
           action: 'extract', 
-          selector: '.v2-listing-card',
+          selector: '[data-listing-id]',
           multiple: true,
           fields: {
-            title: 'a.v2-listing-card__title',
+            title: 'h3',
             price: '.currency-value',
             isBestSeller: '.wt-badge--best-seller'
           }
         }
       ]) as any;
 
-      const listings = results?.['.v2-listing-card'] || [];
+      const listings = results?.['[data-listing-id]'] || [];
       if (Array.isArray(listings) && listings.length > 0) {
         return listings.map((l: any) => ({
           title: l.title || `${niche} Product`,

@@ -88,11 +88,27 @@ export class DnaVaultService {
    */
   async bulkStore(strands: DnaStrand[]): Promise<number> {
     let count = 0;
+    const vaultPath = '/home/team/shared/DNA_VAULT';
+    
+    // Ensure vault directory exists
+    const fs = await import('fs');
+    if (!fs.existsSync(vaultPath)) {
+      fs.mkdirSync(vaultPath, { recursive: true });
+    }
+
     for (const strand of strands) {
-      await this.storeStrand(strand);
+      try {
+        await this.storeStrand(strand);
+      } catch (dbError: any) {
+        console.warn(`[DnaVault] DB store failed for ${strand.id}, falling back to file: ${dbError.message}`);
+        
+        // JSON Fallback
+        const filePath = `${vaultPath}/${strand.category}_${strand.id || uuidv4()}.json`;
+        fs.writeFileSync(filePath, JSON.stringify(strand, null, 2));
+      }
       count++;
     }
-    console.log(`[DnaVault] Bulk stored ${count} strands`);
+    console.log(`[DnaVault] Bulk processed ${count} strands (DB + Fallback)`);
     return count;
   }
 

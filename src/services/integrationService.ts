@@ -5,7 +5,7 @@ import { encrypt, decrypt } from '../utils/security.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export class IntegrationService {
-  async saveIntegration(userId: string, platform: string, credentials: any, platformAccountId?: string) {
+  async saveIntegration(userId: string, platform: string, credentials: any, platformAccountId?: string, platformAccountHandle?: string) {
     const encryptedCredentials = encrypt(JSON.stringify(credentials));
     
     const existing = await db.select()
@@ -21,6 +21,7 @@ export class IntegrationService {
         .set({
           credentials: encryptedCredentials,
           platformAccountId: platformAccountId || existing[0].platformAccountId,
+          platformAccountHandle: platformAccountHandle || existing[0].platformAccountHandle,
           updatedAt: new Date(),
         })
         .where(eq(integrations.id, existing[0].id));
@@ -32,6 +33,7 @@ export class IntegrationService {
         userId,
         platform,
         platformAccountId,
+        platformAccountHandle,
         credentials: encryptedCredentials,
         createdAt: new Date(),
         updatedAt: new Date(),

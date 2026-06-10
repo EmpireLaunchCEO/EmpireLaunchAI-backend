@@ -136,10 +136,12 @@ export const etsyCallback = async (req: Request, res: Response) => {
     await db.update(oauthSessions).set({ used: true }).where(eq(oauthSessions.id, sessionId));
     const tokenData = await etsyService.getAccessToken(code, session.codeVerifier);
     const shopData = await etsyService.getShop(tokenData.access_token);
-    const shopId = shopData.results?.[0]?.shop_id;
+    const shop = shopData.results?.[0];
+    const shopId = shop?.shop_id;
+    const shopName = shop?.shop_name;
 
-    await integrationService.saveIntegration(userId, 'etsy', tokenData, shopId?.toString());
-    res.json({ status: 'success' });
+    await integrationService.saveIntegration(userId, 'etsy', tokenData, shopId?.toString(), shopName);
+    res.json({ status: 'success', handle: shopName });
   } catch (error) {
     res.status(500).json({ error: 'Failed to integrate Etsy' });
   }

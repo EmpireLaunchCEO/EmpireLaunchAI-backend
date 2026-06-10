@@ -48,6 +48,7 @@ export const integrations = pgTable('integrations', {
   userId: uuid('user_id').references(() => users.id).notNull(),
   platform: text('platform').notNull(), // 'etsy', 'fiverr', 'tiktok', 'gmail', etc.
   platformAccountId: text('platform_account_id'), // Indexed for lookups
+  platformAccountHandle: text('platform_account_handle'), // For UI display (e.g. @username)
   credentials: jsonb('credentials').notNull(), // Encrypted tokens
   isActive: boolean('is_active').default(true).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),

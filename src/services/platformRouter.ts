@@ -4,6 +4,9 @@ import { tiktokService } from './tiktokService.js';
 import { shopifyService } from './shopifyService.js';
 import { neuralBrowserService, AutomationStep } from './neuralBrowserService.js';
 import { integrationService } from './integrationService.js';
+import { metaService } from './metaService.js';
+import { pinterestService } from './pinterestService.js';
+import { youtubeService } from './youtubeService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -200,7 +203,7 @@ export class PlatformRouter {
         case 'search_trends':
           return { success: true, data: { niche: params.niche, suggestedHashtags: [`#${params.niche}`, `#${params.niche}Tok`] } };
         case 'schedule_post': {
-          const result = await tiktokService.publishVideo(userId, params.assetId, 'New post from Bizrunner', '');
+          const result = await tiktokService.publishVideo(userId, params.assetId || params.videoUrl, 'New post from Empire Launch AI', params.caption || '');
           return { success: true, data: { result } };
         }
         case 'get_analytics': {
@@ -224,7 +227,7 @@ export class PlatformRouter {
           const result = await shopifyService.createListing(creds.shop_name || creds.subdomain, creds.access_token, {
             title: params.productName || 'New Product',
             body_html: `<p>${params.productName || 'AI product'}</p>`,
-            vendor: 'Bizrunner AI',
+            vendor: 'Empire Launch AI',
             product_type: 'Digital',
             variants: [{ price: '9.99' }],
           });
@@ -239,11 +242,25 @@ export class PlatformRouter {
 
   private async handleSocial(platform: string, action: string, params: any): Promise<ExecutionResult> {
     try {
+      const { userId = 'system' } = params;
       switch (action) {
         case 'research':
         case 'search_trends':
           return { success: true, data: { platform, niche: params.niche } };
         case 'schedule_post': {
+          if (platform === 'instagram' || platform === 'facebook') {
+            const result = await metaService.publishPost(userId, { ...params, platform });
+            return { success: true, data: { platform, result } };
+          }
+          if (platform === 'pinterest') {
+            const result = await pinterestService.publishPost(userId, params);
+            return { success: true, data: { platform, result } };
+          }
+          if (platform === 'youtube') {
+            const result = await youtubeService.publishShorts(userId, params.assetId || params.videoUrl, 'New short', params.caption || '');
+            return { success: true, data: { platform, result } };
+          }
+
           const steps: AutomationStep[] = [
             { action: 'navigate', url: `https://www.${platform}.com/create/post` },
             { action: 'wait', value: 'body' },

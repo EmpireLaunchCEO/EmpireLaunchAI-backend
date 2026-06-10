@@ -66,10 +66,22 @@ export class MetaService {
     return publishResponse.data;
   }
 
+  async postToFacebook(accessToken: string, pageId: string, imageUrl: string, message: string) {
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${pageId}/photos`,
+      {
+        url: imageUrl,
+        message,
+        access_token: accessToken,
+      }
+    );
+    return response.data;
+  }
+
   async getInstagramAccounts(accessToken: string) {
     const response = await axios.get('https://graph.facebook.com/v18.0/me/accounts', {
       params: {
-        fields: 'instagram_business_account,name',
+        fields: 'instagram_business_account,name,id,access_token',
         access_token: accessToken,
       },
     });
@@ -92,7 +104,9 @@ export class MetaService {
   }
 
   async publishPost(userId: string, postData: any) {
-    console.log(`[MetaService] Publishing to Instagram for user ${userId}`);
+    const platform = postData.platform || 'instagram';
+    console.log(`[MetaService] Publishing to ${platform} for user ${userId}`);
+    
     // 1. Fetch Credentials
     const credentials = await integrationService.getCredentials(userId, 'meta');
     if (!credentials) {
@@ -107,12 +121,25 @@ export class MetaService {
     }
 
     // 3. Publish
-    return this.postToInstagram(
-      credentials.accessToken,
-      credentials.instagramBusinessAccountId,
-      postData.imageUrl,
-      finalCaption
-    );
+    if (platform === 'facebook') {
+      const accounts = await this.getInstagramAccounts(credentials.accessToken);
+      const page = accounts.data && accounts.data.length > 0 ? accounts.data[0] : null;
+      if (!page) throw new Error('No Facebook Page found');
+      
+      return this.postToFacebook(
+        page.access_token || credentials.accessToken,
+        page.id,
+        postData.imageUrl || postData.videoUrl,
+        finalCaption
+      );
+    } else {
+      return this.postToInstagram(
+        credentials.accessToken,
+        credentials.instagramBusinessAccountId,
+        postData.imageUrl || postData.videoUrl,
+        finalCaption
+      );
+    }
   }
 }
 
