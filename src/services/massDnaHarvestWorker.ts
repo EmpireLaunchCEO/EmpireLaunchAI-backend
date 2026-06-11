@@ -28,7 +28,7 @@ export interface HarvestStats {
 
 // ─── 250 Harvest Niches ─────────────────────────────────────────────────────
 
-const PLATFORM_SOURCES: string[] = ['etsy', 'creativemarket', 'pinterest', 'instagram', 'tiktok'];
+const PLATFORM_SOURCES: string[] = ['etsy', 'creativemarket', 'pinterest', 'instagram', 'tiktok', 'canva'];
 
 const HARVEST_NICHES: string[] = [
   // Digital Products
@@ -199,14 +199,12 @@ export class MassDnaHarvestWorker {
   }
 
   private async harvestNiche(niche: string, model: any): Promise<void> {
+    // Phase 1: Etsy Best Sellers
     const listings = await marketIntelligenceService.fetchEtsyBestSellers(niche);
     let strands: DnaStrand[] = [];
 
-    if (!listings || listings.length === 0) {
-      console.log(`[MassDNAHarvest] No listings found for "${niche}", generating 20 synthetic strands.`);
-      strands = await this.generateSyntheticStrands(niche, 20);
-    } else {
-      const topListings = listings.slice(0, this.listingsPerNiche);
+    if (listings && listings.length > 0) {
+      const topListings = listings.slice(0, 10);
       for (const listing of topListings) {
         try {
           const dna = await this.extractDnaFromListing(niche, listing, model);
@@ -214,14 +212,64 @@ export class MassDnaHarvestWorker {
         } catch (err: any) {}
         await this.sleep(200);
       }
+    }
 
-      const syntheticCount = Math.max(5, this.listingsPerNiche - strands.length);
+    // Phase 2: Canva Templates (Free Tier)
+    try {
+      const canvaTemplates = await marketIntelligenceService.fetchCanvaTemplates(niche);
+      if (canvaTemplates && canvaTemplates.length > 0) {
+        const topCanva = canvaTemplates.slice(0, 10);
+        for (const template of topCanva) {
+          try {
+            const dna = await this.extractDnaFromCanva(niche, template, model);
+            if (dna) strands.push(dna);
+          } catch (err: any) {}
+          await this.sleep(200);
+        }
+      }
+    } catch (err) {}
+
+    // Fallback: Generate synthetic strands if needed
+    if (strands.length < 5) {
+      const syntheticCount = 5 - strands.length;
       const syntheticStrands = await this.generateSyntheticStrands(niche, syntheticCount);
       strands.push(...syntheticStrands);
     }
 
     if (strands.length > 0) {
       await dnaVaultService.bulkStore(strands);
+    }
+  }
+
+  private async extractDnaFromCanva(niche: string, template: any, model: any): Promise<DnaStrand | null> {
+    const prompt = `Extract Style DNA from this Canva template: "${template.title}". Return JSON with category (layout), manifest (style, colors, fonts, aesthetic), performanceScore, subCategory.`;
+    const response = await model.invoke([
+      { role: 'system', content: 'Return ONLY valid JSON.' },
+      { role: 'human', content: prompt },
+    ]);
+    const content = typeof response.content === 'string' ? response.content : JSON.stringify(response.content);
+    try {
+      let json = content;
+      const match = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (match) json = match[1];
+      const parsed = JSON.parse(json);
+      return {
+        id: uuidv4(),
+        category: 'layout',
+        subCategory: niche,
+        manifest: {
+          ...parsed.manifest,
+          thumbnail: template.thumbnail,
+          url: template.url,
+          platform: 'canva'
+        },
+        performanceScore: parsed.performanceScore || 60,
+        sourcePlatform: 'canva',
+        isSynthesized: true,
+        createdAt: new Date(),
+      } as DnaStrand;
+    } catch (err) {
+      return null;
     }
   }
 

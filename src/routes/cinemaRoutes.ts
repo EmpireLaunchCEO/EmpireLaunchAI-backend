@@ -17,9 +17,19 @@ router.post('/upload-video', upload.single('video'), (req, res) =>
   cinemaController.uploadVideo(req, res)
 );
 
+// Enhance uploaded video with Empire Style
+router.post('/enhance-video', (req, res) =>
+  cinemaController.enhanceVideo(req, res)
+);
+
 // Create Neural Twin video from photo + script
 router.post('/create-twin', (req, res) =>
   cinemaController.createNeuralTwin(req, res)
+);
+
+// Get daily usage remaining
+router.get('/usage', (req, res) =>
+  cinemaController.getUsage(req, res)
 );
 
 // Check asset status

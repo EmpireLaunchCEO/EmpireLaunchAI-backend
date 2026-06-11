@@ -16,7 +16,7 @@ export interface ModelConfig {
 const MODEL_MAP: Record<string, ModelConfig> = {
   EMPIRE_MASTER: { provider: 'google', modelName: 'gemini-1.5-pro', temperature: 0.3 },
   STANDARD_USER: { provider: 'google', modelName: 'gemini-1.5-flash', temperature: 0.5 },
-  STUDIO_INTEL: { provider: 'google', modelName: 'gemini-1.5-flash', temperature: 0.2 },
+  STUDIO_INTEL: { provider: 'google', modelName: 'gemini-1.5-pro', temperature: 0.2 },
 };
 
 const DEFAULT_MODEL = MODEL_MAP.STANDARD_USER;

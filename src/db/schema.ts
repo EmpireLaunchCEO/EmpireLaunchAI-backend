@@ -6,6 +6,7 @@ export const users = pgTable('users', {
   stripeAccountId: text('stripe_account_id'),
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
   businessSlots: integer('business_slots').default(3).notNull(),
+  tier: text('tier').default('STANDARD_USER').notNull(),
   isLocked: boolean('is_locked').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -405,4 +406,12 @@ export const infrastructureCosts = pgTable('infrastructure_costs', {
   date: timestamp('date').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const usageLogs = pgTable('usage_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  type: text('type').notNull(), // 'neural_twin' | 'enhanced_video' | 'faceless'
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 });

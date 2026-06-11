@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
+import { usageService } from '../services/usageService.js';
 
 // ─── Multer Configuration ───────────────────────────────────────────────────
 
@@ -133,6 +134,62 @@ export class CinemaController {
       res.json({
         success: result.status === 'completed',
         asset: result,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/cinema/enhance-video
+   * Apply AI Empire Style enhancement to an uploaded video.
+   */
+  async enhanceVideo(req: Request, res: Response): Promise<void> {
+    try {
+      const { videoPath } = req.body;
+      const userId = (req as any).user?.id || 'system';
+
+      if (!videoPath) {
+        res.status(400).json({ error: 'videoPath is required' });
+        return;
+      }
+
+      const result = await cinemaEngineService.enhanceRawVideo(userId, videoPath);
+
+      res.json({
+        success: result.status === 'completed',
+        asset: result,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/cinema/usage
+   * Get daily usage remaining for the user.
+   */
+  async getUsage(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).user?.id || 'anonymous';
+      const neuralRemaining = await usageService.getDailyRemaining(userId, 'neural_twin');
+      const enhancedRemaining = await usageService.getDailyRemaining(userId, 'enhanced_video');
+      const designRemaining = await usageService.getDailyRemaining(userId, 'high_res_design');
+
+      res.json({
+        userId,
+        neural: {
+          remaining: neuralRemaining,
+          limit: 3,
+        },
+        enhanced: {
+          remaining: enhancedRemaining,
+          limit: 'unlimited',
+        },
+        design: {
+          remaining: designRemaining,
+          limit: 50,
+        },
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });

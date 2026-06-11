@@ -24,14 +24,14 @@ export class RevenueOracleService {
     const tier = user?.tier || 'STANDARD_USER';
     
     let subscriptionFee = 3000; // $30 in cents
-    let surchargePer1000 = 3000; // $30 in cents
+    let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
 
     if (tier === 'OWNER_MASTER') {
       subscriptionFee = 0;
       surchargePer1000 = 0;
     } else if (tier === 'BETA_TESTER') {
       subscriptionFee = 0;
-      surchargePer1000 = 3000;
+      surchargePer1000 = 4000;
     }
 
     if (!milestone) return { total: subscriptionFee, subscription: subscriptionFee, surcharges: 0 };
@@ -58,7 +58,7 @@ export class RevenueOracleService {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     
     const tier = user?.tier || 'STANDARD_USER';
-    let surchargePer1000 = 3000; // $30 in cents
+    let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
     if (tier === 'OWNER_MASTER') {
       surchargePer1000 = 0;
     }

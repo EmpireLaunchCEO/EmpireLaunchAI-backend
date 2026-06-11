@@ -73,6 +73,29 @@ export class MarketIntelligenceService {
     } catch (e) {
       return [];
     }
+  async fetchCanvaTemplates(niche: string, userId?: string): Promise<any[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation('system', [
+        { action: 'navigate', url: `https://www.canva.com/templates/?query=${encodeURIComponent(niche)}&pricing=free` },
+        { action: 'wait', value: '[data-testid="template-card"]' },
+        { 
+          action: 'extract', 
+          selector: '[data-testid="template-card"]',
+          multiple: true,
+          fields: {
+            title: 'img@alt',
+            thumbnail: 'img@src',
+            url: 'a@href'
+          }
+        }
+      ]) as any;
+
+      const templates = results?.['[data-testid="template-card"]'] || [];
+      return Array.isArray(templates) ? templates : [];
+    } catch (e) {
+      console.warn('[MarketIntelligence] Canva scraping failed');
+      return [];
+    }
   }
 }
 
