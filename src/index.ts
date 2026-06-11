@@ -51,7 +51,7 @@ const httpServer = createServer(app);
 const port = parseInt(process.env.PORT || '3000', 10);
 
 // Auto-run migrations in production if flagged
-if (process.env.RUN_MIGRATIONS === 'true') {
+if (process.env.RUN_MIGRATIONS === 'true' && !process.env.VERCEL) {
   console.log('[Database] Running migrations...');
   try {
     const isSqlite = process.env.DATABASE_URL?.startsWith('file:') || process.env.DATABASE_URL?.startsWith('libsql:');
@@ -71,7 +71,7 @@ if (process.env.RUN_MIGRATIONS === 'true') {
 // Initialize WebSocket Service
 webSocketService.init(httpServer);
 
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   // Start the distributed background worker & AI Queue Worker
   // Note: On serverless platforms like Vercel, these should be moved to separate worker processes
   agentWorker.start();
@@ -85,9 +85,11 @@ if (process.env.NODE_ENV !== 'production') {
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
 }
 
-httpServer.listen(port, '0.0.0.0', () => {
-  console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
-});
+if (!process.env.VERCEL) {
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`Bizrunner Scaling-Ready Server is running on port ${port}`);
+  });
+}
 
 app.use((helmet as any)({
   contentSecurityPolicy: false, // For easier testing with external assets/dashboard
