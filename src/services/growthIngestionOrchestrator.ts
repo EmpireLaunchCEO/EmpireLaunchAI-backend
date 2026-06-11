@@ -5,6 +5,7 @@ import { etsyService } from './etsyService.js';
 import { tiktokService } from './tiktokService.js';
 import { integrationService } from './integrationService.js';
 import { revenueOracle } from './revenueOracle.js';
+import { loyaltyLoopWorker } from './loyaltyLoopWorker.js';
 
 /**
  * Growth Ingestion Orchestrator
@@ -114,8 +115,26 @@ export class GrowthIngestionOrchestrator {
       productName: sale.title || sale.listing_title || 'Etsy Product',
     }));
 
-    // Feed into Revenue Oracle — triggers milestone & thank-you email flow
+    // Feed into Revenue Oracle — triggers milestone tracking
     await revenueOracle.ingestFromPlatform(userId, 'etsy', transactions);
+
+    // Trigger Loyalty Loop — AI-drafted thank-you + review request flow
+    for (const txn of transactions) {
+      if (txn.customerEmail) {
+        try {
+          await loyaltyLoopWorker.processPurchase({
+            transactionId: txn.id,
+            userId,
+            customerEmail: txn.customerEmail,
+            productName: txn.productName || 'Product',
+            amount: txn.amount,
+            niche: 'etsy', // Will be refined with actual niche data
+          });
+        } catch (err) {
+          console.error(`[GrowthIngestion] Loyalty loop failed for ${txn.customerEmail}:`, err);
+        }
+      }
+    }
 
     return transactions.length;
   }
