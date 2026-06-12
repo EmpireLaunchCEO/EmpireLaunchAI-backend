@@ -14,6 +14,12 @@ export interface MarketListing {
   features: string[];
   platform: string;
   isBestSeller: boolean;
+  signals?: {
+    inBasket?: string;
+    reviewCount?: number;
+    reviewRecency?: string;
+    ordersInQueue?: string;
+  };
 }
 
 export class MarketIntelligenceService {
@@ -29,7 +35,9 @@ export class MarketIntelligenceService {
           fields: {
             title: 'h3',
             price: '.currency-value',
-            isBestSeller: '.wt-badge--best-seller'
+            isBestSeller: '.wt-badge--best-seller',
+            inBasket: '.wt-badge--basket',
+            reviewCount: '.wt-badge--reviews'
           }
         }
       ]) as any;
@@ -44,6 +52,10 @@ export class MarketIntelligenceService {
           features: ["Optimized"],
           platform: "Etsy",
           isBestSeller: !!l.isBestSeller,
+          signals: {
+            inBasket: l.inBasket || undefined,
+            reviewCount: parseInt(l.reviewCount) || 0,
+          }
         }));
       }
     } catch (e) {
@@ -73,6 +85,8 @@ export class MarketIntelligenceService {
     } catch (e) {
       return [];
     }
+  }
+
   async fetchCanvaTemplates(niche: string, userId?: string): Promise<any[]> {
     try {
       const results = await neuralBrowserService.executeAutomation('system', [

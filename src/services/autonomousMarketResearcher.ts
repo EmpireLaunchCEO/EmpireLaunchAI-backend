@@ -85,17 +85,22 @@ export class AutonomousMarketResearcher {
       const etsyListings = await marketIntelligenceService.fetchEtsyBestSellers(niche, userId);
       if (etsyListings && etsyListings.length > 0) {
         const topKeywords = this.extractKeywords(etsyListings.map(l => l.title).join(' '));
-        for (const keyword of topKeywords.slice(0, 3)) {
+        for (const listing of etsyListings.slice(0, 5)) {
+          // Heat Signal logic: 10+ in basket = high velocity
+          const hasHighHeat = listing.signals?.inBasket?.includes('10+') || listing.isBestSeller;
+          const confidence = hasHighHeat ? 0.95 : 0.75;
+          
           await this.saveSignal({
             niche,
             platform: 'etsy',
             signalType: 'trend',
-            title: `Etsy top seller keyword: "${keyword}"`,
-            description: `Extracted from ${etsyListings.length} top-selling listings in "${niche}"`,
-            confidence: 0.75,
+            title: `Etsy High-Velocity: ${listing.title}`,
+            description: `Heat Signal: ${listing.signals?.inBasket || 'Best Seller'}. Extracted from "${niche}" search.`,
+            confidence,
             actionable: true,
           });
           output.signalsCreated++;
+          if (confidence > 0.9) output.highConfidenceCount++;
         }
       }
     } catch (err: any) {

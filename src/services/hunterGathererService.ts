@@ -151,7 +151,16 @@ export class HunterGathererService {
         if (type === 'SEARCH_TRENDS') {
           steps.push({ action: 'navigate', url: `https://www.fiverr.com/search/gigs?query=${encodeURIComponent(params.query || '')}` });
           steps.push({ action: 'wait', value: '.gig-card-layout' });
-          steps.push({ action: 'extract', selector: '.gig-card-layout h3', multiple: true });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.gig-card-layout', 
+            multiple: true,
+            fields: {
+              title: 'h3',
+              ordersInQueue: '.orders-in-queue', // Signal: Heat
+              rating: '.rating-score'
+            }
+          });
           steps.push({ action: 'screenshot' });
         }
         break;
@@ -161,7 +170,17 @@ export class HunterGathererService {
         if (type === 'SEARCH_TRENDS') {
           steps.push({ action: 'navigate', url: `https://www.etsy.com/search?q=${encodeURIComponent(params.query || '')}+best+seller` });
           steps.push({ action: 'wait', value: '.v2-listing-card' });
-          steps.push({ action: 'extract', selector: '.v2-listing-card', multiple: true, fields: { title: 'a', price: '.currency-value' } });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.v2-listing-card', 
+            multiple: true, 
+            fields: { 
+              title: 'a', 
+              price: '.currency-value',
+              isBestSeller: '.wt-badge--best-seller',
+              inBasket: '.wt-badge--basket' // Signal: Heat
+            } 
+          });
         }
         break;
     }
