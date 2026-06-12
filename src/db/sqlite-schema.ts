@@ -519,6 +519,22 @@ export const infrastructureCosts = sqliteTable('infrastructure_costs', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
+export const emailLogs = sqliteTable('email_logs', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  customerEmail: text('customer_email').notNull(),
+  emailType: text('email_type').notNull(), // 'thank_you', 'review_request'
+  subject: text('subject').notNull(),
+  bodyPreview: text('body_preview'),
+  status: text('status').notNull(), // 'sent', 'opened', 'clicked'
+  openCount: integer('open_count').default(0).notNull(),
+  clickCount: integer('click_count').default(0).notNull(),
+  metadata: text('metadata', { mode: 'json' }),
+  openedAt: integer('opened_at', { mode: 'timestamp' }),
+  clickedAt: integer('clicked_at', { mode: 'timestamp' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
 export const usageLogs = sqliteTable('usage_logs', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),

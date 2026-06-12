@@ -74,7 +74,7 @@ export class CinemaEngineService {
       if (!inputPath) throw new Error('No input photo provided');
 
       // Enforce Daily Limit (3 videos/day)
-      await usageService.enforceDailyLimit(userId, 'neural_twin');
+      await usageService.enforceLimit(userId, 'neural_twin');
 
       // Step 1: Extract Facial DNA from photo using Gemini Vision
       const facialDna = await this.extractFacialDna(userId, inputPath);

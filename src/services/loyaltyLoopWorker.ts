@@ -207,10 +207,10 @@ export class LoyaltyLoopWorker {
       .where(eq(emailLogs.userId, userId));
 
     const totalSent = all.length;
-    const opened = all.filter(e => e.openCount > 0).length;
-    const clicked = all.filter(e => e.clickCount > 0).length;
-    const thankyouSent = all.filter(e => e.emailType === 'thank_you').length;
-    const reviewRequestsSent = all.filter(e => e.emailType === 'review_request').length;
+    const opened = all.filter((e: any) => e.openCount > 0).length;
+    const clicked = all.filter((e: any) => e.clickCount > 0).length;
+    const thankyouSent = all.filter((e: any) => e.emailType === 'thank_you').length;
+    const reviewRequestsSent = all.filter((e: any) => e.emailType === 'review_request').length;
 
     return {
       totalSent,
