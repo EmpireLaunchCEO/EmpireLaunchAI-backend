@@ -4,6 +4,7 @@ import { stripeService } from './stripeService.js';
 import { metaService } from './metaService.js';
 import { tiktokShopService } from './tiktokShopService.js';
 import { notificationService } from './notificationService.js';
+import { vaultService } from './vaultService.js';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,8 +19,13 @@ export class PaymentLinkService {
     const [product] = await db.select().from(products).where(eq(products.id, productId)).limit(1);
     if (!product) throw new Error('Product not found');
 
-    // 2. Resolve Merchant Account (Ownership Vault Mock)
-    const stripeAccountId = await this.getVaultSecret(userId, 'stripe', 'stripe_account_id');
+    // 2. Resolve Merchant Account from Ownership Vault
+    let stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
+    
+    // Fallback for transition/mock if vault empty
+    if (!stripeAccountId) {
+        stripeAccountId = `acct_mock_${userId}`;
+    }
 
     // 3. Generate Stripe Payment Link
     const { price } = await stripeService.createProductAndPrice(
@@ -87,13 +93,6 @@ export class PaymentLinkService {
       };
     }
     return {};
-  }
-
-  /**
-   * Mocks the secure retrieval of secrets from the Ownership Vault.
-   */
-  private async getVaultSecret(userId: string, platform: string, secretType: string): Promise<string> {
-    return `acct_mock_${userId}`;
   }
 
   /**

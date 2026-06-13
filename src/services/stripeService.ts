@@ -191,6 +191,17 @@ export class StripeService {
   async getSession(sessionId: string) {
     return await stripe.checkout.sessions.retrieve(sessionId);
   }
+
+  async createFinancialConnectionsSession(accountId: string, userId: string) {
+    const session = await stripe.financialConnections.sessions.create({
+      account_holder: {
+        type: 'account',
+        account: accountId,
+      },
+      permissions: ['balances', 'ownership', 'transactions'],
+    });
+    return session;
+  }
 }
 
 export const stripeService = new StripeService();

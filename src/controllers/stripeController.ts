@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { stripeService } from '../services/stripeService.js';
 import { paymentButtonService } from '../services/paymentButtonService.js';
+import { vaultService } from '../services/vaultService.js';
 import { db, schema } from '../db/index.js';
 const { users, products, paymentLinks } = schema;
 import { eq } from 'drizzle-orm';
@@ -9,21 +10,17 @@ import { v4 as uuidv4 } from 'uuid';
 export const onboardUser = async (req: Request, res: Response) => {
   try {
     const userId = req.headers['x-user-id'] as string || 'default-user';
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    let stripeAccountId = user.stripeAccountId;
+    
+    let stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
 
     if (!stripeAccountId) {
+      const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      
       const account = await stripeService.createConnectAccount(user.email);
       stripeAccountId = account.id;
       
-      await db.update(users)
-        .set({ stripeAccountId, updatedAt: new Date() })
-        .where(eq(users.id, userId));
+      await vaultService.storeSecret(userId, 'stripe', 'stripe_account_id', stripeAccountId);
     }
 
     const returnUrl = `${process.env.FRONTEND_URL}/stripe/callback?userId=${userId}`;
@@ -41,13 +38,13 @@ export const onboardUser = async (req: Request, res: Response) => {
 export const getAccountStatus = async (req: Request, res: Response) => {
   try {
     const userId = req.headers['x-user-id'] as string || 'default-user';
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
 
-    if (!user || !user.stripeAccountId) {
+    if (!stripeAccountId) {
       return res.json({ connected: false });
     }
 
-    const account = await stripeService.getAccount(user.stripeAccountId);
+    const account = await stripeService.getAccount(stripeAccountId);
     res.json({
       connected: account.details_submitted,
       charges_enabled: account.charges_enabled,
@@ -211,6 +208,23 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
     }
     res.json({ status: 'unpaid' });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const createFinancialConnectionsSession = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
+
+    if (!stripeAccountId) {
+      return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
+    }
+
+    const session = await stripeService.createFinancialConnectionsSession(stripeAccountId, userId);
+    res.json({ client_secret: session.client_secret });
+  } catch (error: any) {
+    console.error('Error in createFinancialConnectionsSession:', error);
     res.status(500).json({ error: error.message });
   }
 };
