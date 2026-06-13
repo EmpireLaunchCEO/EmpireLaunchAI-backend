@@ -41,13 +41,18 @@ export class ProtectedButtonController {
       }
 
       const context = {
-        userAgent: req.headers['user-agent'] || 'unknown',
-        referrer: req.headers['referer'] || 'unknown',
+        userAgent: (req.headers['user-agent'] as string) || 'unknown',
+        referrer: (req.headers['referer'] as string) || 'unknown',
         ip: req.ip || 'unknown'
       };
 
-      const stripeUrl = await protectedButtonService.resolveProxy(buttonId, ott as string, context);
+      const providedOtt = Array.isArray(ott) ? String(ott[0]) : String(ott);
+      const stripeUrl = await protectedButtonService.resolveProxy(buttonId, providedOtt, context);
       
+      if (!stripeUrl) {
+        throw new Error('Could not resolve payment URL');
+      }
+
       // Redirect to the Stripe Checkout session
       res.redirect(stripeUrl);
     } catch (error: any) {
