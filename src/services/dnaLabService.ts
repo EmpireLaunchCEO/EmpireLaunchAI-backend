@@ -1,5 +1,5 @@
 import { db, schema } from '../db/index.js';
-const { styleDna } = schema;
+const { styleDna, dnaStrands } = schema;
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import sharp from 'sharp';
@@ -9,6 +9,7 @@ import { RunnableSequence } from "@langchain/core/runnables";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
 import { resolveModelForUser, getDefaultModel } from '../utils/resolveModel.js';
 import { getMasterBriefing } from './strategicDirective.js';
+import { dnaVaultService } from './dnaVaultService.js';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -215,7 +216,10 @@ export class DnaLabService {
       3. Categorize layout complexity.
       4. Extract key copywriting triggers.
 
-      Apply the Anti-Copycat Rule: Propose a synthesis that is technically unique.
+      CRITICAL: Apply the Anti-Copycat Rule. 
+      - The goal is to capture the "conversion magic" but ensure the resulting DNA manifest is technically unique.
+      - If the source uses a "Boho" style, the synthesis should pivot to "Minimalist" or "Brutalist".
+      - Shuffle layout grids and typography pairings to avoid direct replication.
 
       Return ONLY a JSON object matching this schema:
       {{
@@ -236,6 +240,31 @@ export class DnaLabService {
       console.error('[DnaLab] Market DNA extraction failed:', error);
       throw error;
     }
+  }
+
+  /**
+   * Persists extracted Market DNA with a global visibility flag.
+   */
+  async saveGlobalHarvest(dna: any, niche: string, platform: string, performanceScore: number = 85) {
+    console.log(`[DnaLab] Saving global harvest for niche ${niche} from ${platform}`);
+    
+    const strand = {
+      category: 'layout' as any, // Defaulting to layout for market DNA
+      subCategory: niche,
+      embedding: Array.from({ length: 128 }, () => Math.random()), // Mock embedding for prototype
+      manifest: dna,
+      performanceScore,
+      sourcePlatform: platform,
+      isGlobal: true,
+      isSynthesized: true,
+      metadata: {
+        harvestedAt: new Date().toISOString(),
+        originalNiche: niche,
+        type: 'market_harvest'
+      }
+    };
+
+    return dnaVaultService.storeStrand(strand);
   }
 }
 

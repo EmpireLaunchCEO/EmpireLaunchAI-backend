@@ -285,6 +285,19 @@ export class DnaVaultService {
   }
 
   /**
+   * Find global DNA strands.
+   */
+  async findGlobalStrands(limit: number = 50): Promise<DnaStrand[]> {
+    const rows = await db.select()
+      .from(dnaStrands)
+      .where(eq(dnaStrands.isGlobal, true))
+      .orderBy(desc(dnaStrands.createdAt))
+      .limit(limit);
+
+    return (rows as any[]).map((r: any) => this.rowToStrand(r));
+  }
+
+  /**
    * Seed the vault with initial premium DNA from known high-performing
    * design archetypes. Used during initial vault population.
    */

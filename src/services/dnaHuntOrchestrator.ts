@@ -12,6 +12,7 @@ import { hunterGathererService } from './hunterGathererService.js';
 import { neuralBrowserService } from './neuralBrowserService.js';
 import { neuralBrowserQueue } from './queueService.js';
 import { dnaVaultService } from './dnaVaultService.js';
+import { dnaLabService } from './dnaLabService.js';
 import { marketIntelligenceService } from './marketIntelligenceService.js';
 import { visualProxyService } from './visualProxyService.js';
 import { resolveModelForUser } from '../utils/resolveModel.js';
@@ -46,10 +47,13 @@ export class DnaHuntOrchestrator {
       for (const target of allTargets) {
         try {
           const wvi = this.calculateWVI(target, platform);
-          const strand = await this.extractDnaFromPattern(target, platform, niche, wvi);
           
-          if (strand) {
-            await dnaVaultService.storeStrand(strand);
+          // 3. Extract detailed Style DNA via DnaLab
+          const extractedDna = await dnaLabService.extractMarketDna(userId, platform, target);
+          
+          if (extractedDna) {
+            // 4. Save to Global DNA Pool
+            await dnaLabService.saveGlobalHarvest(extractedDna, niche || target.subCategory || 'digital products', platform, wvi);
             storedCount++;
           }
         } catch (err) {
