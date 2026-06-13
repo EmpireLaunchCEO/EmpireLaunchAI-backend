@@ -28,6 +28,11 @@ export interface DnaStrand {
   isSynthesized?: boolean;
 
   /**
+   * Whether this strand is visible globally to all users.
+   */
+  isGlobal?: boolean;
+
+  /**
    * Text-to-image prompt that the frontend can use to generate an ORIGINAL visual
    * preview. This prompt describes a unique design based on the DNA parameters,
    * NOT a replica of any source platform content.
@@ -75,6 +80,7 @@ export class DnaVaultService {
       performanceScore: strand.performanceScore,
       sourcePlatform: strand.sourcePlatform || null,
       externalId: strand.externalId || null,
+      isGlobal: !!strand.isGlobal,
       metadata: strand.metadata ? JSON.stringify(strand.metadata) : null,
       createdAt: new Date(),
     });
@@ -303,6 +309,7 @@ export class DnaVaultService {
       externalId: row.externalId || undefined,
       metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
       isSynthesized: row.isSynthesized !== undefined ? !!row.isSynthesized : true,
+      isGlobal: !!row.isGlobal,
       synthesisPrompt: row.synthesisPrompt || undefined,
       createdAt: row.createdAt ? (row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)) : undefined,
     };

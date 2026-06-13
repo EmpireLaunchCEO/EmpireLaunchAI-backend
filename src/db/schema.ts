@@ -376,6 +376,7 @@ export const dnaStrands = pgTable('dna_strands', {
   performanceScore: integer('performance_score').notNull(),
   sourcePlatform: text('source_platform'),
   externalId: text('external_id'),
+  isGlobal: boolean('is_global').default(false).notNull(),
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

@@ -9,6 +9,7 @@ import { webSocketService } from './websocketService.js';
 import { notificationService } from './notificationService.js';
 import { integrationService } from './integrationService.js';
 import { hunterGathererService } from './hunterGathererService.js';
+import { neuralBrowserService } from './neuralBrowserService.js';
 import { neuralBrowserQueue } from './queueService.js';
 import { dnaVaultService } from './dnaVaultService.js';
 import { marketIntelligenceService } from './marketIntelligenceService.js';

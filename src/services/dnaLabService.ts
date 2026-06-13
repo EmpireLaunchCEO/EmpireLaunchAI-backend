@@ -8,6 +8,7 @@ import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
 import { resolveModelForUser, getDefaultModel } from '../utils/resolveModel.js';
+import { getMasterBriefing } from './strategicDirective.js';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -154,6 +155,42 @@ export class DnaLabService {
   private async extractTranscript(videoPath: string): Promise<string> {
     // Mock transcript for prototype - in production, call Whisper API
     return "Welcome back! Today we are looking at the best strategies for digital marketing. Don't forget to like and follow for more. Check out the link in my bio for a free guide!";
+  }
+
+  /**
+   * Analyze narrative DNA with tier-appropriate AI for the given user.
+   */
+  async analyzeNarrativeForUser(userId: string, transcript: string, pacing: string) {
+    const activeModel = await this.getModel(userId);
+    const template = `
+      Analyze the following video transcript and pacing to extract Narrative DNA.
+      Transcript: {transcript}
+      Pacing: {pacing}
+      
+      Return ONLY a JSON object.
+      {{
+        "hook_style": "direct_question | visual_shock | story_start",
+        "cta_pattern": "link_in_bio | follow_for_more | check_comments",
+        "pacing_curve": "high_start_stable_mid | consistent_high | slow_build"
+      }}
+    `;
+    const prompt = PromptTemplate.fromTemplate(template);
+    const chain = RunnableSequence.from([
+      prompt,
+      activeModel,
+      new JsonOutputParser(),
+    ]);
+
+    try {
+      return await chain.invoke({ transcript, pacing });
+    } catch (error) {
+      console.error('[DnaLab] Narrative analysis failed, using default');
+      return {
+        hook_style: "story_start",
+        cta_pattern: "link_in_bio",
+        pacing_curve: "high_start_stable_mid"
+      };
+    }
   }
 
   /**

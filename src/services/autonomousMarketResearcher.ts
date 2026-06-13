@@ -84,7 +84,6 @@ export class AutonomousMarketResearcher {
     try {
       const etsyListings = await marketIntelligenceService.fetchEtsyBestSellers(niche, userId);
       if (etsyListings && etsyListings.length > 0) {
-        const topKeywords = this.extractKeywords(etsyListings.map(l => l.title).join(' '));
         for (const listing of etsyListings.slice(0, 5)) {
           // Heat Signal logic: 10+ in basket = high velocity
           const hasHighHeat = listing.signals?.inBasket?.includes('10+') || listing.isBestSeller;
@@ -95,7 +94,7 @@ export class AutonomousMarketResearcher {
             platform: 'etsy',
             signalType: 'trend',
             title: `Etsy High-Velocity: ${listing.title}`,
-            description: `Heat Signal: ${listing.signals?.inBasket || 'Best Seller'}. Extracted from "${niche}" search.`,
+            description: `Heat Signal: ${listing.signals?.inBasket || 'Best Seller'}. URL: ${listing.url || 'N/A'}`,
             confidence,
             actionable: true,
           });
@@ -105,6 +104,64 @@ export class AutonomousMarketResearcher {
       }
     } catch (err: any) {
       console.error(`[MarketResearch] Etsy research error for "${niche}":`, err.message);
+    }
+
+    // ── 1b. New Platforms: Figma, Kittl, Behance, Redbubble, ArtStation, Substack ──
+    const platformTasks = [
+      { name: 'figma_community', fetch: () => marketIntelligenceService.fetchFigmaCommunityTrends(niche, userId) },
+      { name: 'kittl', fetch: () => marketIntelligenceService.fetchKittlTrends(niche, userId) },
+      { name: 'behance', fetch: () => marketIntelligenceService.fetchBehanceTrends(niche, userId) },
+      { name: 'redbubble', fetch: () => marketIntelligenceService.fetchRedbubbleTrends(niche, userId) },
+      { name: 'artstation', fetch: () => marketIntelligenceService.fetchArtStationTrends(niche, userId) },
+      { name: 'substack', fetch: () => marketIntelligenceService.fetchSubstackTrends(niche, userId) }
+    ];
+
+    for (const pTask of platformTasks) {
+      try {
+        const platformListings = await pTask.fetch();
+        if (platformListings && platformListings.length > 0) {
+          for (const listing of platformListings.slice(0, 3)) {
+            let isHighConfidence = false;
+            let signalDesc = `Detected trend on ${pTask.name}`;
+
+            // Threshold checks based on Research Task 5 report
+            if (pTask.name === 'figma_community') {
+              if ((listing.signals?.duplicates || 0) > 1000 || (listing.signals?.likes || 0) > 300) isHighConfidence = true;
+              signalDesc = `Duplicates: ${listing.signals?.duplicates}, Likes: ${listing.signals?.likes}`;
+            } else if (pTask.name === 'kittl') {
+              if ((listing.signals?.duplicates || 0) > 500 || listing.signals?.isStaffPick) isHighConfidence = true;
+              signalDesc = `Uses: ${listing.signals?.duplicates}, Staff Pick: ${listing.signals?.isStaffPick}`;
+            } else if (pTask.name === 'behance') {
+              if (listing.signals?.isCurated && (listing.signals?.likes || 0) > 1500) isHighConfidence = true;
+              signalDesc = `Likes: ${listing.signals?.likes}, Curated: ${listing.signals?.isCurated}`;
+            } else if (pTask.name === 'redbubble') {
+              if (listing.isBestSeller) isHighConfidence = true;
+              signalDesc = `Best Seller Badge Detected`;
+            } else if (pTask.name === 'artstation') {
+              if ((listing.signals?.likes || 0) > 250 && (listing.signals?.views || 0) > 2000) isHighConfidence = true;
+              signalDesc = `Likes: ${listing.signals?.likes}, Views: ${listing.signals?.views}`;
+            } else if (pTask.name === 'substack') {
+              if (listing.signals?.subscribers?.includes('thousands')) isHighConfidence = true;
+              signalDesc = `Subscriber Tier: ${listing.signals?.subscribers}`;
+            }
+
+            const confidence = isHighConfidence ? 0.92 : 0.7;
+            await this.saveSignal({
+              niche,
+              platform: pTask.name,
+              signalType: 'trend',
+              title: `${pTask.name.replace('_', ' ').toUpperCase()} Viral: ${listing.title}`,
+              description: `${signalDesc}. URL: ${listing.url || 'N/A'}`,
+              confidence,
+              actionable: true,
+            });
+            output.signalsCreated++;
+            if (isHighConfidence) output.highConfidenceCount++;
+          }
+        }
+      } catch (err: any) {
+        console.error(`[MarketResearch] ${pTask.name} research error for "${niche}":`, err.message);
+      }
     }
 
     // ── 2. Neural Discovery: Niche DNA ──

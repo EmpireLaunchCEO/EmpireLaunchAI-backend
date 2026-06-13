@@ -6,8 +6,8 @@ const { assets } = schema;
 /**
  * Platform objective types for the Content Creator Bridge.
  */
-export type CreatorPlatform = 'canva' | 'kittl' | 'capcut';
-export type CreatorObjective = 'SEARCH_TEMPLATES' | 'DOWNLOAD_ASSET' | 'APPLY_DNA' | 'EXPORT_DESIGN' | 'FREE_TIER_BYPASS';
+export type CreatorPlatform = 'canva' | 'kittl' | 'capcut' | 'figma_community' | 'behance' | 'redbubble' | 'artstation' | 'substack';
+export type CreatorObjective = 'SEARCH_TEMPLATES' | 'DOWNLOAD_ASSET' | 'APPLY_DNA' | 'EXPORT_DESIGN' | 'FREE_TIER_BYPASS' | 'SEARCH_TRENDS';
 
 /**
  * Harvest Objective — used by both the standard HunterGatherer
@@ -78,11 +78,22 @@ export class HunterGathererService {
 
       // ─── KITTL ───────────────────────────────────────────────
       case 'kittl':
-        if (type === 'SEARCH_TEMPLATES') {
+        if (type === 'SEARCH_TEMPLATES' || type === 'SEARCH_TRENDS') {
           // Free Tier: Browse Kittl's free templates
-          steps.push({ action: 'navigate', url: `https://www.kittl.com/templates?query=${encodeURIComponent(params.niche || '')}&filter=free` });
+          steps.push({ action: 'navigate', url: `https://www.kittl.com/templates?query=${encodeURIComponent(params.niche || '')}&filter=free&sort=trending` });
           steps.push({ action: 'wait', value: '.template-card' });
-          steps.push({ action: 'extract', selector: '.template-card', multiple: true, fields: { title: 'h3', thumbnail: 'img@src' } });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.template-card', 
+            multiple: true, 
+            fields: { 
+              title: 'h3', 
+              thumbnail: 'img@src',
+              useCount: '.use-count',
+              likes: '.like-count',
+              isStaffPick: '.staff-pick-badge'
+            } 
+          });
           steps.push({ action: 'screenshot' });
         } else if (type === 'APPLY_DNA') {
           // Apply DNA manifest to template: navigate to editor, inject colors/fonts
@@ -193,6 +204,103 @@ export class HunterGathererService {
               rating: '.wt-star-rating__rating',
               reviewsCount: '.wt-text-caption.wt-text-grey'
             } 
+          });
+        }
+        break;
+
+      // ─── FIGMA COMMUNITY ────────────────────────────────────
+      case 'figma_community':
+        if (type === 'SEARCH_TRENDS') {
+          const query = params.query || params.niche || 'ui kit';
+          steps.push({ action: 'navigate', url: `https://www.figma.com/community/search?q=${encodeURIComponent(query)}&sort=popular` });
+          steps.push({ action: 'wait', value: '[class*="file_custom_view"]' });
+          steps.push({ 
+            action: 'extract', 
+            selector: '[class*="file_custom_view"]', 
+            multiple: true,
+            fields: {
+              title: '[class*="file_custom_view--title"]',
+              url: 'a@href',
+              duplicateCount: '[class*="file_custom_view--duplicates"]',
+              likeCount: '[class*="file_custom_view--likes"]'
+            }
+          });
+        }
+        break;
+
+      // ─── BEHANCE ────────────────────────────────────────────
+      case 'behance':
+        if (type === 'SEARCH_TRENDS') {
+          const query = params.query || params.niche || 'brand identity';
+          steps.push({ action: 'navigate', url: `https://www.behance.net/search/projects?search=${encodeURIComponent(query)}&sort=appreciations` });
+          steps.push({ action: 'wait', value: '.ProjectCover-container-ADp' });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.ProjectCover-container-ADp', 
+            multiple: true,
+            fields: {
+              title: '.ProjectCover-title-2_3',
+              url: 'a@href',
+              likes: '.ProjectCover-stat-1l8',
+              isCurated: '.ProjectCover-featured-2_3'
+            }
+          });
+        }
+        break;
+
+      // ─── REDBUBBLE ──────────────────────────────────────────
+      case 'redbubble':
+        if (type === 'SEARCH_TRENDS') {
+          const query = params.query || params.niche || 'stickers';
+          steps.push({ action: 'navigate', url: `https://www.redbubble.com/shop/?query=${encodeURIComponent(query)}&sortOrder=trending` });
+          steps.push({ action: 'wait', value: '[data-testid="search-result-card"]' });
+          steps.push({ 
+            action: 'extract', 
+            selector: '[data-testid="search-result-card"]', 
+            multiple: true,
+            fields: {
+              title: '.styles__title--1Z_X_',
+              url: 'a@href',
+              isBestSeller: '.styles__bestSeller--2V_X_'
+            }
+          });
+        }
+        break;
+
+      // ─── ARTSTATION ─────────────────────────────────────────
+      case 'artstation':
+        if (type === 'SEARCH_TRENDS') {
+          const query = params.query || params.niche || 'game assets';
+          steps.push({ action: 'navigate', url: `https://www.artstation.com/search?q=${encodeURIComponent(query)}&sort_by=trending` });
+          steps.push({ action: 'wait', value: '.project-card' });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.project-card', 
+            multiple: true,
+            fields: {
+              title: '.project-title',
+              url: 'a@href',
+              likes: '.project-stats-likes',
+              views: '.project-stats-views'
+            }
+          });
+        }
+        break;
+
+      // ─── SUBSTACK ───────────────────────────────────────────
+      case 'substack':
+        if (type === 'SEARCH_TRENDS') {
+          steps.push({ action: 'navigate', url: `https://substack.com/discover/category/design` });
+          steps.push({ action: 'wait', value: '.publication-card' });
+          steps.push({ 
+            action: 'extract', 
+            selector: '.publication-card', 
+            multiple: true,
+            fields: {
+              title: '.publication-title',
+              url: 'a@href',
+              subscribers: '.subscriber-count'
+            }
           });
         }
         break;
