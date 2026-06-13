@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
+import { integrationService } from './integrationService.js';
+import { vaultService } from './vaultService.js';
 
 dotenv.config();
 
@@ -42,7 +44,8 @@ export class ProtectedButtonService {
     });
 
     // 3. Return the Proxy URL
-    return `https://pay.empirelaunch.ai/${buttonId}?ott=${ott}`;
+    const baseUrl = process.env.PUBLIC_URL || 'https://pay.empirelaunch.ai';
+    return `${baseUrl}/protected/resolve/${buttonId}?ott=${ott}`;
   }
 
   /**
@@ -76,7 +79,12 @@ export class ProtectedButtonService {
     if (!product) throw new Error('Product not found');
 
     // 4. Resolve Stripe Session
-    // Note: In a full implementation, we'd use the user's Stripe Connect account ID from the vault
+    const stripeAccountId = await vaultService.getSecret(button.userId, 'stripe', 'stripe_account_id');
+    
+    if (!stripeAccountId) {
+      throw new Error('Stripe account not configured in vault');
+    }
+
     const session = await stripe.checkout.sessions.create({
       line_items: [
         {
@@ -98,9 +106,11 @@ export class ProtectedButtonService {
         buttonId,
         userId: button.userId,
         productId: button.productId,
-        platform: button.platform
+        platform: button.platform,
+        referrer: context.referrer,
+        userAgent: context.userAgent
       }
-    });
+    }, stripeAccountId ? { stripeAccount: stripeAccountId } : undefined);
 
     // 5. Expire OTT if single-use
     if (buttonData.isSingleUse) {

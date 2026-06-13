@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { stripeService } from '../services/stripeService.js';
 import { paymentButtonService } from '../services/paymentButtonService.js';
+import { protectedButtonService } from '../services/protectedButtonService.js';
 import { vaultService } from '../services/vaultService.js';
 import { db, schema } from '../db/index.js';
 const { users, products, paymentLinks } = schema;
@@ -61,14 +62,14 @@ export const createPaymentLink = async (req: Request, res: Response) => {
     const userId = req.headers['x-user-id'] as string || 'default-user';
     const { name, description, priceInCents } = req.body;
 
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!user || !user.stripeAccountId) {
+    const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
+    if (!stripeAccountId) {
       return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
     }
 
     // 1. Create product and price in user's Connect account
     const { product: stripeProduct, price: stripePrice } = await stripeService.createProductAndPrice(
-      user.stripeAccountId,
+      stripeAccountId,
       name,
       description,
       priceInCents
@@ -88,7 +89,7 @@ export const createPaymentLink = async (req: Request, res: Response) => {
     });
 
     // 3. Create payment link in Stripe
-    const stripePaymentLink = await stripeService.createPaymentLink(user.stripeAccountId, stripePrice.id);
+    const stripePaymentLink = await stripeService.createPaymentLink(stripeAccountId, stripePrice.id);
 
     // 4. Save payment link to local DB
     const paymentLinkId = uuidv4();
@@ -132,30 +133,45 @@ export const createPaymentButton = async (req: Request, res: Response) => {
     const userId = req.headers['x-user-id'] as string || 'default-user';
     const { name, description, priceInCents, buttonText, buttonColor } = req.body;
 
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!user || !user.stripeAccountId) {
+    const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
+    if (!stripeAccountId) {
       return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
     }
 
     // 1. Create product and price in user's Connect account
     const { product: stripeProduct, price: stripePrice } = await stripeService.createProductAndPrice(
-      user.stripeAccountId,
+      stripeAccountId,
       name,
       description,
       priceInCents
     );
 
-    // 2. Create styled button and store in DB
-    const button = await stripeService.createPaymentButton(
+    // 2. Save product to local DB
+    const productId = uuidv4();
+    await db.insert(products).values({
+      id: productId,
       userId,
-      user.stripeAccountId,
-      stripeProduct.id,
-      stripePrice.id,
-      buttonText || 'Buy Now',
-      buttonColor || '#000000'
+      name,
+      description,
+      price: priceInCents,
+      currency: 'usd',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // 3. Generate Protected Proxy URL
+    const proxyUrl = await protectedButtonService.generateButton(
+      userId,
+      productId,
+      'general'
     );
 
-    res.json(button);
+    res.json({ 
+      productId, 
+      proxyUrl, 
+      buttonText: buttonText || 'Buy Now', 
+      buttonColor: buttonColor || '#000000' 
+    });
   } catch (error: any) {
     console.error('Error in createPaymentButton:', error);
     res.status(500).json({ error: error.message });
@@ -167,12 +183,12 @@ export const triggerInstantPayout = async (req: Request, res: Response) => {
     const userId = req.headers['x-user-id'] as string || 'default-user';
     const { amountInCents } = req.body;
 
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!user || !user.stripeAccountId) {
+    const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
+    if (!stripeAccountId) {
       return res.status(400).json({ error: 'User must complete Stripe onboarding first' });
     }
 
-    const payout = await stripeService.triggerInstantPayout(userId, user.stripeAccountId, amountInCents);
+    const payout = await stripeService.triggerInstantPayout(userId, stripeAccountId, amountInCents);
     res.json(payout);
   } catch (error: any) {
     console.error('Error in triggerInstantPayout:', error);
