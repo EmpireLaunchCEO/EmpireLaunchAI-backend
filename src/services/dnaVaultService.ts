@@ -71,6 +71,22 @@ export class DnaVaultService {
   async storeStrand(strand: DnaStrand): Promise<string> {
     const id = strand.id || uuidv4();
     
+    // Duplication Check: skip if externalId already exists from the same platform
+    if (strand.externalId && strand.sourcePlatform) {
+      const existing = await db.select()
+        .from(dnaStrands)
+        .where(and(
+          eq(dnaStrands.externalId, strand.externalId),
+          eq(dnaStrands.sourcePlatform, strand.sourcePlatform)
+        ))
+        .limit(1);
+      
+      if (existing.length > 0) {
+        console.log(`[DnaVault] Skipping duplicate strand: ${strand.externalId} on ${strand.sourcePlatform}`);
+        return existing[0].id;
+      }
+    }
+
     await db.insert(dnaStrands).values({
       id,
       category: strand.category,

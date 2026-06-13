@@ -229,6 +229,36 @@ export class MassDnaHarvestWorker {
       }
     } catch (err) {}
 
+    // Phase 3: TikTok Trends
+    try {
+      const tiktokTrends = await marketIntelligenceService.fetchTikTokTrends(niche);
+      if (tiktokTrends && tiktokTrends.length > 0) {
+        const topTikTok = tiktokTrends.slice(0, 5);
+        for (const trend of topTikTok) {
+          try {
+            const dna = await this.extractDnaFromListing(niche, trend, model);
+            if (dna) strands.push(dna);
+          } catch (err: any) {}
+          await this.sleep(200);
+        }
+      }
+    } catch (err) {}
+
+    // Phase 4: Pinterest Trends
+    try {
+      const pinterestTrends = await marketIntelligenceService.fetchPinterestTrends(niche);
+      if (pinterestTrends && pinterestTrends.length > 0) {
+        const topPinterest = pinterestTrends.slice(0, 5);
+        for (const trend of topPinterest) {
+          try {
+            const dna = await this.extractDnaFromListing(niche, trend, model);
+            if (dna) strands.push(dna);
+          } catch (err: any) {}
+          await this.sleep(200);
+        }
+      }
+    } catch (err) {}
+
     // Fallback: Generate synthetic strands if needed
     if (strands.length < 5) {
       const syntheticCount = 5 - strands.length;
@@ -265,6 +295,7 @@ export class MassDnaHarvestWorker {
         },
         performanceScore: parsed.performanceScore || 60,
         sourcePlatform: 'canva',
+        externalId: template.url || undefined,
         isSynthesized: true,
         createdAt: new Date(),
       } as DnaStrand;
@@ -292,6 +323,7 @@ export class MassDnaHarvestWorker {
         manifest: parsed.manifest || { designStyle: 'modern' },
         performanceScore: parsed.performanceScore || 50,
         sourcePlatform: 'etsy',
+        externalId: listing.url || undefined,
         isSynthesized: true,
         createdAt: new Date(),
       } as DnaStrand;

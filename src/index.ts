@@ -30,6 +30,7 @@ import verificationRoutes from './routes/verificationRoutes.js';
 import retentionRoutes from './routes/retentionRoutes.js';
 import revenueRoutes from './routes/revenueRoutes.js';
 import marketDnaRoutes from './routes/marketDnaRoutes.js';
+import massDnaRoutes from './routes/massDnaRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -127,6 +128,7 @@ app.use('/api/verification', verificationRoutes);
 app.use('/api/retention', retentionRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/market-dna', marketDnaRoutes);
+app.use('/api/mass-dna', massDnaRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });

@@ -9,6 +9,7 @@ import { marketResearcher } from '../services/autonomousMarketResearcher.js';
 import { massDnaHarvester } from '../services/massDnaHarvestWorker.js';
 import { campaignService } from '../services/campaignService.js';
 import { etsyPollingService } from '../services/etsyPollingService.js';
+import { creativeLoopService } from '../services/creativeLoopService.js';
 
 export class SchedulerWorker {
   start() {
@@ -72,6 +73,16 @@ export class SchedulerWorker {
         }
       } catch (error) {
         console.error('[SchedulerWorker] Error starting Mass DNA Harvest:', error);
+      }
+    });
+
+    // Gemini Creative Loop — generate scripts from trends every 2 hours
+    cron.schedule('0 */2 * * *', async () => {
+      console.log('[SchedulerWorker] Running Gemini Creative Loop...');
+      try {
+        await creativeLoopService.tick();
+      } catch (error) {
+        console.error('[SchedulerWorker] Error in Gemini Creative Loop:', error);
       }
     });
   }

@@ -224,6 +224,63 @@ export class MarketIntelligenceService {
     }
   }
 
+  async fetchTikTokTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation('system', [
+        { action: 'navigate', url: `https://www.tiktok.com/search?q=${encodeURIComponent(niche)}` },
+        { action: 'wait', value: '[data-e2e="search-video-container"]' },
+        { 
+          action: 'extract', 
+          selector: '[data-e2e="search-video-container"]',
+          multiple: true,
+          fields: {
+            title: '[data-e2e="search-card-video-caption"]',
+            views: '[data-e2e="video-views"]',
+            likes: '[data-e2e="video-likes"]'
+          }
+        }
+      ]) as any;
+
+      const items = results?.['[data-e2e="search-video-container"]'] || [];
+      return items.map((l: any) => ({
+        title: l.title || `${niche} TikTok`,
+        platform: 'TikTok',
+        signals: {
+          views: l.views,
+          likes: l.likes
+        }
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'TikTok', userId);
+    }
+  }
+
+  async fetchPinterestTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation('system', [
+        { action: 'navigate', url: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(niche)}` },
+        { action: 'wait', value: '[data-test-id="pin"]' },
+        { 
+          action: 'extract', 
+          selector: '[data-test-id="pin"]',
+          multiple: true,
+          fields: {
+            title: '[data-test-id="pin-title"]',
+            description: '[data-test-id="pin-description"]'
+          }
+        }
+      ]) as any;
+
+      const items = results?.['[data-test-id="pin"]'] || [];
+      return items.map((l: any) => ({
+        title: l.title || l.description || `${niche} Pin`,
+        platform: 'Pinterest',
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'Pinterest', userId);
+    }
+  }
+
   private async fallbackToLLM(niche: string, platform: string, userId?: string): Promise<MarketListing[]> {
     try {
       const model = userId ? await resolveModelForUser(userId) : getDefaultModel();
