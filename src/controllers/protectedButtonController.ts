@@ -46,8 +46,16 @@ export class ProtectedButtonController {
         ip: req.ip || 'unknown'
       };
 
-      const providedOtt = Array.isArray(ott) ? String(ott[0]) : String(ott);
-      const stripeUrl = await protectedButtonService.resolveProxy(buttonId, providedOtt, context);
+      const providedOtt = typeof ott === 'string' ? ott : String(ott);
+      const stripeUrl = await protectedButtonService.resolveProxy(
+        buttonId as string, 
+        providedOtt as string, 
+        {
+          userAgent: context.userAgent as string,
+          referrer: context.referrer as string,
+          ip: context.ip as string
+        }
+      );
       
       if (!stripeUrl) {
         throw new Error('Could not resolve payment URL');
