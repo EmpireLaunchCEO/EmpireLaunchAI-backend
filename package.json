@@ -7,7 +7,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "build-vercel": "tsc",
+    "build-vercel": "echo 'Vercel build skipped, using serverless entry point'",
     "build-local": "tsc",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
