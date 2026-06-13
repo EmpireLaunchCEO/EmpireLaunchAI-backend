@@ -1,5 +1,11 @@
 {
   "version": 2,
+  "functions": {
+    "api/index.ts": {
+      "runtime": "vercel-node@latest",
+      "includeFiles": "src/**"
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",
