@@ -157,38 +157,47 @@ export class DnaLabService {
   }
 
   /**
-   * Analyze narrative DNA with tier-appropriate AI for the given user.
+   * Processes a market listing/gig to extract Style DNA based on viral signals.
    */
-  async analyzeNarrativeForUser(userId: string, transcript: string, pacing: string) {
-    const activeModel = await this.getModel(userId);
-    const template = `
-      Analyze the following video transcript and pacing to extract Narrative DNA.
-      Transcript: {transcript}
-      Pacing: {pacing}
+  async extractMarketDna(userId: string, platform: string, rawData: any) {
+    console.log(`[DnaLab] Extracting Market DNA for user ${userId} on ${platform}`);
 
-      Return ONLY a JSON object.
+    const activeModel = await this.getModel(userId);
+    const masterBriefing = getMasterBriefing({ niche: rawData.niche || 'digital products', goal: 'Market Style Extraction', userTier: 'Intel Architect' });
+
+    const template = `
+      ${masterBriefing}
+
+      Task: Extract high-fidelity Style DNA from this ${platform} listing:
+      Title: {title}
+      Raw Data: {rawData}
+
+      Requirements:
+      1. Identify the core color palette (hex codes).
+      2. Identify typography (header/body fonts).
+      3. Categorize layout complexity.
+      4. Extract key copywriting triggers.
+
+      Apply the Anti-Copycat Rule: Propose a synthesis that is technically unique.
+
+      Return ONLY a JSON object matching this schema:
       {{
-        "hook_style": "direct_question | visual_shock | story_start",
-        "cta_pattern": "link_in_bio | follow_for_more | check_comments",
-        "pacing_curve": "high_start_stable_mid | consistent_high | slow_build"
+        "colorPalette": ["#hex1", "#hex2", "#hex3"],
+        "typography": {{ "headerFont": "string", "bodyFont": "string", "fontVibe": "string" }},
+        "layoutComplexity": "minimalist | structured_grid | organic_boho | retro_maximalist",
+        "keyCopywritingTriggers": ["string"]
       }}
     `;
+
     const prompt = PromptTemplate.fromTemplate(template);
-    const chain = RunnableSequence.from([
-      prompt,
-      activeModel,
-      new JsonOutputParser(),
-    ]);
+    const chain = RunnableSequence.from([prompt, activeModel, new JsonOutputParser()]);
 
     try {
-      return await chain.invoke({ transcript, pacing });
+      const styleDna = await chain.invoke({ title: rawData.title, rawData: JSON.stringify(rawData) });
+      return styleDna;
     } catch (error) {
-      console.error('[DnaLab] Narrative analysis failed, using default');
-      return {
-        hook_style: "story_start",
-        cta_pattern: "link_in_bio",
-        pacing_curve: "high_start_stable_mid"
-      };
+      console.error('[DnaLab] Market DNA extraction failed:', error);
+      throw error;
     }
   }
 }

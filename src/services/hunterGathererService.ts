@@ -149,7 +149,10 @@ export class HunterGathererService {
       // ─── FIVERR ──────────────────────────────────────────────
       case 'fiverr':
         if (type === 'SEARCH_TRENDS') {
-          steps.push({ action: 'navigate', url: `https://www.fiverr.com/search/gigs?query=${encodeURIComponent(params.query || '')}` });
+          const query = params.query || params.niche || 'digital products';
+          const searchUrl = `https://www.fiverr.com/search/gigs?query=${encodeURIComponent(query)}&seller_level=level_two_seller,top_rated_seller&delivery_time=1&sort_by=popularity`;
+          
+          steps.push({ action: 'navigate', url: searchUrl });
           steps.push({ action: 'wait', value: '.gig-card-layout' });
           steps.push({ 
             action: 'extract', 
@@ -157,8 +160,12 @@ export class HunterGathererService {
             multiple: true,
             fields: {
               title: 'h3',
-              ordersInQueue: '.orders-in-queue', // Signal: Heat
-              rating: '.rating-score'
+              url: 'a@href',
+              rating: '.rating-score',
+              reviewsCount: '.ratings-count',
+              sellerLevel: '.seller-badge',
+              isFiverrChoice: '.fiverrs-choice-badge, .badge-fiverrs-choice',
+              ordersInQueue: 'span.orders-in-queue' // Might only be on detail page
             }
           });
           steps.push({ action: 'screenshot' });
@@ -168,17 +175,23 @@ export class HunterGathererService {
       // ─── ETSY ────────────────────────────────────────────────
       case 'etsy':
         if (type === 'SEARCH_TRENDS') {
-          steps.push({ action: 'navigate', url: `https://www.etsy.com/search?q=${encodeURIComponent(params.query || '')}+best+seller` });
+          const query = params.query || params.niche || 'digital products';
+          const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(query)}&explicit_free_shipping=false&item_type=all&digital=true&ship_to=US&order=highest_reviews`;
+          
+          steps.push({ action: 'navigate', url: searchUrl });
           steps.push({ action: 'wait', value: '.v2-listing-card' });
           steps.push({ 
             action: 'extract', 
             selector: '.v2-listing-card', 
             multiple: true, 
             fields: { 
-              title: 'a', 
+              title: 'h3', 
+              url: 'a@href',
               price: '.currency-value',
-              isBestSeller: '.wt-badge--best-seller',
-              inBasket: '.wt-badge--basket' // Signal: Heat
+              isBestSeller: 'span.wt-badge--best-seller, span.wt-badge--sales-pitch',
+              inBasket: '.wt-badge--basket, span.wt-badge--neutral:has-text("basket"), .wt-text-success',
+              rating: '.wt-star-rating__rating',
+              reviewsCount: '.wt-text-caption.wt-text-grey'
             } 
           });
         }

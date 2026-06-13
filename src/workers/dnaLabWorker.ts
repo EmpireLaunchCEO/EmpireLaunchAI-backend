@@ -8,7 +8,30 @@ export const startDnaLabWorker = () => {
   const worker = new Worker(
     'dna-lab-tasks',
     async (job: Job) => {
-      const { userId, platform, videoUrl } = job.data;
+      const { userId, platform, videoUrl, rawData, jobType } = job.data;
+      
+      if (jobType === 'market-dna-extraction') {
+        console.log(`[DnaLabWorker] Processing Market DNA for user ${userId} on ${platform}`);
+        webSocketService.notifyUser(userId, 'dna-analysis-started', { jobId: job.id, platform });
+
+        try {
+          const result = await dnaLabService.extractMarketDna(userId, platform, rawData);
+          
+          webSocketService.notifyUser(userId, 'dna-analysis-completed', { 
+            jobId: job.id, 
+            status: 'success',
+            dnaProfile: result 
+          });
+
+          await notificationService.notifyUser(userId, `Market Style DNA Extraction complete for ${platform}`, false);
+          return result;
+        } catch (error: any) {
+          console.error(`[DnaLabWorker] Error in market DNA extraction:`, error);
+          webSocketService.notifyUser(userId, 'dna-analysis-failed', { jobId: job.id, error: error.message });
+          throw error;
+        }
+      }
+
       console.log(`[DnaLabWorker] Processing video for user ${userId}: ${videoUrl}`);
 
       webSocketService.notifyUser(userId, 'dna-analysis-started', { jobId: job.id, videoUrl });
