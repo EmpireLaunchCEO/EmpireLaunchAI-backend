@@ -7,6 +7,8 @@ import { integrationService } from './integrationService.js';
 import { metaService } from './metaService.js';
 import { pinterestService } from './pinterestService.js';
 import { youtubeService } from './youtubeService.js';
+import { systemeIoService } from './systemeIoService.js';
+import { goDaddyService } from './goDaddyService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +64,10 @@ export class PlatformRouter {
     this.register('paypal', async (a, p) => this.handleFinancial('paypal', a, p));
     this.register('gmail', async (a, p) => this.handleCommunication('gmail', a, p));
     this.register('outlook', async (a, p) => this.handleCommunication('outlook', a, p));
+
+    // ── Email Marketing / Domains ──
+    this.register('systeme_io', async (a, p) => this.handleSystemeIo(a, p));
+    this.register('godaddy', async (a, p) => this.handleGoDaddy(a, p));
   }
 
   private register(name: string, handler: (action: string, params: any) => Promise<ExecutionResult>): void {
@@ -320,6 +326,36 @@ export class PlatformRouter {
 
   private async handleCommunication(_platform: string, _action: string, _params: any): Promise<ExecutionResult> {
     return { success: true, data: { note: 'Communication routed to inbox assistant' } };
+  }
+
+  private async handleSystemeIo(action: string, params: any): Promise<ExecutionResult> {
+    try {
+      const { userId = 'system' } = params;
+      switch (action) {
+        case 'onboarding': {
+          const result = await systemeIoService.setupAutoCampaign(userId, params.niche);
+          return { success: true, data: { result } };
+        }
+        default: return { success: false, error: `Unknown Systeme.io action: ${action}` };
+      }
+    } catch (error: any) {
+      return { success: false, error: `Systeme.io error: ${error.message}` };
+    }
+  }
+
+  private async handleGoDaddy(action: string, params: any): Promise<ExecutionResult> {
+    try {
+      const { userId = 'system' } = params;
+      switch (action) {
+        case 'onboarding': {
+          const result = await goDaddyService.setupDnsRecords(userId, params.domain);
+          return { success: true, data: { result } };
+        }
+        default: return { success: false, error: `Unknown GoDaddy action: ${action}` };
+      }
+    } catch (error: any) {
+      return { success: false, error: `GoDaddy error: ${error.message}` };
+    }
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
