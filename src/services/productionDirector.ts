@@ -83,7 +83,7 @@ CRITICAL RULES:
 2. NEVER include text, logos, or product names in the image prompt
 3. Text overlays are specified SEPARATELY — the image prompt must be text-free
 4. Scene transitions must create a smooth visual narrative
-5. Total video length: 10-30 seconds (platform-appropriate)
+5. Total video length: 7-10 seconds (optimized for high-retention)
 6. Zero references to competitors, brand names, or platforms in prompts
 7. Anti-Copycat: Create UNIQUE concepts — never replicate existing best-sellers
 
