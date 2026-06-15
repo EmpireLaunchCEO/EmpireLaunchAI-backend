@@ -4,7 +4,7 @@ import { notificationService } from './notificationService.js';
 import { approvalService } from './approvalService.js';
 
 export interface AutomationStep {
-  action: 'navigate' | 'click' | 'fill' | 'screenshot' | 'approve' | 'wait' | 'extract';
+  action: 'navigate' | 'click' | 'fill' | 'screenshot' | 'approve' | 'wait' | 'extract' | 'check';
   selector?: string;
   value?: string;
   url?: string;
@@ -50,8 +50,12 @@ export class NeuralBrowserService {
             break;
           case 'wait':
             if (step.value) {
-                if (step.value.startsWith('http')) {
+                if (step.value === 'networkidle') {
+                    await page.waitForLoadState('networkidle');
+                } else if (step.value.startsWith('http')) {
                     await page.waitForURL(step.value, { timeout: 60000 });
+                } else if (step.value.startsWith('text=')) {
+                    await page.waitForSelector(`text=${step.value.substring(5)}`, { timeout: 60000 });
                 } else {
                     await page.waitForSelector(step.value, { timeout: 60000 });
                 }
@@ -82,6 +86,15 @@ export class NeuralBrowserService {
                 const value = await page.textContent(step.selector);
                 results[step.selector] = value?.trim() || null;
               }
+            }
+            break;
+          case 'check':
+            if (step.selector) {
+                const visible = await page.isVisible(step.selector);
+                results[step.selector] = visible ? 'true' : 'false';
+            } else if (step.value && step.value.startsWith('text=')) {
+                const visible = await page.isVisible(`text=${step.value.substring(5)}`);
+                results['text'] = visible ? 'true' : 'false';
             }
             break;
           case 'screenshot':

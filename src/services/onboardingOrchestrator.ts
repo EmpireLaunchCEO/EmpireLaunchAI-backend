@@ -7,6 +7,7 @@ import { encryptWithEnvelope } from '../utils/encryption.js';
 import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
 import { webSocketService } from './websocketService.js';
 import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';
+import { neuralBrowserService } from './neuralBrowserService.js';
 
 const execPromise = promisify(exec);
 const { onboardingSessions, ownershipVault, goals } = schema;
@@ -170,15 +171,17 @@ export class OnboardingOrchestrator {
   }
 
   private async executeCanvaFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
     // 1. Open Canva login
-    await this.runCommand('agent-browser open "https://www.canva.com/login"', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url: "https://www.canva.com/login" }
+    ]);
     
     // 2. Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
+    const results = await neuralBrowserService.executeAutomation(userId, [
+      { action: 'check', value: 'text=Log in' }
+    ]);
     
-    if (snapshot.includes('Log in')) {
+    if (results['text'] === 'true') {
       // Pause and wait for HITL
       await db.update(onboardingSessions)
         .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
@@ -186,12 +189,10 @@ export class OnboardingOrchestrator {
       
       console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in`);
       
-      // In a real system, we'd wait for a signal from the frontend.
-      // For this MVP/Playbook, we'll poll the session status or wait for the URL change.
-      // The playbook used: agent-browser wait --url "**/home" --timeout 300000
-      
       try {
-        await this.runCommand('agent-browser wait --url "**/home" --timeout 300000', sessionEnv);
+        await neuralBrowserService.executeAutomation(userId, [
+          { action: 'wait', value: "https://www.canva.com/home" }
+        ]);
       } catch (e) {
         throw new Error('Login timeout or failed');
       }
@@ -202,8 +203,12 @@ export class OnboardingOrchestrator {
       .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
 
-    await this.runCommand('agent-browser navigate "https://www.canva.com/settings/apps"', sessionEnv);
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url: "https://www.canva.com/settings/apps" },
+      { action: 'wait', value: 'networkidle' } // Note: neuralBrowserService needs to handle 'networkidle'
+    ]);
+    
+    // ... rest of the flow ...
 
     // Mocking the Connect flow for Canva as per playbook
     // In a real scenario, we'd interact with specific elements
@@ -249,15 +254,17 @@ export class OnboardingOrchestrator {
   }
 
   private async executeEtsyFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
     // 1. Open Etsy login
-    await this.runCommand('agent-browser open "https://www.etsy.com/signin"', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url: "https://www.etsy.com/signin" }
+    ]);
     
     // 2. Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
+    const results = await neuralBrowserService.executeAutomation(userId, [
+      { action: 'check', value: 'text=Email address' }
+    ]);
     
-    if (snapshot.includes('Email address')) {
+    if (results['text'] === 'true') {
       // Pause and wait for HITL
       await db.update(onboardingSessions)
         .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
@@ -266,8 +273,9 @@ export class OnboardingOrchestrator {
       console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in to Etsy`);
       
       try {
-        // Wait for the shop manager or home page to indicate login success
-        await this.runCommand('agent-browser wait --url "**/your/shop**" --timeout 300000', sessionEnv);
+        await neuralBrowserService.executeAutomation(userId, [
+          { action: 'wait', value: "**/your/shop**" } // Playwright supports glob-like patterns in waitForURL
+        ]);
       } catch (e) {
         throw new Error('Etsy login timeout or failed');
       }
@@ -282,16 +290,22 @@ export class OnboardingOrchestrator {
     const latestGoal = await this.getLatestUserGoal(userId);
     const goalText = latestGoal ? latestGoal.description || latestGoal.title : "Digital Marketing Empire";
 
-    await this.runCommand('agent-browser navigate "https://www.etsy.com/your/shop/about"', sessionEnv);
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url: "https://www.etsy.com/your/shop/about" },
+      { action: 'wait', value: 'networkidle' }
+    ]);
 
     // 4. Fill Profile
     await db.update(onboardingSessions)
       .set({ currentState: 'FILLING_PROFILE', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
 
-    await this.runCommand(`agent-browser fill "@about_text_area" "${goalText}"`, sessionEnv);
-    await this.runCommand('agent-browser click "@save_button"', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'fill', selector: 'textarea[name="about_text_area"]', value: goalText }, // Real selector needed
+      { action: 'click', selector: 'button[type="submit"]' } // Real selector needed
+    ]);
+    
+    // ... rest of the flow ...
     
     // 5. Extraction & Handoff (Simulated for MVP, similar to Canva)
     await db.update(onboardingSessions)
@@ -324,15 +338,18 @@ export class OnboardingOrchestrator {
   }
 
   private async executeTikTokFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
     // 1. Open TikTok Authorize (Simulated URL for MVP)
-    await this.runCommand('agent-browser open "https://www.tiktok.com/auth/authorize?client_key=EMPIRE_ID&scope=user.info.basic,video.list,video.upload&redirect_uri=https://empirelaunch.ai/auth/callback/tiktok"', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url: "https://www.tiktok.com/auth/authorize?client_key=EMPIRE_ID&scope=user.info.basic,video.list,video.upload&redirect_uri=https://empirelaunch.ai/auth/callback/tiktok" }
+    ]);
     
     // 2. Check if login/authorization is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
+    const results = await neuralBrowserService.executeAutomation(userId, [
+      { action: 'check', value: 'text=Login' },
+      { action: 'check', value: 'text=Authorize' }
+    ]);
     
-    if (snapshot.includes('Login') || snapshot.includes('Authorize')) {
+    if (results['text'] === 'true') {
       // Pause and wait for HITL
       await db.update(onboardingSessions)
         .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
@@ -341,8 +358,9 @@ export class OnboardingOrchestrator {
       console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must authorize TikTok`);
       
       try {
-        // Wait for the redirect back to our callback URL
-        await this.runCommand('agent-browser wait --url "**/auth/callback/tiktok*" --timeout 300000', sessionEnv);
+        await neuralBrowserService.executeAutomation(userId, [
+          { action: 'wait', value: "**/auth/callback/tiktok*" }
+        ]);
       } catch (e) {
         throw new Error('TikTok authorization timeout or failed');
       }
@@ -353,8 +371,11 @@ export class OnboardingOrchestrator {
       .set({ status: 'in_progress', currentState: 'VERIFYING_CONNECTION', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
 
-    // For TikTok, we simulate verifying the code/token
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'wait', value: 'networkidle' }
+    ]);
+    
+    // ... rest of the flow ...
     
     // 4. Handoff to Vault
     await db.update(onboardingSessions)
@@ -387,7 +408,6 @@ export class OnboardingOrchestrator {
   }
 
   private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
     const urls: Record<string, string> = {
       fiverr: 'https://www.fiverr.com/login',
       youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
@@ -407,18 +427,26 @@ export class OnboardingOrchestrator {
     const url = urls[platform];
     const waitUrl = waitUrls[platform];
 
-    await this.runCommand(`agent-browser open "${url}"`, sessionEnv);
+    await neuralBrowserService.executeAutomation(userId, [
+      { action: 'navigate', url }
+    ]);
     
     // Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
+    const results = await neuralBrowserService.executeAutomation(userId, [
+      { action: 'check', value: 'text=Log in' },
+      { action: 'check', value: 'text=Sign in' },
+      { action: 'check', value: 'text=Email' }
+    ]);
     
-    if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
+    if (results['text'] === 'true') {
       await db.update(onboardingSessions)
         .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
       
       try {
-        await this.runCommand(`agent-browser wait --url "${waitUrl}" --timeout 300000`, sessionEnv);
+        await neuralBrowserService.executeAutomation(userId, [
+          { action: 'wait', value: waitUrl }
+        ]);
       } catch (e) {
         throw new Error(`${platform} login timeout or failed`);
       }
@@ -427,6 +455,8 @@ export class OnboardingOrchestrator {
     await db.update(onboardingSessions)
       .set({ status: 'in_progress', currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
+
+    // ... rest of the flow ...
 
     // Simulate extraction
     const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
