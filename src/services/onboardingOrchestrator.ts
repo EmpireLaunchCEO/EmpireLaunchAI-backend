@@ -1,15 +1,12 @@
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { encryptWithEnvelope } from '../utils/encryption.js';
 import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
 import { webSocketService } from './websocketService.js';
 import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';
 import { neuralBrowserService } from './neuralBrowserService.js';
 
-const execPromise = promisify(exec);
 const { onboardingSessions, ownershipVault, goals } = schema;
 
 export interface OnboardingAction {
@@ -249,7 +246,6 @@ export class OnboardingOrchestrator {
       .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
     
-    await this.runCommand('agent-browser close', sessionEnv);
     console.log(`[OnboardingOrchestrator] Onboarding completed for session ${sessionId}`);
   }
 
@@ -333,7 +329,6 @@ export class OnboardingOrchestrator {
       .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
     
-    await this.runCommand('agent-browser close', sessionEnv);
     console.log(`[OnboardingOrchestrator] Etsy onboarding completed for session ${sessionId}`);
   }
 
@@ -403,7 +398,6 @@ export class OnboardingOrchestrator {
       .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
     
-    await this.runCommand('agent-browser close', sessionEnv);
     console.log(`[OnboardingOrchestrator] TikTok onboarding completed for session ${sessionId}`);
   }
 
@@ -479,7 +473,6 @@ export class OnboardingOrchestrator {
       .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
       .where(eq(onboardingSessions.id, sessionId));
     
-    await this.runCommand('agent-browser close', sessionEnv);
     console.log(`[OnboardingOrchestrator] ${platform} onboarding completed for session ${sessionId}`);
   }
 
@@ -491,11 +484,6 @@ export class OnboardingOrchestrator {
       .orderBy(desc(goals.createdAt))
       .limit(1);
     return goal;
-  }
-
-  private async runCommand(command: string, env: any) {
-    console.log(`[OnboardingOrchestrator] Executing: ${command}`);
-    return execPromise(command, { env });
   }
 
   async getSessionStatus(sessionId: string) {

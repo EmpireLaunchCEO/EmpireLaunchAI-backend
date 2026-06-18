@@ -32,13 +32,6 @@ import revenueRoutes from './routes/revenueRoutes.js';
 import marketDnaRoutes from './routes/marketDnaRoutes.js';
 import massDnaRoutes from './routes/massDnaRoutes.js';
 
-import { agentWorker } from './workers/agentWorker.js';
-import { schedulerWorker } from './workers/schedulerWorker.js';
-import { onboardingWorker } from './workers/onboardingWorker.js';
-import { startNeuralBrowserWorker } from './workers/neuralBrowserWorker.js';
-import { startDistributionWorker } from './workers/distributionWorker.js';
-import { startDnaLabWorker } from './workers/dnaLabWorker.js';
-import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
 
@@ -73,9 +66,16 @@ if (process.env.RUN_MIGRATIONS === 'true' && !process.env.VERCEL) {
 // Initialize WebSocket Service
 webSocketService.init(httpServer);
 
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-  // Start the distributed background worker & AI Queue Worker
-  // Note: On serverless platforms like Vercel, these should be moved to separate worker processes
+// Start the distributed background worker & AI Queue Worker
+async function startWorkers() {
+  const { agentWorker } = await import('./workers/agentWorker.js');
+  const { schedulerWorker } = await import('./workers/schedulerWorker.js');
+  const { onboardingWorker } = await import('./workers/onboardingWorker.js');
+  const { startNeuralBrowserWorker } = await import('./workers/neuralBrowserWorker.js');
+  const { startDistributionWorker } = await import('./workers/distributionWorker.js');
+  const { startDnaLabWorker } = await import('./workers/dnaLabWorker.js');
+  const { startAIWorker } = await import('./services/queueService.js');
+
   agentWorker.start();
   schedulerWorker.start();
   startAIWorker();
@@ -83,8 +83,11 @@ if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   startDistributionWorker();
   startDnaLabWorker();
   
-  // Note: onboardingWorker starts automatically upon import
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
+}
+
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  startWorkers().catch(err => console.error('Failed to start workers:', err));
 }
 
 if (!process.env.VERCEL) {
