@@ -76,6 +76,7 @@ export const tasks = sqliteTable('app_tasks', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status').default('todo').notNull(), // 'todo', 'in_progress', 'completed', 'failed'
+  creationDraftId: text('creation_draft_id'),
   priority: integer('priority').default(0).notNull(),
   result: text('result', { mode: 'json' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -540,5 +541,41 @@ export const usageLogs = sqliteTable('usage_logs', {
   userId: text('user_id').references(() => users.id).notNull(),
   type: text('type').notNull(), // 'neural_twin' | 'enhanced_video' | 'faceless'
   metadata: text('metadata', { mode: 'json' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const creationDrafts = sqliteTable('creation_drafts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  campaignId: text('campaign_id').references(() => campaigns.id),
+  creationType: text('creation_type').notNull(), // 'video', 'design', 'faceless', 'copy'
+  title: text('title').notNull(),
+  content: text('content', { mode: 'json' }).notNull(), // Asset URLs, copy, etc.
+  rootId: text("root_id"),
+  version: integer('version').default(1).notNull(),
+  status: text('status').default('pending').notNull(), // 'pending', 'approved', 'rejected', 'dispatched'
+  platform: text('platform'), // 'tiktok', 'instagram', 'etsy', etc.
+  metadata: text('metadata', { mode: 'json' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const creationFeedback = sqliteTable('creation_feedback', {
+  id: text('id').primaryKey(),
+  draftId: text('draft_id').references(() => creationDrafts.id).notNull(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  feedback: text('feedback').notNull(),
+  actor: text('actor').notNull(), // 'user', 'ai'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const dispatchLogs = sqliteTable('dispatch_logs', {
+  id: text('id').primaryKey(),
+  draftId: text('draft_id').references(() => creationDrafts.id).notNull(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  status: text('status').notNull(), // 'success', 'failed'
+  externalId: text('external_id'), // Platform's post/listing ID
+  error: text('error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });

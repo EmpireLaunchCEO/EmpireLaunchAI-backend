@@ -31,6 +31,7 @@ import retentionRoutes from './routes/retentionRoutes.js';
 import revenueRoutes from './routes/revenueRoutes.js';
 import marketDnaRoutes from './routes/marketDnaRoutes.js';
 import massDnaRoutes from './routes/massDnaRoutes.js';
+import dispatchRoutes from './routes/dispatchRoutes.js';
 
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
@@ -132,6 +133,7 @@ app.use('/api/retention', retentionRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/market-dna', marketDnaRoutes);
 app.use('/api/mass-dna', massDnaRoutes);
+app.use('/api/dispatch', dispatchRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });
