@@ -1,7 +1,8 @@
-FROM node:20-slim AS builder
+FROM node:20 AS builder
 
 # Install build dependencies for native modules
 RUN apt-get update && apt-get install -y \
+    libvips-dev \
     python3 \
     make \
     g++ \
@@ -19,10 +20,11 @@ RUN npm run build
 # Prune dev dependencies
 RUN npm prune --production
 
-FROM node:20-slim
+FROM node:20
 
 # Some native modules might need python3 at runtime (rare but happens)
 RUN apt-get update && apt-get install -y \
+    libvips-dev \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
