@@ -646,6 +646,4 @@ export const inboxDrafts = sqliteTable('inbox_drafts', {
   status: text('status').default('pending').notNull(), // 'pending', 'sent', 'rejected'
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
-
-});
+  });
