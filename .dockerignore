@@ -2,8 +2,13 @@ node_modules
 dist
 .git
 .env
-.next
 *.log
 *.db
-build_output.txt
+*.db-wal
+*.db-shm
 tsc_output.txt
+build_output*.txt
+all_tasks.json
+task_info.json
+drizzle/meta
+drizzle-pg/meta

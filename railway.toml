@@ -1,7 +1,6 @@
 [build]
 builder = "docker"
 dockerfilePath = "Dockerfile"
-# Information for the wheelhouse: Explicitly using Dockerfile to avoid Nixpacks confusion.
 
 [deploy]
 healthcheckPath = "/health"
