@@ -12,3 +12,12 @@ all_tasks.json
 task_info.json
 drizzle/meta
 drizzle-pg/meta
+Android
+android
+ios
+Capacitor
+capacitor
+README.md
+Dockerfile
+railway.toml
+nixpacks.toml
