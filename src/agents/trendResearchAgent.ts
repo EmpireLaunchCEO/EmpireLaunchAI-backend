@@ -1,5 +1,5 @@
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-import { MemoryVectorStore } from "@langchain/classic/vectorstores/memory";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
 import { Document } from "@langchain/core/documents";
 import { researchService } from "../services/researchService.js";
 import { PromptTemplate } from "@langchain/core/prompts";
