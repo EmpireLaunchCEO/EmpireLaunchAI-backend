@@ -4,10 +4,13 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull().unique(),
   stripeAccountId: text('stripe_account_id'),
+  paypalMerchantId: text('paypal_merchant_id'),
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
   businessSlots: integer('business_slots').default(3).notNull(),
   tier: text('tier').default('STANDARD_USER').notNull(),
   isLocked: boolean('is_locked').default(false).notNull(),
+  passwordHash: text('password_hash'),
+  accessKey: text('access_key').unique(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
