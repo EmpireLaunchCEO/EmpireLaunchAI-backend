@@ -1,0 +1,98 @@
+[1mdiff --git a/src/services/universalGatewayService.ts b/src/services/universalGatewayService.ts[m
+[1mindex 853f4a0..ae7f3fc 100644[m
+[1m--- a/src/services/universalGatewayService.ts[m
+[1m+++ b/src/services/universalGatewayService.ts[m
+[36m@@ -158,13 +158,31 @@[m [mclass UniversalGatewayService {[m
+         extraTokenParams: { grant_type: 'authorization_code' },[m
+       },[m
+ [m
+[31m-      // ─── GOOGLE (YouTube & Gmail) ──────────────────────────────[m
+[32m+[m[32m      // ─── YOUTUBE ──────────────────────────────────────────────[m
+       {[m
+[31m-        platform: 'google',[m
+[32m+[m[32m        platform: 'youtube',[m
+         authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',[m
+         tokenUrl: 'https://oauth2.googleapis.com/token',[m
+         scopes: [[m
+           'https://www.googleapis.com/auth/youtube.readonly',[m
+[32m+[m[32m          'https://www.googleapis.com/auth/userinfo.email',[m
+[32m+[m[32m          'openid',[m
+[32m+[m[32m        ],[m
+[32m+[m[32m        usePKCE: true,[m
+[32m+[m[32m        clientId: () => process.env.GOOGLE_CLIENT_ID || '',[m
+[32m+[m[32m        clientSecret: () => process.env.GOOGLE_CLIENT_SECRET || '',[m
+[32m+[m[32m        redirectUri: () => process.env.GOOGLE_REDIRECT_URI || '',[m
+[32m+[m[32m        extraAuthParams: { response_type: 'code', access_type: 'offline', prompt: 'consent' },[m
+[32m+[m[32m        extraTokenParams: { grant_type: 'authorization_code' },[m
+[32m+[m[32m        tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },[m
+[32m+[m[32m      },[m
+[32m+[m
+[32m+[m[32m      // ─── GMAIL ────────────────────────────────────────────────[m
+[32m+[m[32m      {[m
+[32m+[m[32m        platform: 'gmail',[m
+[32m+[m[32m        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',[m
+[32m+[m[32m        tokenUrl: 'https://oauth2.googleapis.com/token',[m
+[32m+[m[32m        scopes: [[m
+           'https://www.googleapis.com/auth/gmail.send',[m
+           'https://www.googleapis.com/auth/userinfo.email',[m
+           'openid',[m
+[36m@@ -290,6 +308,47 @@[m [mclass UniversalGatewayService {[m
+         extraAuthParams: { response_type: 'code' },[m
+         extraTokenParams: { grant_type: 'authorization_code' },[m
+       },[m
+[32m+[m
+[32m+[m[32m      // ─── CANVA ──────────────────────────────────────────────────[m
+[32m+[m[32m      {[m
+[32m+[m[32m        platform: 'canva',[m
+[32m+[m[32m        authUrl: 'https://www.canva.com/api/oauth/authorize',[m
+[32m+[m[32m        tokenUrl: 'https://www.canva.com/api/oauth/token',[m
+[32m+[m[32m        scopes: ['asset:read', 'asset:write', 'design:content:read', 'design:content:write', 'design:meta:read'],[m
+[32m+[m[32m        usePKCE: true,[m
+[32m+[m[32m        clientId: () => process.env.CANVA_CLIENT_ID || '',[m
+[32m+[m[32m        clientSecret: () => process.env.CANVA_CLIENT_SECRET || '',[m
+[32m+[m[32m        redirectUri: () => process.env.CANVA_REDIRECT_URI || '',[m
+[32m+[m[32m        extraAuthParams: { response_type: 'code' },[m
+[32m+[m[32m        extraTokenParams: { grant_type: 'authorization_code' },[m
+[32m+[m[32m        tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },[m
+[32m+[m[32m      },[m
+[32m+[m
+[32m+[m[32m      // ─── FIGMA ──────────────────────────────────────────────────[m
+[32m+[m[32m      {[m
+[32m+[m[32m        platform: 'figma',[m
+[32m+[m[32m        authUrl: 'https://www.figma.com/oauth',[m
+[32m+[m[32m        tokenUrl: 'https://www.figma.com/api/oauth/token',[m
+[32m+[m[32m        scopes: ['files:read', 'file_variables:read', 'file_dev_resources:read'],[m
+[32m+[m[32m        usePKCE: false,[m
+[32m+[m[32m        clientId: () => process.env.FIGMA_CLIENT_ID || '',[m
+[32m+[m[32m        clientSecret: () => process.env.FIGMA_CLIENT_SECRET || '',[m
+[32m+[m[32m        redirectUri: () => process.env.FIGMA_REDIRECT_URI || '',[m
+[32m+[m[32m        extraAuthParams: { response_type: 'code' },[m
+[32m+[m[32m        extraTokenParams: { grant_type: 'authorization_code' },[m
+[32m+[m[32m      },[m
+[32m+[m
+[32m+[m[32m      // ─── GODADDY ────────────────────────────────────────────────[m
+[32m+[m[32m      {[m
+[32m+[m[32m        platform: 'godaddy',[m
+[32m+[m[32m        authUrl: 'https://developer.godaddy.com/keys',[m
+[32m+[m[32m        tokenUrl: 'https://api.godaddy.com/v1/domains',[m
+[32m+[m[32m        scopes: [],[m
+[32m+[m[32m        usePKCE: false,[m
+[32m+[m[32m        clientId: () => process.env.GODADDY_API_KEY || '',[m
+[32m+[m[32m        clientSecret: () => process.env.GODADDY_API_SECRET || '',[m
+[32m+[m[32m        redirectUri: () => '',[m
+[32m+[m[32m      },[m
+     ];[m
+   }[m
+ [m
+[36m@@ -315,6 +374,11 @@[m [mclass UniversalGatewayService {[m
+     const config = this.getConfig(platform);[m
+     if (!config) throw new Error(`Platform ${platform} not supported`);[m
+ [m
+[32m+[m[32m    const clientId = config.clientId();[m
+[32m+[m[32m    if (!clientId) {[m
+[32m+[m[32m      throw new Error(`MISSING_KEYS: ${platform.toUpperCase()}_CLIENT_ID is not set in environment variables.`);[m
+[32m+[m[32m    }[m
+[32m+[m
+     const state = crypto.randomBytes(16).toString('hex');[m
+     const codeVerifier = crypto.randomBytes(32).toString('base64url');[m
+     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');[m

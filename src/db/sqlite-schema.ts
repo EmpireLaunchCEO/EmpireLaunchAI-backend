@@ -632,3 +632,20 @@ export const dispatchLogs = sqliteTable('dispatch_logs', {
   error: text('error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
+
+export const inboxDrafts = sqliteTable('inbox_drafts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  subject: text('subject').notNull(),
+  body: text('body').notNull(),
+  to: text('to').notNull(),
+  type: text('type').notNull(), // 'THANK_YOU', 'FOLLOW_UP', 'REVIEW_REQUEST'
+  customer: text('customer').notNull(),
+  platform: text('platform').notNull(),
+  reasoning: text('reasoning'),
+  status: text('status').default('pending').notNull(), // 'pending', 'sent', 'rejected'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+});
