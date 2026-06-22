@@ -11,6 +11,9 @@ export const users = pgTable('users', {
   isLocked: boolean('is_locked').default(false).notNull(),
   passwordHash: text('password_hash'),
   accessKey: text('access_key').unique(),
+  isReviewMode: boolean('is_review_mode').default(false).notNull(),
+  mobileSessionToken: text('mobile_session_token'),
+  mobileSessionExpiresAt: timestamp('mobile_session_expires_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -22,6 +25,8 @@ export const products = pgTable('products', {
   description: text('description'),
   price: integer('price').notNull(), // in cents
   currency: text('currency').default('usd').notNull(),
+  isAiGenerated: boolean('is_ai_generated').default(false).notNull(),
+  externalProductId: text('external_product_id'), // e.g. Etsy Listing ID
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -152,6 +157,10 @@ export const revenueTransactions = pgTable('revenue_transactions', {
   customer: text('customer'),
   externalTransactionId: text('external_transaction_id'),
   productId: uuid('product_id'),
+  isAiGenerated: boolean('is_ai_generated').default(false).notNull(),
+  contentId: uuid('content_id'), // Reference to scheduled_posts.id
+  campaignId: uuid('campaign_id'), // Reference to campaigns.id
+  attributionSource: text('attribution_source'), // 'stripe_metadata', 'utm', 'manual'
   date: timestamp('date').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   });

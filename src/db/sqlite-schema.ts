@@ -57,6 +57,7 @@ export const integrations = sqliteTable('integrations', {
   userId: text('user_id').references(() => users.id).notNull(),
   platform: text('platform').notNull(), // 'etsy', 'fiverr', 'tiktok', 'gmail', etc.
   platformAccountId: text('platform_account_id'), // Indexed for lookups (e.g., Etsy shopId)
+  platformAccountHandle: text('platform_account_handle'), // For UI display (e.g. @username)
   credentials: text('credentials', { mode: 'json' }).notNull(), // Encrypted tokens
   isActive: integer('is_active', { mode: 'boolean' }).default(true).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
