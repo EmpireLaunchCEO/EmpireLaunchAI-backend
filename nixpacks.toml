@@ -1,2 +1,0 @@
-[phases.setup]
-nixPkgs = ["...", "python3", "pkg-config", "vips", "build-base"]
