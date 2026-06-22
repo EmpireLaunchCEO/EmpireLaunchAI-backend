@@ -1,0 +1,12 @@
+# Force Railway to prioritize the Dockerfile or correctly detect Node
+[providers]
+python = { detection = false }
+
+[phases.setup]
+nixPkgs = ["nodejs", "python3", "libvips"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm start"

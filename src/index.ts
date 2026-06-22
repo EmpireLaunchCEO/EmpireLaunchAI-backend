@@ -140,8 +140,8 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api/mobile', mobileRoutes);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v5' });
+  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v3' });
 });
 
 export default app;
-/* Wake up Railway - Attempt 3 */
+/* Forced deployment to resolve wheelhouse error */
