@@ -20,12 +20,14 @@ function hashPassword(password: string): string {
 }
 
 export const registerUser = async (req: Request, res: Response) => {
+  console.log('[DEBUG] Registering user:', req.body.email);
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
   try {
+    console.log('[DEBUG] Checking if user exists...');
     const existingUser = await db.select().from(users).where(eq(users.email, email)).limit(1);
     if (existingUser.length > 0) {
       return res.status(400).json({ error: 'User already exists' });
@@ -34,27 +36,39 @@ export const registerUser = async (req: Request, res: Response) => {
     const userId = uuidv4();
     const passwordHash = hashPassword(password);
 
-    await db.insert(users).values({
-      id: userId,
-      email,
-      passwordHash,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      tier: 'STANDARD_USER',
-    });
+    console.log('[DEBUG] Inserting user into DB...');
+    try {
+      await db.insert(users).values({
+        id: userId,
+        email,
+        passwordHash,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        tier: 'STANDARD_USER',
+      });
+    } catch (insertError: any) {
+      console.error('[DEBUG] DB Insert failed:', insertError);
+      return res.status(500).json({ error: `DB Insert failed: ${insertError.message}` });
+    }
 
-    // Create default settings
-    await db.insert(userSettings).values({
-      id: uuidv4(),
-      userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    console.log('[DEBUG] Creating default settings...');
+    try {
+      await db.insert(userSettings).values({
+        id: uuidv4(),
+        userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } catch (settingsError: any) {
+      console.error('[DEBUG] Settings insert failed:', settingsError);
+      // Not a fatal error for registration itself, but let's report it
+    }
 
+    console.log('[DEBUG] Registration successful for:', email);
     res.json({ status: 'success', userId });
   } catch (error: any) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: `Failed to register: ${error.message}` });
+    console.error('Registration error (outer):', error);
+    res.status(500).json({ error: `Outer registration error: ${error.message}` });
   }
 };
 
@@ -155,6 +169,13 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
     const result = await universalGatewayService.initiateOAuth(userId, platform);
     res.json(result);
   } catch (error: any) {
+    if (error.message === 'MISSING_KEYS') {
+      return res.status(400).json({ 
+        error: 'MISSING_KEYS', 
+        key: error.key,
+        platform 
+      });
+    }
     res.status(500).json({ error: error.message });
   }
 };
