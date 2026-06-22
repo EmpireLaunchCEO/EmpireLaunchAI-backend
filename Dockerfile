@@ -37,6 +37,8 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/drizzle-pg ./drizzle-pg
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
+COPY --from=builder /app/drizzle-pg.config.ts ./drizzle-pg.config.ts
+COPY --from=builder /app/package.json ./package.json
 
 # Ensure production environment
 ENV NODE_ENV=production
