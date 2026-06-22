@@ -1,8 +1,0 @@
-[phases.setup]
-nixPkgs = ["python3", "pkg-config", "vips", "gcc", "g++", "make"]
-
-[phases.install]
-cmds = ["npm install --legacy-peer-deps"]
-
-[phases.build]
-cmds = ["npm run build"]
