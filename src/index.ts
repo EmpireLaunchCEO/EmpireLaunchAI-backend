@@ -143,5 +143,6 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v2' });
 });
 
+/* Wake up Railway - Attempt 2 */
 export default app;
-/* Wake up Railway */
+
