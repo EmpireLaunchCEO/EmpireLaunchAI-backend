@@ -52,9 +52,9 @@ export const registerUser = async (req: Request, res: Response) => {
     });
 
     res.json({ status: 'success', userId });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Failed to register' });
+    res.status(500).json({ error: `Failed to register: ${error.message}` });
   }
 };
 
