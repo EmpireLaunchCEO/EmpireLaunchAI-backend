@@ -13,6 +13,9 @@ export const users = sqliteTable('users', {
   tier: text('tier').default('STANDARD_USER').notNull(),
   accessKey: text('access_key').unique(),
   passwordHash: text('password_hash'),
+  isReviewMode: integer('is_review_mode', { mode: 'boolean' }).default(false).notNull(),
+  mobileSessionToken: text('mobile_session_token'),
+  mobileSessionExpiresAt: integer('mobile_session_expires_at', { mode: 'timestamp' }),
 });
 
 export const products = sqliteTable('products', {
@@ -22,6 +25,8 @@ export const products = sqliteTable('products', {
   description: text('description'),
   price: integer('price').notNull(), // in cents
   currency: text('currency').default('usd').notNull(),
+  isAiGenerated: integer('is_ai_generated', { mode: 'boolean' }).default(false).notNull(),
+  externalProductId: text('external_product_id'), // e.g. Etsy Listing ID
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -64,6 +69,7 @@ export const goals = sqliteTable('goals', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status').default('pending').notNull(), // 'pending', 'active', 'completed', 'failed'
+  creationDraftId: text('creation_draft_id'),
   approvalRequired: integer('approval_required', { mode: 'boolean' }).default(true).notNull(),
   autoPost: integer('auto_post', { mode: 'boolean' }).default(false).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -76,6 +82,7 @@ export const tasks = sqliteTable('app_tasks', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status').default('todo').notNull(), // 'todo', 'in_progress', 'completed', 'failed'
+  creationDraftId: text('creation_draft_id'),
   priority: integer('priority').default(0).notNull(),
   result: text('result', { mode: 'json' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -89,6 +96,7 @@ export const approvals = sqliteTable('approvals', {
   type: text('type').notNull(), // 'content', 'financial', 'subscription'
   payload: text('payload', { mode: 'json' }).notNull(), // The data being approved (e.g., draft content, price)
   status: text('status').default('pending').notNull(), // 'pending', 'approved', 'rejected', 'expired'
+  creationDraftId: text('creation_draft_id'),
   decisionDetails: text('decision_details'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -98,7 +106,9 @@ export const revenueMilestones = sqliteTable('revenue_milestones', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),
   totalRevenue: integer('total_revenue').default(0).notNull(), // Aggregate sum in cents
+  totalAiRevenue: integer('total_ai_revenue').default(0).notNull(), // AI-attributed revenue
   lastMilestoneHit: integer('last_milestone_hit').default(0).notNull(), // Multiple of $1000 in cents
+  lastAiMilestoneHit: integer('last_ai_milestone_hit').default(0).notNull(), // AI milestones
   lastImminentMilestoneNotified: integer('last_imminent_milestone_notified').default(0).notNull(), // Multiple of $1000 in cents (triggered at $900)
   lifetimeSurchargesPaid: integer('lifetime_surcharges_paid').default(0).notNull(), // Total paid success fees in cents
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -109,6 +119,7 @@ export const subscriptionLogs = sqliteTable('subscription_logs', {
   userId: text('user_id').references(() => users.id).notNull(),
   amount: integer('amount').notNull(),
   status: text('status').notNull(), // 'paid', 'pending', 'failed'
+  creationDraftId: text('creation_draft_id'),
   periodStart: integer('period_start', { mode: 'timestamp' }).notNull(),
   periodEnd: integer('period_end', { mode: 'timestamp' }).notNull(),
   type: text('type').notNull(), // 'subscription', 'surcharge'
@@ -151,6 +162,10 @@ export const revenueTransactions = sqliteTable('revenue_transactions', {
   currency: text('currency').default('usd').notNull(),
   externalTransactionId: text('external_transaction_id'),
   productId: text('product_id'),
+  isAiGenerated: integer('is_ai_generated', { mode: 'boolean' }).default(false).notNull(),
+  contentId: text('content_id'), // Reference to scheduled_posts.id
+  campaignId: text('campaign_id'), // Reference to campaigns.id
+  attributionSource: text('attribution_source'), // 'stripe_metadata', 'utm', 'manual'
   date: integer('date', { mode: 'timestamp' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
@@ -188,6 +203,7 @@ export const campaigns = sqliteTable('campaigns', {
   tone: text('tone').notNull(), // 'professional', 'playful', 'aggressive'
   frequency: text('frequency').notNull(), // 'daily', 'weekly', 'bi-weekly'
   status: text('status').default('active').notNull(), // 'active', 'paused', 'completed'
+  creationDraftId: text('creation_draft_id'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -199,6 +215,7 @@ export const scheduledPosts = sqliteTable('scheduled_posts', {
   content: text('content', { mode: 'json' }).notNull(), // text, image_urls, etc.
   scheduledFor: integer('scheduled_at', { mode: 'timestamp' }).notNull(),
   status: text('status').default('pending').notNull(), // 'pending', 'approved', 'posted', 'failed'
+  creationDraftId: text('creation_draft_id'),
   approvalId: text('approval_id').references(() => approvals.id),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
@@ -220,6 +237,7 @@ export const discoveryResults = sqliteTable('discovery_results', {
   potentialKeyMasked: text('potential_key_masked').notNull(),
   rawKeyEncrypted: text('raw_key_encrypted').notNull(),
   status: text('status').default('pending').notNull(), // 'pending', 'approved', 'rejected'
+  creationDraftId: text('creation_draft_id'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -242,6 +260,7 @@ export const onboardingSessions = sqliteTable('onboarding_sessions', {
   userId: text('user_id').references(() => users.id).notNull(),
   platform: text('platform').notNull(),
   status: text('status').default('pending').notNull(), // 'pending', 'hitl_required', 'in_progress', 'completed', 'failed'
+  creationDraftId: text('creation_draft_id'),
   currentState: text('current_state').notNull(),
   metadata: text('metadata', { mode: 'json' }),
   error: text('error'),
@@ -253,10 +272,13 @@ export const paymentButtons = sqliteTable('payment_buttons', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),
   productId: text('product_id').references(() => products.id).notNull(),
+  contentId: text('content_id'),
+  campaignId: text('campaign_id'),
   platform: text('platform').notNull(), // 'instagram', 'tiktok', 'facebook', 'general'
   buttonType: text('button_type').default('link').notNull(), // 'link', 'interactive'
   buttonData: text('button_data', { mode: 'json' }).notNull(), // { url: string, label: string }
   status: text('status').default('active').notNull(),
+  creationDraftId: text('creation_draft_id'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -296,6 +318,7 @@ export const taskPlans = sqliteTable('task_plans', {
   goalId: text('goal_id').references(() => goals.id).notNull(),
   dag: text('dag', { mode: 'json' }).notNull(), // The Directed Acyclic Graph structure
   status: text('status').default('active').notNull(),
+  creationDraftId: text('creation_draft_id'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -326,6 +349,7 @@ export const executionSteps = sqliteTable('execution_steps', {
   objective: text('objective').notNull(),
   parameters: text('parameters', { mode: 'json' }),
   status: text('status').default('pending').notNull(), // 'pending', 'in_progress', 'completed', 'failed'
+  creationDraftId: text('creation_draft_id'),
   result: text('result', { mode: 'json' }),
   error: text('error'),
   startedAt: integer('started_at', { mode: 'timestamp' }),
@@ -403,6 +427,7 @@ export const strategySuggestions = sqliteTable('strategy_suggestions', {
       platformInsights: text('platform_insights', { mode: 'json' }), // JSON — platform-specific trend/insight data
       parameters: text('parameters', { mode: 'json' }), // Atomic execution steps
       status: text('status').default('pending').notNull(), // 'pending', 'approved', 'dismissed', 'executed'
+  creationDraftId: text('creation_draft_id'),
       roiImpact: integer('roi_impact'), // Estimated profit increase in cents
       createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     });
@@ -414,6 +439,7 @@ export const handleVerifications = sqliteTable('handle_verifications', {
   handle: text('handle').notNull(),
   hash: text('hash').notNull(),
   status: text('status').default('pending').notNull(), // 'pending', 'verified', 'failed'
+  creationDraftId: text('creation_draft_id'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
@@ -501,6 +527,7 @@ export const productionScripts = sqliteTable('production_scripts', {
   dnaStrandIds: text('dna_strand_ids', { mode: 'json' }),
   uniquenessHash: text('uniqueness_hash'),
   status: text('status').default('draft').notNull(),
+  creationDraftId: text('creation_draft_id'),
   renderedAssetUrl: text('rendered_asset_url'),
   error: text('error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -514,6 +541,7 @@ export const infrastructureCosts = sqliteTable('infrastructure_costs', {
   amount: integer('amount').notNull(), // in cents
   currency: text('currency').default('usd').notNull(),
   status: text('status').default('active').notNull(), // 'active', 'free_tier', 'limit_reached'
+  creationDraftId: text('creation_draft_id'),
   metadata: text('metadata', { mode: 'json' }), // e.g. usage metrics
   date: integer('date', { mode: 'timestamp' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -528,6 +556,7 @@ export const emailLogs = sqliteTable('email_logs', {
   subject: text('subject').notNull(),
   bodyPreview: text('body_preview'),
   status: text('status').notNull(), // 'sent', 'opened', 'clicked'
+  creationDraftId: text('creation_draft_id'),
   openCount: integer('open_count').default(0).notNull(),
   clickCount: integer('click_count').default(0).notNull(),
   metadata: text('metadata', { mode: 'json' }),
@@ -552,5 +581,54 @@ export const pushSubscriptions = sqliteTable('push_subscriptions', {
   authKey: text('auth_key'),
   p256dhKey: text('p256dh_key'),
   platform: text('platform'), // 'iOS', 'Android', 'Desktop'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const oauthSessions = sqliteTable('oauth_sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  state: text('state').notNull(),
+  codeVerifier: text('code_verifier').notNull(),
+  used: integer('used', { mode: 'boolean' }).default(false).notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const creationDrafts = sqliteTable('creation_drafts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  campaignId: text('campaign_id').references(() => campaigns.id),
+  creationType: text('creation_type').notNull(), // 'video', 'design', 'faceless', 'copy'
+  title: text('title').notNull(),
+  content: text('content', { mode: 'json' }).notNull(), // Asset URLs, copy, etc.
+  rootId: text('root_id'),
+  version: integer('version').default(1).notNull(),
+  status: text('status').default('pending').notNull(), // 'pending', 'approved', 'rejected', 'dispatched'
+  creationDraftId: text('creation_draft_id'),
+  platform: text('platform'), // 'tiktok', 'instagram', 'etsy', etc.
+  metadata: text('metadata', { mode: 'json' }),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const creationFeedback = sqliteTable('creation_feedback', {
+  id: text('id').primaryKey(),
+  draftId: text('draft_id').references(() => creationDrafts.id).notNull(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  feedback: text('feedback').notNull(),
+  actor: text('actor').notNull(), // 'user', 'ai'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const dispatchLogs = sqliteTable('dispatch_logs', {
+  id: text('id').primaryKey(),
+  draftId: text('draft_id').references(() => creationDrafts.id).notNull(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  platform: text('platform').notNull(),
+  status: text('status').notNull(), // 'success', 'failed'
+  creationDraftId: text('creation_draft_id'),
+  externalId: text('external_id'), // Platform's post/listing ID
+  error: text('error'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });

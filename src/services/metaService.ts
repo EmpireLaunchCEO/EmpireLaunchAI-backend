@@ -1,30 +1,10 @@
 import axios from 'axios';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import { integrationService } from './integrationService.js';
 
 export class MetaService {
-  private clientId: string;
-  private clientSecret: string;
-  private redirectUri: string;
-
-  constructor() {
-    this.clientId = process.env.META_CLIENT_ID || '';
-    this.clientSecret = process.env.META_CLIENT_SECRET || '';
-    this.redirectUri = process.env.META_REDIRECT_URI || '';
-  }
-
-  getAuthUrl(state: string) {
-    const scopes = [
-      'instagram_basic',
-      'instagram_content_publish',
-      'pages_show_list',
-      'pages_read_engagement',
-      'public_profile',
-    ].join(',');
-
-    return `https://www.facebook.com/v18.0/dialog/oauth?client_id=${this.clientId}&redirect_uri=${this.redirectUri}&state=${state}&scope=${scopes}`;
-  }
+  private clientId = process.env.META_CLIENT_ID;
+  private clientSecret = process.env.META_CLIENT_SECRET;
+  private redirectUri = `${process.env.FRONTEND_URL}/auth/callback/meta`;
 
   async getAccessToken(code: string) {
     const response = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
@@ -35,8 +15,18 @@ export class MetaService {
         code,
       },
     });
-
     return response.data;
+  }
+
+  getAuthUrl(state: string) {
+    const scopes = [
+      'instagram_basic',
+      'instagram_content_publish',
+      'instagram_manage_insights',
+      'pages_show_list',
+      'pages_read_engagement'
+    ].join(',');
+    return `https://www.facebook.com/v18.0/dialog/oauth?client_id=${this.clientId}&redirect_uri=${this.redirectUri}&scope=${scopes}&state=${state}&response_type=code`;
   }
 
   async getLongLivedToken(shortLivedToken: string) {
@@ -48,7 +38,6 @@ export class MetaService {
         fb_exchange_token: shortLivedToken,
       },
     });
-
     return response.data;
   }
 
@@ -77,15 +66,80 @@ export class MetaService {
     return publishResponse.data;
   }
 
+  async postToFacebook(accessToken: string, pageId: string, imageUrl: string, message: string) {
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${pageId}/photos`,
+      {
+        url: imageUrl,
+        message,
+        access_token: accessToken,
+      }
+    );
+    return response.data;
+  }
+
   async getInstagramAccounts(accessToken: string) {
     const response = await axios.get('https://graph.facebook.com/v18.0/me/accounts', {
       params: {
-        fields: 'instagram_business_account,name',
+        fields: 'instagram_business_account,name,id,access_token',
         access_token: accessToken,
       },
     });
-
     return response.data;
+  }
+
+  async getInstagramInsights(userId: string, mediaId: string) {
+    const credentials = await integrationService.getCredentials(userId, 'meta');
+    if (!credentials || !credentials.accessToken) {
+      throw new Error('No Meta credentials found');
+    }
+
+    const response = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}/insights`, {
+      params: {
+        metric: 'engagement,impressions,reach,saved',
+        access_token: credentials.accessToken,
+      },
+    });
+    return response.data;
+  }
+
+  async publishPost(userId: string, postData: any) {
+    const platform = postData.platform || 'instagram';
+    console.log(`[MetaService] Publishing to ${platform} for user ${userId}`);
+    
+    // 1. Fetch Credentials
+    const credentials = await integrationService.getCredentials(userId, 'meta');
+    if (!credentials) {
+      throw new Error('No Meta credentials found');
+    }
+
+    let finalCaption = postData.caption;
+
+    // 2. Inject Payment Link if provided
+    if (postData.paymentUrl) {
+      finalCaption = `${finalCaption}\n\n🛒 Buy it here: ${postData.paymentUrl}`;
+    }
+
+    // 3. Publish
+    if (platform === 'facebook') {
+      const accounts = await this.getInstagramAccounts(credentials.accessToken);
+      const page = accounts.data && accounts.data.length > 0 ? accounts.data[0] : null;
+      if (!page) throw new Error('No Facebook Page found');
+      
+      return this.postToFacebook(
+        page.access_token || credentials.accessToken,
+        page.id,
+        postData.imageUrl || postData.videoUrl,
+        finalCaption
+      );
+    } else {
+      return this.postToInstagram(
+        credentials.accessToken,
+        credentials.instagramBusinessAccountId,
+        postData.imageUrl || postData.videoUrl,
+        finalCaption
+      );
+    }
   }
 }
 

@@ -4,6 +4,7 @@ import { eq, and } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { integrationService } from '../services/integrationService.js';
 import { vaultService } from '../services/vaultService.js';
+import { universalGatewayService } from '../services/universalGatewayService.js';
 
 const router = Router();
 
@@ -22,11 +23,16 @@ router.get('/status', mobileAuth, async (req: any, res) => {
     const platforms = [
       'etsy', 'tiktok', 'godaddy', 'systeme_io', 
       'fiverr', 'behance', 'figma', 'kittl', 'redbubble',
-      'canva', 'google', 'meta', 'pinterest', 'shopify'
+      'canva', 'google', 'youtube', 'meta', 'instagram', 'pinterest', 'shopify'
     ];
 
     const status = platforms.map(p => {
-      const integration = userIntegrations.find(i => i.platform === p);
+      // Handle aliases for status lookup
+      let platformKey = p;
+      if (p === 'youtube') platformKey = 'google';
+      if (p === 'instagram') platformKey = 'meta';
+
+      const integration = userIntegrations.find(i => i.platform === platformKey);
       return {
         platform: p,
         isConnected: !!integration && integration.isActive,
@@ -36,6 +42,40 @@ router.get('/status', mobileAuth, async (req: any, res) => {
     });
 
     res.json({ status: 'success', integrations: status });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/integrations/oauth/:platform/url
+ * Initiates OAuth flow for a platform via Universal Gateway.
+ */
+router.get('/oauth/:platform/url', mobileAuth, async (req: any, res) => {
+  const userId = req.userId;
+  const platform = req.params.platform;
+  const shopDomain = req.query.shop as string;
+
+  try {
+    const result = await universalGatewayService.initiateOAuth(userId, platform, shopDomain);
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/integrations/oauth/:platform/callback
+ * Handles the OAuth callback and saves tokens.
+ */
+router.post('/oauth/:platform/callback', mobileAuth, async (req: any, res) => {
+  const userId = req.userId;
+  const platform = req.params.platform;
+  const { code, state, sessionId, shop } = req.body;
+
+  try {
+    const result = await universalGatewayService.handleCallback(userId, platform, code, state, sessionId, shop);
+    res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

@@ -34,6 +34,7 @@ import marketDnaRoutes from './routes/marketDnaRoutes.js';
 import massDnaRoutes from './routes/massDnaRoutes.js';
 import dispatchRoutes from './routes/dispatchRoutes.js';
 import integrationRoutes from './routes/integrationRoutes.js';
+import mobileRoutes from './routes/mobileRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -76,9 +77,10 @@ if (process.env.RUN_MIGRATIONS === 'true' && !process.env.VERCEL) {
 // Initialize WebSocket Service
 webSocketService.init(httpServer);
 
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+if (!process.env.VERCEL) {
   // Start the distributed background worker & AI Queue Worker
   // Note: On serverless platforms like Vercel, these should be moved to separate worker processes
+  console.log('[Worker] Activating background workers...');
   agentWorker.start();
   schedulerWorker.start();
   startAIWorker();
@@ -135,6 +137,7 @@ app.use('/api/market-dna', marketDnaRoutes);
 app.use('/api/mass-dna', massDnaRoutes);
 app.use('/api/dispatch', dispatchRoutes);
 app.use('/api/integrations', integrationRoutes);
+app.use('/api/mobile', mobileRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready' });

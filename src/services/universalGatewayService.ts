@@ -4,6 +4,7 @@ import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { integrationService } from './integrationService.js';
+import { vaultService } from './vaultService.js';
 
 /**
  * Universal Gateway Service
@@ -326,14 +327,22 @@ class UniversalGatewayService {
    * Get OAuth config for a specific platform.
    */
   getConfig(platform: string): OAuthConfig | undefined {
-    return this.configs.find(c => c.platform === platform);
+    const p = platform.toLowerCase();
+    // Support aliases for priority platforms
+    if (p === 'instagram') return this.configs.find(c => c.platform === 'meta');
+    if (p === 'facebook') return this.configs.find(c => c.platform === 'meta');
+    if (p === 'youtube') return this.configs.find(c => c.platform === 'google');
+    if (p === 'gmail') return this.configs.find(c => c.platform === 'google');
+    
+    return this.configs.find(c => c.platform === p);
   }
 
   /**
    * Get all supported platforms.
    */
   getSupportedPlatforms(): string[] {
-    return this.configs.map(c => c.platform);
+    const base = this.configs.map(c => c.platform);
+    return [...base, 'instagram', 'facebook', 'youtube', 'gmail'];
   }
 
   /**
@@ -393,26 +402,34 @@ class UniversalGatewayService {
    * Handle OAuth callback for any platform.
    * Same security pattern as Etsy: validate state, retrieve codeVerifier from DB.
    */
-  async handleCallback(userId: string, platform: string, code: string, state: string, sessionId: string, shopDomain?: string): Promise<any> {
+  async handleCallback(userId: string | undefined, platform: string, code: string, state: string, sessionId: string, shopDomain?: string): Promise<any> {
     const config = this.getConfig(platform);
     if (!config) throw new Error(`Platform ${platform} not supported`);
 
     // Retrieve and validate OAuth session
     const [session] = await db.select()
       .from(schema.oauthSessions)
-      .where(and(eq(schema.oauthSessions.id, sessionId), eq(schema.oauthSessions.platform, platform)))
+      .where(
+        sessionId
+          ? and(eq(schema.oauthSessions.id, sessionId), eq(schema.oauthSessions.platform, platform))
+          : and(eq(schema.oauthSessions.state, state), eq(schema.oauthSessions.platform, platform))
+      )
       .limit(1);
 
     if (!session) throw new Error('OAuth session not found');
     if (session.used) throw new Error('OAuth session already used');
     if (session.state !== state) throw new Error('State mismatch — possible CSRF');
     if (new Date() > new Date(session.expiresAt)) throw new Error('OAuth session expired');
-    if (session.userId !== userId) throw new Error('User ID mismatch');
+
+    // Security: Validate user binding if userId is provided
+    if (userId && session.userId !== userId) throw new Error('User ID mismatch');
+
+    const effectiveUserId = userId || session.userId;
 
     // Mark session as used
     await db.update(schema.oauthSessions)
       .set({ used: true })
-      .where(eq(schema.oauthSessions.id, sessionId));
+      .where(eq(schema.oauthSessions.id, session.id));
 
     // Exchange code for tokens
     const tokenParams: Record<string, string> = {
@@ -475,7 +492,7 @@ class UniversalGatewayService {
         accountId = profileRes.data.id;
       } else if (platform === 'etsy') {
         const profileRes = await axios.get('https://api.etsy.com/v3/application/shops', {
-          headers: { 
+          headers: {
             Authorization: `Bearer ${tokenData.access_token}`,
             'x-api-key': config.clientId()
           }
@@ -495,7 +512,16 @@ class UniversalGatewayService {
     }
 
     // Save integration
-    await integrationService.saveIntegration(userId, platform, tokenData, accountId, accountHandle);
+    await integrationService.saveIntegration(effectiveUserId, platform, tokenData, accountId, accountHandle);
+
+    // Save to Ownership Vault for high-trust security (AES-256)
+    if (tokenData.refresh_token) {
+      await vaultService.storeSecretWithEnvelope(effectiveUserId, platform, 'OAUTH_REFRESH', tokenData.refresh_token);
+    }
+    if (tokenData.access_token) {
+      // For some platforms, the access token is the primary secret (e.g. Meta 60-day tokens)
+      await vaultService.storeSecretWithEnvelope(effectiveUserId, platform, 'OAUTH_ACCESS', tokenData.access_token);
+    }
 
     return { 
       status: 'success', 
