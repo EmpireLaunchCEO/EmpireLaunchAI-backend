@@ -50,3 +50,4 @@ ENV PORT=3000
 EXPOSE 3000
 
 CMD ["npm", "start"]
+/* Infra fix v11 - Mon Jun 22 23:36:50 UTC 2026 */
