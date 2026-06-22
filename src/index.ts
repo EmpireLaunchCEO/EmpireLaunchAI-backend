@@ -140,7 +140,7 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api/mobile', mobileRoutes);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v7_clean' });
+  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v8_debian' });
 });
 
 export default app;

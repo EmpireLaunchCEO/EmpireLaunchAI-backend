@@ -1,4 +1,4 @@
-FROM node:20 AS builder
+FROM node:20-bullseye AS builder
 
 # Install build dependencies for native modules
 RUN apt-get update && apt-get install -y \
@@ -6,8 +6,10 @@ RUN apt-get update && apt-get install -y \
     make \
     g++ \
     libvips-dev \
-    fftw-dev \
-    build-base
+    libfftw3-dev \
+    build-essential \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -21,12 +23,13 @@ RUN npm run build
 # Prune dev dependencies
 RUN npm prune --production
 
-FROM node:20
+FROM node:20-bullseye-slim
 
 # Runtime dependencies
 RUN apt-get update && apt-get install -y \
-    libvips \
-    ffmpeg
+    libvips42 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -38,7 +41,6 @@ COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/drizzle-pg ./drizzle-pg
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/drizzle-pg.config.ts ./drizzle-pg.config.ts
-COPY --from=builder /app/package.json ./package.json
 
 # Ensure production environment
 ENV NODE_ENV=production
