@@ -140,10 +140,10 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api/mobile', mobileRoutes);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14_final' });
+  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14' });
 });
 app.get('/infra-health-v13', (req, res) => {
-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14_final' });
+  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14' });
 });
 
 export default app;
