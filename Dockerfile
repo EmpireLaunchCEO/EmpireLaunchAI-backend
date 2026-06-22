@@ -1,5 +1,12 @@
 FROM node:20-slim AS builder
 
+# Install build dependencies for native modules
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install build dependencies for native modules
@@ -19,6 +26,11 @@ RUN npm run build
 RUN npm prune --production
 
 FROM node:20-slim
+
+# Install python3 in runtime image as well, just in case
+RUN apt-get update && apt-get install -y \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

@@ -14,9 +14,14 @@ import { universalGatewayService } from '../services/universalGatewayService.js'
 import { OWNER_CONFIG } from '../config/owner.js';
 import { v4 as uuidv4 } from 'uuid';
 
-// Simple password hashing using Node's crypto
-function hashPassword(password: string): string {
-  return crypto.pbkdf2Sync(password, 'empire-launch-salt', 1000, 64, 'sha512').toString('hex');
+import { promisify } from 'util';
+
+const pbkdf2 = promisify(crypto.pbkdf2);
+
+// Simple password hashing using Node's crypto (Async for scalability)
+async function hashPassword(password: string): Promise<string> {
+  const hash = await pbkdf2(password, 'empire-launch-salt', 1000, 64, 'sha512');
+  return hash.toString('hex');
 }
 
 export const registerUser = async (req: Request, res: Response) => {
@@ -34,7 +39,7 @@ export const registerUser = async (req: Request, res: Response) => {
     }
 
     const userId = uuidv4();
-    const passwordHash = hashPassword(password);
+    const passwordHash = await hashPassword(password);
 
     console.log('[DEBUG] Inserting user into DB...');
     try {
@@ -80,7 +85,7 @@ export const loginUser = async (req: Request, res: Response) => {
 
   try {
     const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
-    if (!user || user.passwordHash !== hashPassword(password)) {
+    if (!user || user.passwordHash !== await hashPassword(password)) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 

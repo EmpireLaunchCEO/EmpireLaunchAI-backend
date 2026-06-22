@@ -1,0 +1,6 @@
+
+> bizrunner-backend@1.0.0 build-local
+> tsc
+
+src/controllers/mobileController.ts(120,52): error TS7006: Parameter 'g' implicitly has an 'any' type.
+src/routes/integrationRoutes.ts(35,49): error TS7006: Parameter 'i' implicitly has an 'any' type.
