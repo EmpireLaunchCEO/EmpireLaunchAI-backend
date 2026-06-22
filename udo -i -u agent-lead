@@ -1,0 +1,50 @@
+5ab06d8 2026-06-22 FIX: Remove all Railway/Nixpacks config files to force default Dockerfile detection
+369ca77 2026-06-22 FIX: Force Nixpacks with explicit build tools for Sharp
+cf696e0 2026-06-22 FIX: Use railway.json with uppercase DOCKER and schema
+2b6dc71 2026-06-22 FIX: Use railway.toml with explicit Docker config and healthcheck
+e74a980 2026-06-22 FIX: Hardened Debian Dockerfile with correct native build dependencies
+dcc275c 2026-06-22 FIX: Remove competing config files and stick to railway.json for Docker force
+a107977 2026-06-22 FIX: Switch to node:20 (debian) and add build-essential to resolve native build issues
+102f611 2026-06-22 FIX: Use railway.json to force Docker
+1653c61 2026-06-22 CHORE: Trigger build with unique timestamp
+e815e46 2026-06-22 FIX: Add build dependencies to nixpacks.toml
+f49f529 2026-06-22 FIX: Use dockerfile key in railway.toml
+96d587b 2026-06-22 FIX: Restore railway.toml with minimal docker config
+e1572b7 2026-06-22 FIX: Switch to railway.json and remove nixpacks.toml to force Docker
+50971e7 2026-06-22 FIX: Force Docker builder and bypass Nixpacks to resolve WHEELHOUSE error
+7682dd0 2026-06-22 FIX: Docker hardening and config copy
+4cdcc25 2026-06-22 FIX: Use node:20 (not slim) and add libvips-dev to fix Railway build
+21d0f98 2026-06-22 FIX: Remove nixpacks.toml to force Docker builder
+87e138b 2026-06-22 chore: trigger fresh build with Docker hardening and async auth
+a67e0ce 2026-06-22 Merge branch 'feat/align-pg-schema-with-sqlite' into main - Scale hardening and schema alignment
+9c0387e 2026-06-22 feat(auth): scale hardening - switch to async password hashing
+3aadaab 2026-06-22 Force deployment: Fix Railway build issues and update health version v3.1.2_debug_reg_v3
+d4e41a2 2026-06-22 FIX: Trigger new build with version string verification
+7c06126 2026-06-22 FIX: Resolve 'failed to leave the wheelhouse' by cleaning build config and removing cache triggers
+f391d78 2026-06-22 CHORE: Force add fixed .env to repo for Railway sync
+0147f08 2026-06-22 CHORE: Fix env corruption and clarify builder for wheelhouse
+803749a 2026-06-22 chore: align universal gateway and add postgres migrations
+c5313b8 2026-06-22 CHORE: Remove duplicate Railway.toml (lowercase is production standard)
+46a809d 2026-06-22 CHORE: Rename Railway.toml to railway.toml for platform consistency
+d9877ad 2026-06-22 FIX: Optimize Dockerfile and increase health check timeout for Railway
+0d8b0be 2026-06-22 DEBUG: Update health check version to v3.1.2_debug_reg_v2
+a2e69da 2026-06-22 FIX: Copy drizzle-pg migrations folder to Docker image
+9ad3283 2026-06-22 DEBUG: Add /api/auth/debug-db endpoint to inspect remote database
+22317de 2026-06-22 DEBUG: Extreme verbose registration logging and nested error catching
+b8c3dc1 2026-06-22 DEBUG: Return detailed registration error message to UI
+31010c4 2026-06-22 FIX: Update Langchain vectorstore import and synchronize lockfile
+1b08169 2026-06-22 FIX: Production build stabilization and schema unification
+dde79aa 2026-06-22 FIX: SQLite schema syntax error
+f28c751 2026-06-22 FIX: Force dotenv version with overrides to fix Vercel build
+576867c 2026-06-22 FIX: Resolve TypeScript errors and schema duplicate for Vercel build
+d72589a 2026-06-22 FIX: Pin dependencies and resolve Vercel build issues
+ff1162b 2026-06-22 FIX: Force dotenv version with overrides and resolve dependency conflicts
+a61b3ed 2026-06-22 FIX: Add .npmrc and package-lock.json to resolve Vercel build issues
+6934018 2026-06-22 FIX: Final schema parity and Canva OAuth route alignment
+b97245b 2026-06-22 FIX: Resolve dependency conflict on Vercel with legacy-peer-deps and dotenv downgrade
+0142a19 2026-06-22 chore: resolve conflicts by favoring feat/fix-canva-oauth-route
+13ff41d 2026-06-22 chore: resolve merge conflicts by taking latest from master
+d06d7f2 2026-06-22 feat: align Canva backend OAuth routes and enhance callback handling
+33ee4dd 2026-06-20 feat: implement universal connectivity and DNA harvest expansion
+e304339 2026-06-15 Implement Strategy Queue API and fix missing pushSubscriptions in SQLite schema
+f854e7a 2026-06-07 feat: implement autonomous growth ingestion orchestrator

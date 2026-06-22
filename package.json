@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "preinstall": "if [ -f /usr/bin/apt-get ]; then apt-get update && apt-get install -y libvips-dev; fi",
     "build": "tsc",
     "build-vercel": "tsc",
     "build-local": "tsc",
