@@ -117,7 +117,7 @@ export const getMobileDashboard = async (req: Request, res: Response) => {
                     tier: user[0]?.tier
                 },
                 integrationsCount: userIntegrations.length,
-                activeGoalsCount: userGoals.filter(g => g.status === 'active').length,
+                activeGoalsCount: userGoals.filter((g: any) => g.status === 'active').length,
                 serverTimestamp: new Date().toISOString()
             }
         });

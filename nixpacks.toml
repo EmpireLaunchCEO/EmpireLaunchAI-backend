@@ -1,0 +1,2 @@
+# Force Railway to use Dockerfile by disabling Nixpacks providers
+providers = []

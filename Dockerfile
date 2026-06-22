@@ -1,5 +1,12 @@
 FROM node:20-slim AS builder
 
+# Install build dependencies for native modules
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -9,6 +16,11 @@ COPY . .
 RUN npm run build
 
 FROM node:20-slim
+
+# Install python3 in runtime image as well, just in case
+RUN apt-get update && apt-get install -y \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

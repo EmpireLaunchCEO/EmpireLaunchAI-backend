@@ -32,7 +32,7 @@ router.get('/status', mobileAuth, async (req: any, res) => {
       if (p === 'youtube') platformKey = 'google';
       if (p === 'instagram') platformKey = 'meta';
 
-      const integration = userIntegrations.find(i => i.platform === platformKey);
+      const integration = userIntegrations.find((i: any) => i.platform === platformKey);
       return {
         platform: p,
         isConnected: !!integration && integration.isActive,
