@@ -1,6 +1,6 @@
-# Bizrunner Backend
+# EmpireLaunchAI Backend
 
-This is the backend service for the Bizrunner platform.
+This is the backend service for the EmpireLaunchAI platform.
 
 ## Tech Stack
 - **Framework:** Node.js with Express
