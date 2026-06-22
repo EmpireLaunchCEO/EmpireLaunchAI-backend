@@ -1,11 +1,11 @@
-FROM node:20-alpine AS builder
+FROM node:20 AS builder
 
 # Install build dependencies for native modules
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
-    vips-dev \
+    libvips-dev \
     fftw-dev \
     build-base
 
@@ -21,11 +21,11 @@ RUN npm run build
 # Prune dev dependencies
 RUN npm prune --production
 
-FROM node:20-alpine
+FROM node:20
 
 # Runtime dependencies
-RUN apk add --no-cache \
-    vips \
+RUN apt-get update && apt-get install -y \
+    libvips \
     ffmpeg
 
 WORKDIR /app
