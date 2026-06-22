@@ -1,5 +1,5 @@
-import { db } from './db/index.js';
-import { accessKeys } from './db/sqlite-schema.js';
+import { db, schema } from './db/index.js';
+const { accessKeys } = schema;
 import { v4 as uuidv4 } from 'uuid';
 
 async function generateKeys() {

@@ -1,434 +1,283 @@
 import { db, schema } from '../db/index.js';
-import { dnaStrands } from '../db/sqlite-schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { webSocketService } from './websocketService.js';
 import { notificationService } from './notificationService.js';
 import { integrationService } from './integrationService.js';
 import { hunterGathererService } from './hunterGathererService.js';
+import { neuralBrowserService } from './neuralBrowserService.js';
 import { neuralBrowserQueue } from './queueService.js';
 import { dnaVaultService } from './dnaVaultService.js';
+import { dnaLabService } from './dnaLabService.js';
 import { marketIntelligenceService } from './marketIntelligenceService.js';
 import { visualProxyService } from './visualProxyService.js';
+import { uniquenessService } from './uniquenessService.js';
 import { resolveModelForUser } from '../utils/resolveModel.js';
+import { getMasterBriefing } from './strategicDirective.js';
+import axios from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-/**
- * DnaHuntOrchestrator
- * 
- * Automatically hunts for top-performing Style DNA on a user's linked platforms
- * immediately after onboarding completes. This bridges onboarding → DNA Lab → Universal Vault.
- * 
- * Flow:
- * 1. Onboarding completes → triggerHunt() called
- * 2. AI researches the platform + niche for top-performing design patterns
- * 3. HunterGatherer browser agent navigates to find actual design elements
- * 4. AI extracts Style DNA parameters (colors, typography, layouts, hooks)
- * 5. Each extracted pattern is stored as a DnaStrand in the Universal Vault
- */
 export class DnaHuntOrchestrator {
-
-  /**
-   * Start an autonomous DNA hunt for a user after platform onboarding.
-   * This runs immediately after the user links a platform.
-   */
   async triggerHunt(userId: string, platform: string, niche?: string): Promise<{ huntId: string; status: string }> {
     const huntId = uuidv4();
-    console.log(`[DnaHunt] 🔬 Starting automated DNA hunt for user ${userId} on ${platform} (niche: ${niche || 'auto-detect'})`);
+    webSocketService.notifyUser(userId, 'ai-log', { message: `[DNA-HUNT] Initializing hunt on ${platform}...` });
     
-    webSocketService.notifyUser(userId, 'ai-log', {
-      message: `[DNA-HUNT] Initializing automated Style DNA hunt on ${platform}${niche ? ` for "${niche}"` : ''}...`
-    });
-
-    // Special handling for Design Systems
-    if (platform === 'canva' || platform === 'bannerbear') {
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `🎨 [DNA-HUNT] Harvesting layout blueprints and design systems from ${platform.toUpperCase()}...`
-      });
-    }
-
-    // Queue the hunt as a background job to avoid blocking onboarding
-    await neuralBrowserQueue.add('dna-hunt-auto', {
-      huntId,
-      userId,
-      platform,
-      niche,
-    } as any, {
-      attempts: 2,
-      backoff: { type: 'exponential', delay: 10000 },
-      removeOnComplete: false,
-    });
-
-    webSocketService.notifyUser(userId, 'ai-log', {
-      message: `[DNA-HUNT] Hunt queued. AI will now scan ${platform} for top-performing design patterns...`
-    });
-
+    await neuralBrowserQueue.add('dna-hunt-auto', { huntId, userId, platform, niche });
+    
     return { huntId, status: 'queued' };
   }
 
-  /**
-   * Execute the full DNA hunt pipeline.
-   * Called by the Neural Browser Worker.
-   */
   async executeHunt(huntId: string, userId: string, platform: string, niche?: string): Promise<{ strandsStored: number }> {
-    console.log(`[DnaHunt] Executing hunt ${huntId} for user ${userId} on ${platform}`);
-    
-    webSocketService.notifyUser(userId, 'ai-log', {
-      message: `[DNA-HUNT] Phase 1/3: Researching ${platform} for trending design patterns...`
-    });
-
     try {
-      // Phase 1: Research - discover what's trending/performing on this platform
-      const discoveredPatterns = await this.researchPlatformPatterns(niche || 'digital products', platform);
-      
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[DNA-HUNT] Phase 2/3: Found ${discoveredPatterns.length} design patterns. Extracting Style DNA...`
-      });
+      webSocketService.notifyUser(userId, 'ai-log', { message: `[DNA-HUNT] Researching viral signals for ${niche} on ${platform}...` });
 
-      // Phase 2: Extract DNA from each discovered pattern
-      const extractedStrands: any[] = [];
-      for (const pattern of discoveredPatterns) {
+      // 1. Research patterns via LLM with updated context
+      const discoveredPatterns = await this.researchPlatformPatterns(niche || 'digital products', platform);
+
+      // 2. Scrape real-time signals via MarketIntelligence
+      const realSignals = await this.getRealTimeSignals(userId, platform, niche);
+
+      let storedCount = 0;
+
+      // Process combined patterns and real signals
+      const allTargets = [...discoveredPatterns, ...realSignals];
+
+      for (const target of allTargets) {
         try {
-          const strand = await this.extractDnaFromPattern(pattern, platform);
-          if (strand) {
-            extractedStrands.push(strand);
+          // 3. Anti-Copycat validation (dHash)
+          if (target.imageUrl) {
+            try {
+              const response = await axios.get(target.imageUrl, { responseType: 'arraybuffer' });
+              const buffer = Buffer.from(response.data, 'binary');
+              const hash = await uniquenessService.generatePHash(buffer);
+              
+              // Check similarity in designHashes table
+              const similarity = await uniquenessService.checkDesignSimilarity(hash);
+              if (similarity > 85) {
+                console.log(`[DnaHunt] Skipping copycat target: ${target.title} (Similarity: ${similarity}%)`);
+                continue;
+              }
+              
+              // Store hash for future reference
+              await db.insert(schema.designHashes).values({
+                id: uuidv4(),
+                platform,
+                externalId: target.externalId || target.url || target.title,
+                hash,
+                createdAt: new Date()
+              });
+            } catch (imgErr: any) {
+              console.warn(`[DnaHunt] Image processing failed for ${target.title}:`, imgErr.message);
+            }
+          }
+
+          const wvi = this.calculateWVI(target, platform);
+          
+          // 4. Extract detailed Style DNA via DnaLab
+          const extractedDna = await dnaLabService.extractMarketDna(userId, platform, target);
+          
+          if (extractedDna) {
+            // 5. Save to Global DNA Pool
+            await dnaLabService.saveGlobalHarvest(extractedDna, niche || target.subCategory || 'digital products', platform, wvi);
+            storedCount++;
           }
         } catch (err) {
-          console.warn(`[DnaHunt] Failed to extract DNA from pattern "${pattern.title}":`, (err as Error).message);
+          console.error(`[DnaHunt] Failed to process target:`, err);
         }
       }
-
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[DNA-HUNT] Phase 3/3: Storing ${extractedStrands.length} refined DNA strands in Universal Vault...`
-      });
-
-      // Phase 3: Store all extracted strands in the Universal DNA Vault
-      let storedCount = 0;
-      const storedStrands: any[] = [];
-      for (const strand of extractedStrands) {
-        try {
-          await dnaVaultService.storeStrand(strand);
-          storedCount++;
-          storedStrands.push(strand);
-        } catch (err) {
-          console.warn(`[DnaHunt] Failed to store strand:`, (err as Error).message);
-        }
-      }
-
-      // Phase 3b: Generate Zero-Source-Image Visual Snapshots for every stored strand
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[DNA-HUNT] 🎨 Generating synthesized visual previews for all ${storedStrands.length} strands...`
-      });
-
-      const visualSnapshots: any[] = [];
-      for (const strand of storedStrands) {
-        try {
-          const summary = await visualProxyService.summarizeStrand(userId, strand);
-          visualSnapshots.push(summary);
-        } catch (err) {
-          console.warn(`[DnaHunt] Visual proxy failed for strand:`, (err as Error).message);
-        }
-      }
-
-      // Send snapshots via WebSocket so the frontend can render them immediately
-      if (visualSnapshots.length > 0) {
-        webSocketService.notifyUser(userId, 'dna-visual-snapshots', {
-          snapshots: visualSnapshots,
-        });
-      }
-
-      // Notify user of completion
-      const visualCount = visualSnapshots.length;
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[DNA-HUNT] ✅ Complete! Stored ${storedCount} new DNA strands from ${platform} into the Universal Vault. ${visualCount > 0 ? `🎨 ${visualCount} synthesized previews generated.` : ''}`
-      });
-
-      const platformName = platform.charAt(0).toUpperCase() + platform.slice(1);
-      const notificationMsg = visualCount > 0
-        ? `🧬 DNA Hunt complete! ${storedCount} new Style DNA strands from ${platformName}. 🎨 ${visualCount} synthetic previews ready for your review.`
-        : `🧬 DNA Hunt complete! ${storedCount} new Style DNA strands extracted from ${platformName} and added to the Universal Vault.`;
-      await notificationService.notifyUser(userId, notificationMsg, false);
 
       return { strandsStored: storedCount };
-    } catch (error: any) {
-      console.error(`[DnaHunt] Hunt ${huntId} failed:`, error);
-      
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[DNA-HUNT] ❌ Hunt failed: ${error.message}. Will retry automatically.`
-      });
-
-      await notificationService.notifyUser(
-        userId,
-        `DNA Hunt on ${platform} encountered an issue: ${error.message}. The system will retry.`,
-        false
-      );
-
+    } catch (error) {
+      console.error(`[DnaHunt] Execute hunt failed:`, error);
       throw error;
     }
   }
 
-  /**
-   * Phase 1: Research the platform for trending and top-performing design patterns.
-   * Uses AI to identify what types of content/designs are performing well.
-   */
-  private async researchPlatformPatterns(niche: string, platform: string): Promise<any[]> {
-    // Try AI-powered pattern discovery first
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const model = new ChatOpenAI({
-          modelName: 'gpt-4o-mini',
-          temperature: 0.4,
-          openAIApiKey: process.env.OPENAI_API_KEY,
-        });
-
-        const template = `
-          You are a Style DNA Hunter for the "{platform}" platform in the "{niche}" niche.
-          
-          Identify 6-10 specific, real design patterns that would be top-performing on {platform} for {niche}.
-          These should be patterns that could be extracted as "Style DNA" — think about:
-          - Color palettes trending in this niche
-          - Typography combinations that convert
-          - Layout compositions that drive engagement
-          - Hook patterns and CTA styles
-          - Visual aesthetics (minimalist, bold, vintage, etc.)
-          - Avatar styles (character designs, illustrated personas, faceless avatars)
-          - Animal illustrations (pet portraits, wildlife art, mascots)
-          - Background textures (gradients, organic textures, studio backdrops)
-          - Layout Blueprints (especially from Canva and Bannerbear design systems)
-          
-          For each pattern, return:
-          - title: string (descriptive name of the pattern)
-          - category: "layout" | "typography" | "palette" | "niche_pattern" | "avatar" | "animal" | "background" (the dna_strands category)
-          - subCategory: string (e.g. "vintage", "modern_minimal", "high_conversion_cta", "pet_portrait", "studio_gradient")
-          - description: string (how this pattern performs on {platform})
-          - estimatedPerformance: number (0-100, predicted success score)
-          - manifest: object (the DNA reconstruction parameters — include at minimum 3 key-value pairs relevant to the category)
-          
-          IMPORTANT: Include at least one avatar, one animal, and one background pattern if relevant to {niche} on {platform}.
-          
-          Only respond with a valid JSON array.
-        `;
-
-        const prompt = PromptTemplate.fromTemplate(template);
-        const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
-        
-        const result = await chain.invoke({ niche, platform }) as any;
-        if (Array.isArray(result) && (result as any[]).length > 0) {
-          console.log(`[DnaHunt] AI discovered ${(result as any[]).length} design patterns on ${platform} for "${niche}"`);
-          return result;
-        }
-      } catch (e) {
-        console.warn('[DnaHunt] AI pattern discovery failed:', (e as Error).message);
-      }
-    }
-
-    // Fallback: Use market intelligence to get patterns
+  private async getRealTimeSignals(userId: string, platform: string, niche?: string): Promise<any[]> {
     try {
-      const trends = await marketIntelligenceService.fetchVisualTrends(niche);
-      if (trends && trends.length > 0) {
-        return trends.map((t: any, i: number) => ({
-          title: t.style || `${niche} Pattern ${i + 1}`,
-          category: 'niche_pattern',
-          subCategory: 'trending_aesthetic',
-          description: t.description || `Trending on ${t.platform || platform}`,
-          estimatedPerformance: t.traction === 'Extreme' ? 92 : t.traction === 'High' ? 80 : 65,
-          manifest: {
-            style: t.style || 'modern',
-            platform: t.platform || platform,
-            traction: t.traction || 'Medium',
-            niche,
-          },
-        }));
+      const query = niche || 'digital products';
+      
+      if (platform === 'etsy') return await marketIntelligenceService.fetchEtsyBestSellers(query, userId);
+      if (platform === 'figma_community') return await marketIntelligenceService.fetchFigmaCommunityTrends(query, userId);
+      if (platform === 'kittl') return await marketIntelligenceService.fetchKittlTrends(query, userId);
+      if (platform === 'behance') return await marketIntelligenceService.fetchBehanceTrends(query, userId);
+      if (platform === 'redbubble') return await marketIntelligenceService.fetchRedbubbleTrends(query, userId);
+      if (platform === 'artstation') return await marketIntelligenceService.fetchArtStationTrends(query, userId);
+      if (platform === 'substack') return await marketIntelligenceService.fetchSubstackTrends(query, userId);
+      
+      // Fallback for others
+      if (platform === 'fiverr') {
+        const results = await neuralBrowserService.executeAutomation(userId, [
+          ...hunterGathererService['generateBrowserSteps']({
+            platform: platform as any,
+            objective: 'SEARCH_TRENDS',
+            params: { query }
+          })
+        ]) as any;
+        return results['.gig-card-layout'] || [];
       }
+      
+      return [];
     } catch (e) {
-      console.warn('[DnaHunt] Market intelligence fallback failed:', (e as Error).message);
+      console.warn(`[DnaHunt] Real-time signal gathering failed for ${platform}:`, e);
+      return [];
     }
-
-    // Last resort: return well-researched default patterns for the niche
-    const defaultPatterns: any[] = [
-      {
-        title: `${niche} High-Conversion Layout`,
-        category: 'layout',
-        subCategory: 'modern_minimal',
-        description: `Clean, conversion-optimized layout pattern for ${niche} on ${platform}`,
-        estimatedPerformance: 85,
-        manifest: {
-          compositionalRatio: 'rule_of_thirds',
-          negativeSpaceRatio: 0.45,
-          typographySignature: { headline: 'sans_bold', body: 'sans_light', ratio: 2.8 },
-          layerDepth: { foreground: 2, midground: 2, background: 1 },
-          colorPalette: ['#FFFFFF', '#1A1A2E', '#16213E', '#0F3460'],
-        },
-      },
-      {
-        title: `${niche} Premium Color Palette`,
-        category: 'palette',
-        subCategory: 'professional_duo',
-        description: `High-performing color scheme for ${niche} digital products`,
-        estimatedPerformance: 80,
-        manifest: {
-          primary: '#1A1A2E',
-          secondary: '#E94560',
-          accent: '#0F3460',
-          background: '#FFFFFF',
-          text: '#333333',
-          mood: 'professional_trust',
-          contrast: 7.2,
-        },
-      },
-      {
-        title: `${niche} Engagement Hook Pattern`,
-        category: 'niche_pattern',
-        subCategory: 'viral_hook',
-        description: `Attention-grabbing hook and CTA pattern for ${niche} content`,
-        estimatedPerformance: 90,
-        manifest: {
-          hookStyle: 'problem_agitation',
-          ctaStyle: 'urgency_button',
-          buttonColor: '#E94560',
-          textOnButton: '#FFFFFF',
-          actionVerb: 'Get Started',
-          placement: 'bottom_center',
-        },
-      },
-      {
-        title: `${niche} Typography Signature`,
-        category: 'typography',
-        subCategory: 'modern_sans',
-        description: `Readable, professional font pairing for ${niche}`,
-        estimatedPerformance: 75,
-        manifest: {
-          fontFamily: 'Inter',
-          fontWeight: 700,
-          letterSpacing: 0.01,
-          lineHeight: 1.3,
-          alignment: 'left',
-          pairWith: 'Open Sans Light',
-        },
-      },
-    ];
-    return defaultPatterns;
   }
 
-  /**
-   * Phase 2: Extract Style DNA from a discovered pattern.
-   * Uses AI to generate rich DNA parameters from the pattern description.
-   */
-  private async extractDnaFromPattern(pattern: any, platform: string): Promise<any> {
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const model = new ChatOpenAI({
-          modelName: 'gpt-4o-mini',
-          temperature: 0.3,
-          openAIApiKey: process.env.OPENAI_API_KEY,
-        });
-
-        const template = `
-          You are a Style DNA Extraction Specialist. Given this design pattern discovered on {platform}:
-          
-          Title: {title}
-          Category: {category}
-          SubCategory: {subCategory}
-          Description: {description}
-          Estimated Performance: {performance}/100
-          
-          Generate a COMPLETE, production-grade DnaStrand object with:
-          1. A rich "manifest" (JSON object with full reconstruction parameters — at least 6 key-value pairs)
-          2. Metadata with 3-5 relevant tags and a brand trait
-          3. A performance score (0-100)
-          4. sourcePlatform: "{platform}"
-          
-          Return ONLY valid JSON with keys: manifest (object), metadata (object with tags array and brandTrait string), performanceScore (number)
-        `;
-
-        const prompt = PromptTemplate.fromTemplate(template);
-        const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
-
-        const enrichment = await chain.invoke({
-          platform,
-          title: pattern.title,
-          category: pattern.category,
-          subCategory: pattern.subCategory,
-          description: pattern.description,
-          performance: pattern.estimatedPerformance || 70,
-        }) as any;
-
-        // Generate a synthetic embedding (1536-dim vector placeholder)
-        // In production, this would be generated via OpenAI Embeddings API
-        const syntheticEmbedding = this.generateSyntheticEmbedding(pattern);
-
-        const synthesisPrompt = `Create an original ${pattern.category} design inspired by ${pattern.subCategory || 'modern'} aesthetics. Use a ${pattern.manifest?.mood || 'professional'} tone with balanced composition. Minimalist, unique, no logos or text. Original digital artwork.`;
-
-        return {
-          category: pattern.category,
-          subCategory: pattern.subCategory,
-          embedding: syntheticEmbedding,
-          manifest: (enrichment as any).manifest || pattern.manifest,
-          performanceScore: (enrichment as any).performanceScore || pattern.estimatedPerformance || 70,
-          sourcePlatform: platform,
-          isSynthesized: true,
-          synthesisPrompt,
-          metadata: {
-            ...((enrichment as any).metadata || {}),
-            tags: [...((enrichment as any).metadata?.tags || [pattern.subCategory, pattern.category].filter(Boolean)), 'ai-synthesized'],
-            brandTrait: (enrichment as any).metadata?.brandTrait || 'synthesized',
-            originalityBadge: 'ai-synthesized',
-            synthesisDate: new Date().toISOString(),
-          },
-        };
-      } catch (e) {
-        console.warn('[DnaHunt] AI extraction failed, using pattern data directly:', (e as Error).message);
-      }
+  private calculateWVI(target: any, platform: string): number {
+    if (platform === 'etsy') {
+      const bs = (target.isBestSeller && target.isBestSeller !== '') ? 1 : 0;
+      const bcStr = target.inBasket || '0';
+      const bcMatch = bcStr.match(/In\s+(\d+)\+?\s+people/i);
+      const bc = bcMatch ? Math.min(parseInt(bcMatch[1]), 20) : 0;
+      const rTotalMatch = (target.reviewsCount || '0').match(/(\d[\d,]*)/);
+      const rTotal = rTotalMatch ? parseInt(rTotalMatch[1].replace(/,/g, '')) : 0;
+      
+      let wvi = 50 + (bs * 20) + (bc * 1.5) + (Math.min(rTotal, 500) / 20);
+      return Math.min(Math.round(wvi), 100);
+    }
+    
+    if (platform === 'figma_community') {
+      const d = target.signals?.duplicates || 0;
+      const l = target.signals?.likes || 0;
+      let wvi = 60 + (Math.min(d, 5000) / 200) + (Math.min(l, 1000) / 50);
+      return Math.min(Math.round(wvi), 100);
     }
 
-    // Fallback: store the pattern data directly as a DnaStrand
-    return {
-      category: pattern.category || 'niche_pattern',
-      subCategory: pattern.subCategory || 'discovered',
-      manifest: pattern.manifest || { description: pattern.description, platform },
-      performanceScore: pattern.estimatedPerformance || 70,
-      sourcePlatform: platform,
-      isSynthesized: true,
-      synthesisPrompt: `Original ${pattern.category} design: ${pattern.subCategory || 'modern'} style synthesized from design intelligence`,
-      metadata: {
-        tags: [pattern.subCategory, pattern.category, 'ai-synthesized'].filter(Boolean),
-        brandTrait: 'auto_synthesized',
-        originalityBadge: 'ai-synthesized',
-        synthesisDate: new Date().toISOString(),
-      },
-    };
+    if (platform === 'kittl') {
+      const u = target.signals?.duplicates || 0;
+      let wvi = 65 + (Math.min(u, 2000) / 100);
+      if (target.signals?.isStaffPick) wvi += 15;
+      return Math.min(Math.round(wvi), 100);
+    }
+
+    if (platform === 'behance') {
+      const l = target.signals?.likes || 0;
+      let wvi = 55 + (Math.min(l, 5000) / 250);
+      if (target.signals?.isCurated) wvi += 25;
+      return Math.min(Math.round(wvi), 100);
+    }
+
+    if (platform === 'redbubble') {
+      return target.isBestSeller ? 95 : 75;
+    }
+
+    if (platform === 'artstation') {
+      const l = target.signals?.likes || 0;
+      const v = target.signals?.views || 0;
+      let wvi = 60 + (Math.min(l, 1000) / 40) + (Math.min(v, 10000) / 500);
+      return Math.min(Math.round(wvi), 100);
+    }
+
+    if (platform === 'substack') {
+      const sub = target.signals?.subscribers || '';
+      return sub.toLowerCase().includes('thousands') ? 92 : 75;
+    }
+
+    if (platform === 'fiverr') {
+      let wvi = 60;
+      // Pro/Verified bonus
+      if (target.isPro || target.isVerified) wvi += 20;
+      // Reviews bonus
+      const rCount = parseInt(target.reviewsCount) || 0;
+      wvi += Math.min(rCount / 10, 15);
+      // Bonus for Fiverr Choice
+      if (target.isFiverrChoice && target.isFiverrChoice !== '') wvi += 15;
+      return Math.min(Math.round(wvi), 100);
+    }
+
+    return target.performanceScore || 70;
   }
 
-  /**
-   * Generate a synthetic embedding vector from pattern data.
-   * Uses a deterministic hash-based approach to create a consistent
-   * pseudo-embedding that enables similarity search.
-   * In production, replace with OpenAI Embeddings API.
-   */
-  private generateSyntheticEmbedding(pattern: any): number[] {
-    const seed = pattern.title + pattern.category + pattern.subCategory + (pattern.description || '');
-    let hash = 0;
-    for (let i = 0; i < seed.length; i++) {
-      const char = seed.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
+  private async researchPlatformPatterns(niche: string, platform: string): Promise<any[]> {
+    try {
+      const model = await resolveModelForUser();
+      const masterBriefing = getMasterBriefing({ niche, goal: 'Market Trend Analysis', userTier: 'Trend Research Agent' });
+      const template = `
+        ${masterBriefing}
+        CRITICAL MARKET INTEL CONTEXT (Viral Signals):
+        - Etsy: Look for "Bestseller" and "In X people's baskets".
+        - Figma: Look for high duplicate/like counts.
+        - Kittl: Look for high remix/use counts and Staff Picks.
+        - Behance: Look for high appreciations and "Featured" badges.
+        - Redbubble: Look for "Best Seller" badges.
+        - ArtStation: Look for high likes and trending views.
+        - Substack: Look for publications in the "thousands of subscribers" tier.
 
-    // Generate a 128-dimensional pseudo-embedding from the hash
-    const dims = 128;
-    const embedding: number[] = [];
-    let seedVal = Math.abs(hash);
-    for (let i = 0; i < dims; i++) {
-      seedVal = (seedVal * 1664525 + 1013904223) & 0xFFFFFFFF;
-      embedding.push((seedVal % 2000) / 1000 - 1); // Normalize to [-1, 1]
+        Task: Analyze {platform} for the {niche} niche based on these viral signals.
+        Identify top-performing patterns (best-sellers, viral hooks, high-converting layouts).
+        Return JSON array of objects:
+        - title: Name of the trend/pattern
+        - category: Broad category
+        - subCategory: Narrow category
+        - description: Strategic reasoning for why this works
+        - performanceScore: 0-100 base score
+        - manifest: JSON object containing 'dna_elements' (colors, keywords, flow)
+        - viralMetrics: {
+            "isBestseller": boolean,
+            "basketCount": number,
+            "ordersInQueue": number,
+            "totalReviews": number,
+            "rating": number,
+            "sellerLevel": number
+          }
+      `;
+      const prompt = PromptTemplate.fromTemplate(template);
+      const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
+      const result = await chain.invoke({ niche, platform }) as any;
+      return Array.isArray(result) ? result : [];
+    } catch (e) {
+      return [];
     }
-    return embedding;
+  }
+
+  private async extractDnaFromPattern(pattern: any, platform: string, niche?: string, performanceScore?: number): Promise<any> {
+    try {
+      const model = await resolveModelForUser();
+      const masterBriefing = getMasterBriefing({ niche, goal: 'DNA Extraction', userTier: 'Intel Architect' });
+      const template = `
+        ${masterBriefing}
+        Task: Extract the 'Core DNA' from the pattern: {title}.
+        
+        Anti-Copycat Guidelines:
+        1. Identification: Identify what makes this pattern high-performing (palette, typography, layout).
+        2. Synthesis: Create a technically unique 'Logic Manifest' that captures the conversion magic but shifts themes (e.g., if source is Boho, synthesis should be Minimalist or Brutalist).
+        3. Perceptual Pivot: Ensure typography and layout grids are shuffled to avoid direct duplication.
+
+        Return JSON:
+        - manifest: The logic manifest for remaking this (colors, fonts, layout complexity)
+        - metadata: Technical details (tags, vibe)
+        - synthesisPrompt: A text-to-image prompt to generate an ORIGINAL preview image for this DNA.
+      `;
+      const prompt = PromptTemplate.fromTemplate(template);
+      const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
+      const enrichment = await chain.invoke({ title: pattern.title }) as any;
+
+      return {
+        category: pattern.category || 'layout',
+        subCategory: pattern.subCategory,
+        embedding: Array.from({ length: 128 }, () => Math.random()), // In production, generate real embedding
+        manifest: enrichment.manifest || pattern.manifest,
+        performanceScore: performanceScore || pattern.performanceScore || 70,
+        sourcePlatform: platform,
+        isSynthesized: true,
+        synthesisPrompt: enrichment.synthesisPrompt,
+        metadata: {
+          ...enrichment.metadata,
+          originalTitle: pattern.title,
+          viralMetrics: pattern.viralMetrics || {},
+          harvestedAt: new Date().toISOString()
+        },
+      };
+    } catch (e) {
+      return null;
+    }
   }
 }
 

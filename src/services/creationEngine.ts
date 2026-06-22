@@ -1,8 +1,10 @@
 import { db, schema } from '../db/index.js';
-import { campaigns, scheduledPosts } from '../db/sqlite-schema.js';
+const { campaigns, scheduledPosts } = schema;
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { canvaService } from './canvaService.js';
+import path from 'path';
+import { productionDirector } from './productionDirector.js';
+import { renderingEngine } from './renderingEngine.js';
 import { aiScriptingService } from './aiScriptingService.js';
 import { distributionQueue } from './queueService.js';
 import { notificationService } from './notificationService.js';
@@ -31,13 +33,14 @@ export interface CreationRequest {
 
 export class CreationEngine {
   /**
-   * Main entry point to generate a campaign's master asset and queue distribution.
+   * Main entry point — generates master asset using native pipeline (DALL-E + FFmpeg).
+   * Bypasses Canva/CapCut completely. Zero external subscriptions.
    */
   async generateMasterAsset(request: CreationRequest) {
     const { userId, campaignId, niche, productName, platforms } = request;
-    console.log(`[CreationEngine] Generating master asset for campaign ${campaignId}...`);
+    console.log(`[CreationEngine] Generating master asset for campaign ${campaignId} (native mode)...`);
 
-    webSocketService.notifyUser(userId, 'ai-log', { message: `🎬 [STUDIO] Initializing master asset generation for ${productName}...` });
+    webSocketService.notifyUser(userId, 'ai-log', { message: `🎬 [STUDIO] Native mode: Initializing master asset for ${productName}...` });
 
     // 1. Generate/Retrieve Style DNA
     const styleDna = await this.generateStyleDNA(userId, campaignId, niche, productName);
@@ -47,44 +50,51 @@ export class CreationEngine {
       .set({ styleDna, updatedAt: new Date() })
       .where(eq(campaigns.id, campaignId));
 
-    // 3. Generate Design Blueprint parameterized with DNA (Uses High-Intelligence Studio Reasoner)
-    const blueprint = await aiScriptingService.generateDesignBlueprint({
+    // 3. Generate Production Script via ProductionDirector (Gemini strategist)
+    webSocketService.notifyUser(userId, 'ai-log', { message: `🧠 [STUDIO] Production Director: Creating scene-by-scene script...` });
+
+    const prodScriptData = await productionDirector.direct({
+      campaignId,
       userId,
-      businessNiche: niche,
-      userGoal: `Create a high-converting asset for ${productName} with ${styleDna.visualAesthetic} aesthetic.`,
-      productName: productName,
-      customerInquiry: `Style DNA: Colors(${styleDna.colors.join(',')}), Fonts(${styleDna.fonts.join(',')}), Pacing(${styleDna.pacing})`
+      niche,
+      angle: productName,
+      styleDna: {
+        colors: styleDna.colors,
+        fonts: styleDna.fonts,
+        pacing: styleDna.pacing,
+        hooks: styleDna.hooks,
+        visualAesthetic: styleDna.visualAesthetic,
+      },
+      platform: platforms[0] || 'tiktok',
     });
 
-    webSocketService.notifyUser(userId, 'ai-log', { message: `🧠 [STUDIO] Intel Layer: Design blueprint generated via High-Reasoning model.` });
+    // 4. Render the video using native RenderingEngine (DALL-E 3 + Sharp + FFmpeg)
+    webSocketService.notifyUser(userId, 'ai-log', { message: `🎨 [STUDIO] Rendering Engine: Generating scenes via DALL-E 3...` });
 
-    // 4. Select and Autofill Canva Template
-    const templates = await canvaService.searchTemplates(userId, styleDna.visualAesthetic, niche);
-    const masterTemplateId = templates[0];
-
-    const designId = await canvaService.autofillDesign(userId, masterTemplateId, {
-      title: productName,
-      dna_colors: styleDna.colors,
-      dna_fonts: styleDna.fonts,
-      hook: styleDna.hooks[0]
+    const renderResult = await renderingEngine.render({
+      scenes: prodScriptData.scenes,
+      pacing: prodScriptData.pacing,
     });
 
-    webSocketService.notifyUser(userId, 'ai-log', { message: `🎨 [STUDIO] Master asset created. Exporting and synchronizing...` });
+    if (!renderResult.success || !renderResult.videoUrl) {
+      throw new Error(`Native rendering failed: ${renderResult.error || 'unknown error'}`);
+    }
 
-    // 5. Export Master Asset
-    const masterAssetUrl = await canvaService.exportDesign(userId, designId);
+    const masterAssetUrl = renderResult.videoUrl;
 
-    // 6. Update Campaign with Master Asset URL
+    webSocketService.notifyUser(userId, 'ai-log', { message: `✅ [STUDIO] Native master asset created: ${path.basename(masterAssetUrl)}` });
+
+    // 5. Update Campaign with Master Asset URL
     await db.update(campaigns)
       .set({ masterAssetUrl, updatedAt: new Date() })
       .where(eq(campaigns.id, campaignId));
 
-    // 7. Populate Multi-Platform Distribution Queue
+    // 6. Populate Multi-Platform Distribution Queue
     await this.queueMultiPlatformDistribution(userId, campaignId, masterAssetUrl, platforms, productName);
 
-    webSocketService.notifyUser(userId, 'ai-log', { message: `✅ [STUDIO] Multi-platform distribution queued successfully.` });
+    webSocketService.notifyUser(userId, 'ai-log', { message: `✅ [STUDIO] Native pipeline complete. Distribution queued.` });
     
-    return { masterAssetUrl, styleDna };
+    return { masterAssetUrl, styleDna, scenes: prodScriptData.scenes };
   }
 
   private async generateStyleDNA(userId: string, campaignId: string, niche: string, productName: string): Promise<StyleDNA> {

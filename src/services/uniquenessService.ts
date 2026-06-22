@@ -29,7 +29,7 @@ export class UniquenessService {
     vaultStrandsUsed: string[];
   }): Promise<UniquenessResult> {
     let geometricScore = 0;
-    
+
     // Gate 1: Geometric Check (if image provided)
     if (params.imageBuffer) {
       geometricScore = await this.checkGeometricSimilarity(params.imageBuffer);
@@ -45,7 +45,7 @@ export class UniquenessService {
 
     // Gate 2 & 3: Semantic & Content Check via Gemini
     const intelResult = await this.runIntelligenceCheck(params);
-
+    
     const isUnique = geometricScore < 85 && intelResult.semanticScore < 80;
 
     return {
@@ -82,12 +82,11 @@ export class UniquenessService {
         .limit(20);
 
       let maxSimilarity = 0;
-
       for (const asset of recentAssets) {
         if (asset.styleDna?.pHash) {
           const distance = blockhash.hammingDistance(hash, asset.styleDna.pHash);
           // Hamming distance of 0 = 100% similar. For 8x8 (64 bits), distance 10 ~ 85% similar.
-          const similarity = Math.max(0, 100 - (distance * 1.5)); 
+          const similarity = Math.max(0, 100 - (distance * 1.5));
           if (similarity > maxSimilarity) maxSimilarity = similarity;
         }
       }
@@ -109,16 +108,13 @@ export class UniquenessService {
   }): Promise<{ semanticScore: number; reasoning: string }> {
     try {
       const model = await resolveStudioReasoner();
-
       const template = `
         You are the Empire Studio Anti-Copycat Officer.
-        
         Task: Evaluate if the following content is a "copycat" of existing market patterns or vault designs.
-        
         Niche: {niche}
         Proposed Content: {content}
         Vault Strands Used: {vaultStrands}
-
+        
         Rules:
         1. If the content is almost identical to common niche templates, semanticScore should be high (>80).
         2. If it brings a unique angle or "DNA synthesis" that feels fresh, semanticScore should be low (<40).
@@ -128,10 +124,10 @@ export class UniquenessService {
         - semanticScore: number (0-100)
         - reasoning: string (Detailed explanation of why it is or isn't unique)
       `;
-
+      
       const prompt = PromptTemplate.fromTemplate(template);
       const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
-
+      
       const result = await chain.invoke({
         niche: params.niche,
         content: params.content,
@@ -147,7 +143,7 @@ export class UniquenessService {
       return { semanticScore: 0, reasoning: 'Intelligence check bypassed due to error.' };
     }
   }
-  
+
   /**
    * Utility to generate a pHash for storage.
    */
@@ -163,6 +159,29 @@ export class UniquenessService {
       width: info.width,
       height: info.height
     }, 8, 1);
+  }
+
+  /**
+   * Checks similarity against known market best-sellers (design_hashes).
+   */
+  async checkDesignSimilarity(hash: string): Promise<number> {
+    try {
+      const existingHashes = await db.select()
+        .from(schema.designHashes)
+        .limit(100);
+
+      let maxSimilarity = 0;
+      for (const entry of existingHashes) {
+        const distance = blockhash.hammingDistance(hash, entry.hash);
+        // Hamming distance of 0 = 100% similar. For 8x8 (64 bits), distance 10 ~ 85% similar.
+        const similarity = Math.max(0, 100 - (distance * 1.5));
+        if (similarity > maxSimilarity) maxSimilarity = similarity;
+      }
+      return maxSimilarity;
+    } catch (e) {
+      console.warn('[UniquenessService] Design similarity check failed:', (e as Error).message);
+      return 0;
+    }
   }
 }
 

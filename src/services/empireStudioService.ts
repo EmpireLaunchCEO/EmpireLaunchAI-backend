@@ -12,10 +12,10 @@ import { dnaVaultService } from './dnaVaultService.js';
 import { aiScriptingService } from './aiScriptingService.js';
 import { resolveModelForUser, getModelConfig, resolveStudioReasoner } from '../utils/resolveModel.js';
 import { uniquenessService } from './uniquenessService.js';
-import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 /**
  * StyleDNA — parameterizes AI generation across all creative tools.
@@ -31,9 +31,9 @@ export interface StyleDNA {
 }
 
 /**
- * Supported social platforms for distribution.
+ * Supported social and marketplace platforms for distribution.
  */
-export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube' | 'facebook';
+export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube' | 'facebook' | 'etsy' | 'fiverr' | 'shopify';
 
 /**
  * Strategy for creating the master asset.
@@ -239,9 +239,8 @@ export class EmpireStudioService {
     const patternStrands = await dnaVaultService.findTopPerformers('niche_pattern', 70, 5);
 
     // Phase 2: AI-powered synthesis — combine vault data with niche intelligence
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const model = await resolveModelForUser(userId);
+    try {
+      const model = await resolveModelForUser(userId);
 
         const template = `
           You are a Style DNA Architect for the "{niche}" niche (angle: "{angle}").
@@ -290,10 +289,9 @@ export class EmpireStudioService {
             tone: result.tone || 'professional',
           };
         }
-      } catch (e) {
+        } catch (e) {
         console.warn('[EmpireStudio] Vault DNA synthesis failed:', (e as Error).message);
-      }
-    }
+        }
 
     // Fallback: Synthesize directly from vault strands
     const fallbackColors = paletteStrands.length > 0
@@ -357,7 +355,7 @@ export class EmpireStudioService {
   }> {
     // Get tier config to determine reasoning depth
     const modelConfig = await getModelConfig(userId);
-    const isDeepReasoning = modelConfig.modelName === 'gpt-4o';
+    const isDeepReasoning = modelConfig.modelName === 'gemini-1.5-pro';
 
     webSocketService.notifyUser(userId, 'ai-log', {
       message: `🧠 Studio Intelligence: High-Reasoning Layer Activated (Gemini 3 Flash logic)`
@@ -708,6 +706,29 @@ export class EmpireStudioService {
           { action: 'click', selector: '[aria-label="Create a post"]' },
           { action: 'type', selector: '[aria-label="What\'s on your mind?"]', value: content.caption },
           { action: 'click', selector: '[aria-label="Post"]' },
+        ],
+        required: true,
+      };
+    }
+    if (platform === 'etsy') {
+      return {
+        steps: [
+          { action: 'navigate', url: 'https://www.etsy.com/your/shops/me/listings/create' },
+          { action: 'type', selector: '#title-input', value: content.title },
+          { action: 'type', selector: '#description-input', value: content.caption },
+          { action: 'type', selector: '#price-input', value: (content.price / 100).toString() },
+          { action: 'click', selector: 'button[data-e2e="publish-button"]' },
+        ],
+        required: true,
+      };
+    }
+    if (platform === 'fiverr') {
+      return {
+        steps: [
+          { action: 'navigate', url: 'https://www.fiverr.com/start_selling' },
+          { action: 'type', selector: 'input[name="gig_title"]', value: content.title },
+          { action: 'type', selector: 'textarea[name="gig_description"]', value: content.caption },
+          { action: 'click', selector: 'button[type="submit"]' },
         ],
         required: true,
       };

@@ -1,5 +1,5 @@
 import { db, schema } from '../db/index.js';
-import { dnaStrands } from '../db/sqlite-schema.js';
+const { dnaStrands } = schema;
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
  */
 export interface DnaStrand {
   id?: string;
+  userId?: string; // Owner of the strand
   category: 'avatar' | 'animal' | 'flower' | 'layout' | 'typography' | 'palette' | 'niche_pattern' | 'background';
   subCategory?: string;
   embedding?: number[];      // 1536-dimensional semantic vector
@@ -26,6 +27,11 @@ export interface DnaStrand {
    * FALSE only for direct imports that should not be displayed as originals.
    */
   isSynthesized?: boolean;
+
+  /**
+   * Whether this strand is visible globally to all users.
+   */
+  isGlobal?: boolean;
 
   /**
    * Text-to-image prompt that the frontend can use to generate an ORIGINAL visual
@@ -66,8 +72,25 @@ export class DnaVaultService {
   async storeStrand(strand: DnaStrand): Promise<string> {
     const id = strand.id || uuidv4();
     
+    // Duplication Check: skip if externalId already exists from the same platform
+    if (strand.externalId && strand.sourcePlatform) {
+      const existing = await db.select()
+        .from(dnaStrands)
+        .where(and(
+          eq(dnaStrands.externalId, strand.externalId),
+          eq(dnaStrands.sourcePlatform, strand.sourcePlatform)
+        ))
+        .limit(1);
+      
+      if (existing.length > 0) {
+        console.log(`[DnaVault] Skipping duplicate strand: ${strand.externalId} on ${strand.sourcePlatform}`);
+        return existing[0].id;
+      }
+    }
+
     await db.insert(dnaStrands).values({
       id,
+      userId: strand.userId || null,
       category: strand.category,
       subCategory: strand.subCategory || null,
       embedding: strand.embedding ? JSON.stringify(strand.embedding) : null,
@@ -75,6 +98,7 @@ export class DnaVaultService {
       performanceScore: strand.performanceScore,
       sourcePlatform: strand.sourcePlatform || null,
       externalId: strand.externalId || null,
+      isGlobal: !!strand.isGlobal,
       metadata: strand.metadata ? JSON.stringify(strand.metadata) : null,
       createdAt: new Date(),
     });
@@ -88,11 +112,27 @@ export class DnaVaultService {
    */
   async bulkStore(strands: DnaStrand[]): Promise<number> {
     let count = 0;
+    const vaultPath = '/home/team/shared/DNA_VAULT';
+    
+    // Ensure vault directory exists
+    const fs = await import('fs');
+    if (!fs.existsSync(vaultPath)) {
+      fs.mkdirSync(vaultPath, { recursive: true });
+    }
+
     for (const strand of strands) {
-      await this.storeStrand(strand);
+      try {
+        await this.storeStrand(strand);
+      } catch (dbError: any) {
+        console.warn(`[DnaVault] DB store failed for ${strand.id}, falling back to file: ${dbError.message}`);
+        
+        // JSON Fallback
+        const filePath = `${vaultPath}/${strand.category}_${strand.id || uuidv4()}.json`;
+        fs.writeFileSync(filePath, JSON.stringify(strand, null, 2));
+      }
       count++;
     }
-    console.log(`[DnaVault] Bulk stored ${count} strands`);
+    console.log(`[DnaVault] Bulk processed ${count} strands (DB + Fallback)`);
     return count;
   }
 
@@ -263,6 +303,19 @@ export class DnaVaultService {
   }
 
   /**
+   * Find global DNA strands.
+   */
+  async findGlobalStrands(limit: number = 50): Promise<DnaStrand[]> {
+    const rows = await db.select()
+      .from(dnaStrands)
+      .where(eq(dnaStrands.isGlobal, true))
+      .orderBy(desc(dnaStrands.createdAt))
+      .limit(limit);
+
+    return (rows as any[]).map((r: any) => this.rowToStrand(r));
+  }
+
+  /**
    * Seed the vault with initial premium DNA from known high-performing
    * design archetypes. Used during initial vault population.
    */
@@ -278,6 +331,7 @@ export class DnaVaultService {
   private rowToStrand(row: any): DnaStrand {
     return {
       id: row.id,
+      userId: row.userId || undefined,
       category: row.category,
       subCategory: row.subCategory || undefined,
       embedding: row.embedding ? (typeof row.embedding === 'string' ? JSON.parse(row.embedding) : row.embedding) : undefined,
@@ -287,6 +341,7 @@ export class DnaVaultService {
       externalId: row.externalId || undefined,
       metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
       isSynthesized: row.isSynthesized !== undefined ? !!row.isSynthesized : true,
+      isGlobal: !!row.isGlobal,
       synthesisPrompt: row.synthesisPrompt || undefined,
       createdAt: row.createdAt ? (row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)) : undefined,
     };

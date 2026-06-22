@@ -3,6 +3,7 @@ import { eq, and, sql } from 'drizzle-orm';
 import { decrypt } from '../utils/encryption.js';
 import { v4 as uuidv4 } from 'uuid';
 import { gmailService } from './gmailService.js';
+import { notificationService } from './notificationService.js';
 
 const { revenueMilestones, revenueTransactions, approvals, users } = schema;
 
@@ -16,6 +17,7 @@ const { revenueMilestones, revenueTransactions, approvals, users } = schema;
 export class RevenueOracleService {
   /**
    * Calculates pending dues according to the Withholding & Reversion Protocol.
+   * Success-Share (4%) is calculated ONLY on AI-attributed revenue.
    */
   async calculatePendingDues(userId: string) {
     const [milestone] = await db.select().from(revenueMilestones).where(eq(revenueMilestones.userId, userId)).limit(1);
@@ -24,22 +26,22 @@ export class RevenueOracleService {
     const tier = user?.tier || 'STANDARD_USER';
     
     let subscriptionFee = 3000; // $30 in cents
-    let surchargePer1000 = 3000; // $30 in cents
+    let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
 
     if (tier === 'OWNER_MASTER') {
       subscriptionFee = 0;
       surchargePer1000 = 0;
     } else if (tier === 'BETA_TESTER') {
       subscriptionFee = 0;
-      surchargePer1000 = 3000;
+      surchargePer1000 = 4000;
     }
 
     if (!milestone) return { total: subscriptionFee, subscription: subscriptionFee, surcharges: 0 };
     
-    const lifetimeRevenue = milestone.totalRevenue;
+    const lifetimeAiRevenue = milestone.totalAiRevenue || 0;
     const lifetimeSurchargesPaid = milestone.lifetimeSurchargesPaid || 0;
     
-    const totalSurchargesAccrued = Math.floor(lifetimeRevenue / 100000) * surchargePer1000;
+    const totalSurchargesAccrued = Math.floor(lifetimeAiRevenue / 100000) * surchargePer1000;
     const unpaidSurcharges = Math.max(0, totalSurchargesAccrued - lifetimeSurchargesPaid);
     
     return {
@@ -51,6 +53,7 @@ export class RevenueOracleService {
 
   /**
    * Aggregates revenue for a specific user and checks for $1,000 milestones.
+   * AI milestones trigger success-share billing.
    */
   async processMilestones(userId: string) {
     // 1. Get current revenue state
@@ -58,90 +61,85 @@ export class RevenueOracleService {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     
     const tier = user?.tier || 'STANDARD_USER';
-    let surchargePer1000 = 3000; // $30 in cents
+    let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
     if (tier === 'OWNER_MASTER') {
       surchargePer1000 = 0;
     }
 
-    // 2. Fetch recent un-aggregated transactions from the ledger
+    // 2. Fetch all transactions to calculate current aggregates
     const transactions = await db.select().from(revenueTransactions).where(eq(revenueTransactions.userId, userId));
     
     const currentTotalRevenue = transactions.reduce((sum: number, tx: any) => sum + tx.amount, 0);
-    const lastMilestoneHit = milestone?.lastMilestoneHit || 0;
+    const currentAiRevenue = transactions
+      .filter((tx: any) => tx.isAiGenerated)
+      .reduce((sum: number, tx: any) => sum + tx.amount, 0);
 
-    // 3. Calculate Milestone
+    const lastAiMilestoneHit = milestone?.lastAiMilestoneHit || 0;
+
+    // 3. Calculate AI Milestone (Success-Share only triggers on AI revenue)
     const MILESTONE_INCREMENT = 100000; // $1,000 in cents
-    
-    // Check if we've crossed a new $1000 boundary
-    const currentMilestoneCount = Math.floor(currentTotalRevenue / MILESTONE_INCREMENT);
-    const lastMilestoneCount = Math.floor(lastMilestoneHit / MILESTONE_INCREMENT);
+    const currentAiMilestoneCount = Math.floor(currentAiRevenue / MILESTONE_INCREMENT);
+    const lastAiMilestoneCount = Math.floor(lastAiMilestoneHit / MILESTONE_INCREMENT);
 
-    if (currentMilestoneCount > lastMilestoneCount) {
-      const milestoneDiff = currentMilestoneCount - lastMilestoneCount;
+    if (currentAiMilestoneCount > lastAiMilestoneCount) {
+      const milestoneDiff = currentAiMilestoneCount - lastAiMilestoneCount;
       const dues = await this.calculatePendingDues(userId);
-      
       const successFee = surchargePer1000 * milestoneDiff;
 
       // 4. Trigger Milestone Billing Approval if there's a fee
-      if (successFee > 0 || dues.subscription > 0) {
+      if (successFee > 0) {
         await db.insert(approvals).values({
           id: uuidv4(),
           userId,
           type: 'financial',
           status: 'pending',
           payload: {
-            revenueTarget: currentMilestoneCount * MILESTONE_INCREMENT,
+            revenueTarget: currentAiMilestoneCount * MILESTONE_INCREMENT,
             successFee: successFee,
             pendingDues: dues.total,
-            message: `Congratulations! Your business has reached a new revenue milestone. Total Revenue: ${(currentTotalRevenue/100).toLocaleString()}.`
+            message: `Congratulations! Your business has reached a new AI revenue milestone. AI-Attributed Revenue: ${(currentAiRevenue/100).toLocaleString()}.`
           },
           createdAt: new Date(),
           updatedAt: new Date(),
         });
-      }
 
-      // 5. Update or insert milestone record
-      if (!milestone) {
-        await db.insert(revenueMilestones).values({
-          id: uuidv4(),
-          userId,
-          totalRevenue: currentTotalRevenue,
-          lastMilestoneHit: currentMilestoneCount * MILESTONE_INCREMENT,
-          updatedAt: new Date(),
+        // Send Native/Web Push Notification
+        await notificationService.sendPushNotification(userId, {
+          title: 'New AI Revenue Milestone!',
+          body: `Your AI-generated content just crossed $${(currentAiMilestoneCount * 1000).toLocaleString()} in revenue. Milestone fee of $${(successFee/100).toFixed(2)} is pending approval.`,
+          data: { url: '/financial-command', type: 'SALE_ALERT' }
         });
-      } else {
-        await db.update(revenueMilestones)
-          .set({ 
-            totalRevenue: currentTotalRevenue,
-            lastMilestoneHit: currentMilestoneCount * MILESTONE_INCREMENT,
-            updatedAt: new Date(),
-          })
-          .where(eq(revenueMilestones.userId, userId));
       }
+    }
+
+    // 5. Update or insert milestone record
+    if (!milestone) {
+      await db.insert(revenueMilestones).values({
+        id: uuidv4(),
+        userId,
+        totalRevenue: currentTotalRevenue,
+        totalAiRevenue: currentAiRevenue,
+        lastMilestoneHit: Math.floor(currentTotalRevenue / MILESTONE_INCREMENT) * MILESTONE_INCREMENT,
+        lastAiMilestoneHit: currentAiMilestoneCount * MILESTONE_INCREMENT,
+        updatedAt: new Date(),
+      });
     } else {
-      // Just update the total revenue if no milestone hit
-      if (!milestone) {
-        await db.insert(revenueMilestones).values({
-          id: uuidv4(),
-          userId,
+      await db.update(revenueMilestones)
+        .set({ 
           totalRevenue: currentTotalRevenue,
-          lastMilestoneHit: 0,
+          totalAiRevenue: currentAiRevenue,
+          lastMilestoneHit: Math.floor(currentTotalRevenue / MILESTONE_INCREMENT) * MILESTONE_INCREMENT,
+          lastAiMilestoneHit: currentAiMilestoneCount * MILESTONE_INCREMENT,
           updatedAt: new Date(),
-        });
-      } else {
-        await db.update(revenueMilestones)
-          .set({ 
-            totalRevenue: currentTotalRevenue,
-            updatedAt: new Date(),
-          })
-          .where(eq(revenueMilestones.userId, userId));
-      }
+        })
+        .where(eq(revenueMilestones.userId, userId));
     }
 
     return {
       userId,
       newTotal: currentTotalRevenue,
-      milestoneHit: currentMilestoneCount > lastMilestoneCount
+      newAiTotal: currentAiRevenue,
+      milestoneHit: currentAiMilestoneCount > lastAiMilestoneCount
     };
   }
 
@@ -166,6 +164,10 @@ export class RevenueOracleService {
           amount: tx.amount,
           currency: tx.currency || 'usd',
           externalTransactionId: tx.id,
+          isAiGenerated: tx.isAiGenerated || false, // Attribution flag
+          contentId: tx.contentId || null, // Link to specific AI content
+          campaignId: tx.campaignId || null, // Link to AI campaign
+          attributionSource: tx.attributionSource || 'platform_direct',
           date: tx.date || new Date(),
           createdAt: new Date(),
         });

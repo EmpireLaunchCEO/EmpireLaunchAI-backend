@@ -84,8 +84,8 @@ export class RetentionService {
         await db.insert(inboxDrafts).values({
           id: uuidv4(),
           userId,
-          subject: draftContent.subject || `Thank you for your ${tx.platform} purchase!`,
-          body: draftContent.body || `Hi ${customer},\n\nThank you so much for your purchase! We hope you love it.`,
+          subject: draftContent.split('\n')[0].replace('Subject: ', '') || `Thank you for your ${tx.platform} purchase!`,
+          body: draftContent.split('\n').slice(1).join('\n').trim() || draftContent,
           to: 'customer@example.com', // In real app, use customer email from transaction
           type: 'THANK_YOU',
           customer,

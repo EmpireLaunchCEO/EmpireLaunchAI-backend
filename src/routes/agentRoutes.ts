@@ -13,6 +13,7 @@ import {
   approveInboxDraft,
   initializeAgent
 } from '../controllers/agentController.js';
+import { userSettingsService } from '../services/userSettingsService.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
@@ -70,18 +71,19 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
     if (niche || angle) {
       const [existingGoal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
       let newDesc = description || existingGoal?.description || '';
+      
       if (niche) {
-        if (newDesc.includes('Empire Niche:')) {
-          newDesc = newDesc.replace(/Empire Niche: (.*?)\./, `Empire Niche: ${niche}.`);
+        if (/Empire Niche:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+          newDesc = newDesc.replace(/Empire Niche:\s*(.*?)(?:\.|$)/, `Empire Niche: ${niche}.`);
         } else {
-          newDesc += ` Empire Niche: ${niche}.`;
+          newDesc = `Empire Niche: ${niche}. ${newDesc}`.trim();
         }
       }
       if (angle) {
-        if (newDesc.includes('Angle:')) {
-          newDesc = newDesc.replace(/Angle: (.*?)\./, `Angle: ${angle}.`);
+        if (/Angle:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+          newDesc = newDesc.replace(/Angle:\s*(.*?)(?:\.|$)/, `Angle: ${angle}.`);
         } else {
-          newDesc += ` Angle: ${angle}.`;
+          newDesc = `${newDesc} Angle: ${angle}.`.trim();
         }
       }
       updateData.description = newDesc;
@@ -95,14 +97,19 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
 
     // 2. Persist to Global User Settings for "Memory"
     const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
-    const settingsUpdate: any = { updatedAt: new Date() };
+    const settingsUpdate: any = { 
+      updatedAt: new Date(),
+      userId: userId 
+    };
     if (niche) settingsUpdate.businessNiche = niche;
     if (angle) settingsUpdate.businessAngle = angle;
 
-    if (Object.keys(settingsUpdate).length > 1) {
-      await db.update(schema.userSettings)
-        .set(settingsUpdate)
-        .where(eq(schema.userSettings.userId, userId));
+    // Use saveSettings to handle upsert correctly
+    if (niche || angle) {
+      await userSettingsService.saveSettings(userId, {
+        businessNiche: niche,
+        businessAngle: angle
+      });
     }
     
     res.json({ status: 'success', message: 'Empire updated and persisted' });

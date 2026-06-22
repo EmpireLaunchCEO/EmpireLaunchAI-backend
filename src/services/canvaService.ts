@@ -112,13 +112,114 @@ export class CanvaService {
   async searchTemplates(userId: string, style: string, niche: string): Promise<string[]> {
     // In a real implementation, this would use semantic search or Canva's asset search API
     // For now, returning a mock template ID based on niche
-    console.log(`Searching Canva templates for style: ${style}, niche: ${niche}`);
+    console.log(`Searching Canva templates for style: \${style}, niche: \${niche}`);
     if (niche.toLowerCase().includes('planner')) {
       return ['TEMPLATE_PLANNER_001', 'TEMPLATE_PLANNER_002'];
     } else if (niche.toLowerCase().includes('journal')) {
       return ['TEMPLATE_JOURNAL_001', 'TEMPLATE_JOURNAL_002'];
     }
     return ['TEMPLATE_GENERIC_001'];
+  }
+
+  /**
+   * Deep DNA Extraction: Brand Kits
+   */
+  async extractBrandKitDna(userId: string) {
+    const credentials = await integrationService.getCredentials(userId, 'canva');
+    if (!credentials || !credentials.accessToken) {
+      throw new Error('No Canva credentials found');
+    }
+
+    try {
+        // In production: GET /v1/brand-kits
+        const response = await axios.get(`\${this.baseUrl}/brand-kits`, {
+            headers: { Authorization: `Bearer \${credentials.accessToken}` }
+        });
+        
+        const kits = response.data.brand_kits || [];
+        const strands = [];
+
+        for (const kit of kits) {
+            // Extract Colors
+            if (kit.colors) {
+                for (const palette of kit.colors) {
+                    strands.push({
+                        category: 'palette' as any,
+                        subCategory: kit.name,
+                        manifest: { colors: palette.colors, name: palette.name },
+                        performanceScore: 90,
+                        sourcePlatform: 'canva',
+                        isGlobal: false,
+                        metadata: { userId, kitId: kit.id, type: 'brand_kit_palette' }
+                    });
+                }
+            }
+            // Extract Fonts
+            if (kit.fonts) {
+                strands.push({
+                    category: 'typography' as any,
+                    subCategory: kit.name,
+                    manifest: { fonts: kit.fonts },
+                    performanceScore: 90,
+                    sourcePlatform: 'canva',
+                    isGlobal: false,
+                    metadata: { userId, kitId: kit.id, type: 'brand_kit_fonts' }
+                });
+            }
+        }
+        return strands;
+    } catch (e: any) {
+        console.warn(`[CanvaService] Brand kit extraction failed: \${e.message}. Using fallback.`);
+        return [
+            {
+                category: 'palette' as any,
+                subCategory: 'Default Brand Kit',
+                manifest: { colors: ['#000000', '#FFFFFF', '#00C4CC'], name: 'Canva Colors' },
+                performanceScore: 85,
+                sourcePlatform: 'canva',
+                isGlobal: false,
+                metadata: { userId, type: 'brand_kit_palette' }
+            }
+        ];
+    }
+  }
+
+  /**
+   * Deep DNA Extraction: Designs
+   */
+  async extractUserDesignDna(userId: string, limit: number = 5) {
+    const credentials = await integrationService.getCredentials(userId, 'canva');
+    if (!credentials || !credentials.accessToken) {
+        throw new Error('No Canva credentials found');
+    }
+
+    try {
+        // In production: GET /v1/designs
+        const response = await axios.get(`\${this.baseUrl}/designs?limit=\${limit}`, {
+            headers: { Authorization: `Bearer \${credentials.accessToken}` }
+        });
+
+        const designs = response.data.items || [];
+        const strands = [];
+
+        for (const design of designs) {
+            // In a real flow, we might fetch design details or use a thumbnail for analysis
+            strands.push({
+                category: 'layout' as any,
+                subCategory: design.title,
+                manifest: { title: design.title, thumbnail: design.thumbnail?.url },
+                performanceScore: 80,
+                sourcePlatform: 'canva',
+                externalId: design.id,
+                isGlobal: false,
+                metadata: { userId, type: 'user_design' }
+            });
+        }
+        return strands;
+    } catch (e: any) {
+        console.warn(`[CanvaService] Design extraction failed: \${e.message}`);
+        return [];
+    }
   }
 }
 

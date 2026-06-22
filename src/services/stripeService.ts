@@ -161,6 +161,47 @@ export class StripeService {
       type: dues.surcharges > 0 ? 'subscription_and_surcharge' : 'subscription_only' 
     };
   }
+
+  async createPlatformCheckoutSession(userId: string, returnUrl: string) {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: 'EmpireLaunch AI - SaaS Platform Access',
+              description: 'Full access to AI-driven business scaling, automations, and multi-tenant infrastructure.',
+            },
+            unit_amount: 4000, // $40.00
+            recurring: { interval: 'month' },
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'subscription',
+      success_url: `${returnUrl}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${returnUrl}?canceled=true`,
+      client_reference_id: userId,
+      metadata: { userId },
+    });
+    return session;
+  }
+
+  async getSession(sessionId: string) {
+    return await stripe.checkout.sessions.retrieve(sessionId);
+  }
+
+  async createFinancialConnectionsSession(accountId: string, userId: string) {
+    const session = await stripe.financialConnections.sessions.create({
+      account_holder: {
+        type: 'account',
+        account: accountId,
+      },
+      permissions: ['balances', 'ownership', 'transactions'],
+    });
+    return session;
+  }
 }
 
 export const stripeService = new StripeService();

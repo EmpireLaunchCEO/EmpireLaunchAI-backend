@@ -1,7 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { marketIntelligenceService } from './marketIntelligenceService.js';
-import { ChatOpenAI } from "@langchain/openai";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
@@ -21,7 +20,7 @@ export interface StrategyBlueprint {
 }
 
 export class StrategyOrchestrator {
-  private model: ChatOpenAI;
+  private model: BaseChatModel;
 
   constructor() {
     this.model = getDefaultModel();

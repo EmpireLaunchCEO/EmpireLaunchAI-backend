@@ -1,227 +1,351 @@
-
-import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { StringOutputParser, JsonOutputParser } from '@langchain/core/output_parsers';
 import { neuralBrowserService } from './neuralBrowserService.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
-import type { AutomationStep } from './neuralBrowserService.js';
-
-const { users } = schema;
+import { resolveModelForUser, getDefaultModel } from '../utils/resolveModel.js';
+import axios from 'axios';
 
 export interface MarketListing {
   title: string;
-  price: number;
-  tags: string[];
-  style: string;
-  features: string[];
+  price?: number;
+  tags?: string[];
+  style?: string;
+  features?: string[];
   platform: string;
-  isBestSeller: boolean;
-  visualUrl?: string;
+  url?: string;
+  imageUrl?: string;
+  externalId?: string;
+  isBestSeller?: boolean;
+  signals?: {
+    inBasket?: string;
+    reviewCount?: number;
+    reviewRecency?: string;
+    ordersInQueue?: string;
+    duplicates?: number;
+    likes?: number;
+    views?: number;
+    subscribers?: string;
+    isStaffPick?: boolean;
+    isCurated?: boolean;
+  };
 }
 
 export class MarketIntelligenceService {
-  private readonly SCRAPER_API_KEY = process.env.SCRAPER_API_KEY || '';
-
   async fetchEtsyBestSellers(niche: string, userId?: string): Promise<MarketListing[]> {
-    console.log(`[MarketIntelligence] Fetching real Etsy best sellers for niche: ${niche}`);
-    
     try {
-      // Use Neural Browser to scrape Etsy search for "best seller" badges
-      const results = await neuralBrowserService.executeAutomation('system', [
-        { 
-          action: 'navigate', 
-          url: `https://www.etsy.com/search?q=${encodeURIComponent(niche)}+best+seller` 
-        },
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.etsy.com/search?q=${encodeURIComponent(niche)}&explicit_free_shipping=false&item_type=all&digital=true&ship_to=US&order=highest_reviews` },
         { action: 'wait', value: '.v2-listing-card' },
-        { 
-          action: 'extract', 
+        {
+          action: 'extract',
           selector: '.v2-listing-card',
           multiple: true,
           fields: {
-            title: 'a.v2-listing-card__title',
+            title: 'h3',
             price: '.currency-value',
-            isBestSeller: '.wt-badge--best-seller'
+            isBestSeller: 'span.wt-badge--best-seller, span.wt-badge--sales-pitch',
+            inBasket: '.wt-badge--basket, span.wt-badge--neutral:has-text("basket"), .wt-text-success',
+            reviewCount: '.wt-text-caption.wt-text-grey',
+            url: 'a@href',
+            imageUrl: 'img@src'
           }
         }
-      ]) as Record<string, any>;
+      ]) as any;
 
-      const listings = results['.v2-listing-card'] || [];
+      const listings = results?.['.v2-listing-card'] || [];
       if (Array.isArray(listings) && listings.length > 0) {
         return listings.map((l: any) => ({
           title: l.title || `${niche} Product`,
           price: parseFloat(l.price) || 9.99,
-          tags: [niche, "digital", "best seller"],
+          tags: [niche, "digital"],
           style: "Trending",
-          features: ["Optimized Layout"],
+          features: ["Optimized"],
           platform: "Etsy",
+          url: l.url,
+          imageUrl: l.imageUrl,
+          externalId: l.url?.split('/listing/')[1]?.split('/')[0],
           isBestSeller: !!l.isBestSeller,
+          signals: {
+            inBasket: l.inBasket || undefined,
+            reviewCount: parseInt(l.reviewCount?.replace(/[^0-9]/g, '')) || 0,
+          }
         }));
       }
     } catch (e) {
-      console.warn('[MarketIntelligence] Browser scraping failed, using fallback:', (e as Error).message);
+      console.warn('[MarketIntelligence] Etsy scraping failed');
     }
-
-    // AI-powered analysis fallback if browser scraping fails
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const [user] = await db.select().from(users).where(eq(users.id, userId || 'default-user')).limit(1);
-        const modelName = user?.tier === 'EMPIRE_MASTER' ? 'gpt-4o' : 'gpt-4o-mini';
-
-        const model = new ChatOpenAI({
-          modelName: modelName,
-          temperature: 0.3,
-          openAIApiKey: process.env.OPENAI_API_KEY,
-        });
-
-        const template = `
-          You are a Market Research Analyst. For the niche "{niche}", analyze what types of digital products 
-          are currently best-selling on marketplaces like Etsy.
-
-          Return a JSON array of 3-5 best-selling product concepts. Each object must have:
-          - title: string (max 80 chars)
-          - price: number (in USD, between 3.99 and 29.99)
-          - tags: string[] (array of 3-5 relevant SEO tags)
-          - style: string (the visual style, e.g. "Minimalist", "Boho", "Modern")
-          - features: string[] (array of 3-4 key features)
-          - isBestSeller: boolean (true)
-          - platform: "Etsy"
-
-          Only respond with valid JSON array, no markdown formatting.
-        `;
-
-        const prompt = PromptTemplate.fromTemplate(template);
-        const chain = RunnableSequence.from([prompt, model, new StringOutputParser()]);
-
-        const result = await chain.invoke({ niche });
-        const parsed = JSON.parse(result);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          console.log(`[MarketIntelligence] AI generated ${parsed.length} product insights for "${niche}"`);
-          return parsed as MarketListing[];
-        }
-      } catch (e) {
-        console.warn('[MarketIntelligence] AI synthesis failed:', (e as Error).message);
-      }
-    }
-
-    // Last resort: return dynamic placeholder data based on niche
-    console.log(`[MarketIntelligence] Using intelligent placeholder data for "${niche}"`);
-    return [
-      {
-        title: `${niche} Professional Digital Kit`,
-        price: 11.99,
-        tags: [niche.toLowerCase(), "digital", "best seller", "template"],
-        style: "Modern Professional",
-        features: ["Ready-to-Use Design", "Customizable Layout", "Print-Ready PDF"],
-        platform: "Etsy",
-        isBestSeller: true,
-      },
-      {
-        title: `${niche} Starter Bundle - Ultimate Collection`,
-        price: 15.99,
-        tags: [niche.toLowerCase(), "bundle", "digital download"],
-        style: "Clean Minimalist",
-        features: ["10 Templates Included", "Editable Canva Links", "Commercial License"],
-        platform: "Etsy",
-        isBestSeller: true,
-      },
-    ];
+    return this.fallbackToLLM(niche, 'Etsy', userId);
   }
 
-  async fetchVisualTrends(niche: string): Promise<any[]> {
-    console.log(`[MarketIntelligence] Analyzing real visual trends for "${niche}"`);
-
+  async fetchFigmaCommunityTrends(niche: string, userId?: string): Promise<MarketListing[]> {
     try {
-      // Use Neural Browser to scrape Pinterest for niche trends
-      const results = await neuralBrowserService.executeAutomation('system', [
-        { 
-          action: 'navigate', 
-          url: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(niche)}+aesthetic+trends` 
-        },
+      const response = await axios.get(`https://www.figma.com/api/community/files?page=1&query=${encodeURIComponent(niche)}&sort=popular`);
+      const files = response.data?.meta?.files || [];
+      return files.map((f: any) => ({
+        title: f.name,
+        platform: 'Figma Community',
+        url: `https://www.figma.com/community/file/${f.id}`,
+        imageUrl: f.thumbnail_url,
+        externalId: f.id,
+        signals: {
+          duplicates: f.duplicate_count,
+          likes: f.like_count
+        }
+      }));
+    } catch (e) {
+      console.warn('[MarketIntelligence] Figma API failed, falling back to LLM');
+      return this.fallbackToLLM(niche, 'Figma Community', userId);
+    }
+  }
+
+  async fetchKittlTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.kittl.com/community/explore?q=${encodeURIComponent(niche)}` },
+        { action: 'wait', value: '.template-card' },
+        {
+          action: 'extract',
+          selector: '.template-card',
+          multiple: true,
+          fields: {
+            title: 'h3',
+            imageUrl: 'img@src',
+            useCount: '.use-count', // Hypothetical selector based on report
+            likes: '.like-count',
+            isStaffPick: '.staff-pick-badge',
+            url: 'a@href'
+          }
+        }
+      ]) as any;
+      const items = results?.['.template-card'] || [];
+      return items.map((l: any) => ({
+        title: l.title,
+        platform: 'Kittl',
+        url: l.url,
+        imageUrl: l.imageUrl,
+        externalId: l.url?.split('/').pop(),
+        signals: {
+          duplicates: parseInt(l.useCount?.replace(/[^0-9]/g, '')) || 0,
+          likes: parseInt(l.likes?.replace(/[^0-9]/g, '')) || 0,
+          isStaffPick: !!l.isStaffPick
+        }
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'Kittl', userId);
+    }
+  }
+
+  async fetchBehanceTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.behance.net/search/projects?search=${encodeURIComponent(niche)}&sort=appreciations` },
+        { action: 'wait', value: '.ProjectCover-container-ADp' },
+        {
+          action: 'extract',
+          selector: '.ProjectCover-container-ADp',
+          multiple: true,
+          fields: {
+            title: '.ProjectCover-title-2_3',
+            imageUrl: 'img@src',
+            likes: '.ProjectCover-stat-1l8',
+            isCurated: '.ProjectCover-featured-2_3',
+            url: 'a@href'
+          }
+        }
+      ]) as any;
+      const items = results?.['.ProjectCover-container-ADp'] || [];
+      return items.map((l: any) => ({
+        title: l.title,
+        platform: 'Behance',
+        url: l.url,
+        imageUrl: l.imageUrl,
+        externalId: l.url?.split('/project/')[1]?.split('/')[0],
+        signals: {
+          likes: parseInt(l.likes?.replace(/[^0-9]/g, '')) || 0,
+          isCurated: !!l.isCurated
+        }
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'Behance', userId);
+    }
+  }
+
+  async fetchRedbubbleTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.redbubble.com/shop/?query=${encodeURIComponent(niche)}&sortOrder=trending` },
+        { action: 'wait', value: '[data-testid="search-result-card"]' },
+        {
+          action: 'extract',
+          selector: '[data-testid="search-result-card"]',
+          multiple: true,
+          fields: {
+            title: '.styles__title--1Z_X_',
+            imageUrl: 'img@src',
+            isBestSeller: '.styles__bestSeller--2V_X_',
+            url: 'a@href'
+          }
+        }
+      ]) as any;
+      const items = results?.['[data-testid="search-result-card"]'] || [];
+      return items.map((l: any) => ({
+        title: l.title,
+        platform: 'Redbubble',
+        url: l.url,
+        imageUrl: l.imageUrl,
+        externalId: l.url?.split('/').pop(),
+        isBestSeller: !!l.isBestSeller
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'Redbubble', userId);
+    }
+  }
+
+  async fetchArtStationTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const response = await axios.get(`https://www.artstation.com/api/v2/search/projects.json?q=${encodeURIComponent(niche)}&sorting=trending`);
+      const projects = response.data?.data || [];
+      return projects.map((p: any) => ({
+        title: p.title,
+        platform: 'ArtStation',
+        url: p.permalink,
+        imageUrl: p.cover_image_url,
+        externalId: p.hash_id || p.id?.toString(),
+        signals: {
+          likes: p.likes_count,
+          views: p.views_count
+        }
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'ArtStation', userId);
+    }
+  }
+
+  async fetchSubstackTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const response = await axios.get(`https://substack.com/api/v1/discover/top-publications`);
+      const publications = response.data || [];
+      return publications
+        .filter((p: any) => p.niche === niche || p.tags?.includes(niche))
+        .map((p: any) => ({
+          title: p.name,
+          platform: 'Substack',
+          imageUrl: p.cover_image_url || p.logo_url,
+          externalId: p.id?.toString(),
+          signals: {
+            subscribers: p.subscriber_count_tier
+          }
+        }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'Substack', userId);
+    }
+  }
+
+  async fetchTikTokTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.tiktok.com/search?q=${encodeURIComponent(niche)}` },
+        { action: 'wait', value: '[data-e2e="search-video-container"]' },
+        {
+          action: 'extract',
+          selector: '[data-e2e="search-video-container"]',
+          multiple: true,
+          fields: {
+            title: '[data-e2e="search-card-video-caption"]',
+            views: '[data-e2e="video-views"]',
+            likes: '[data-e2e="video-likes"]'
+          }
+        }
+      ]) as any;
+      const items = results?.['[data-e2e="search-video-container"]'] || [];
+      return items.map((l: any) => ({
+        title: l.title || `${niche} TikTok`,
+        platform: 'TikTok',
+        signals: {
+          views: l.views,
+          likes: l.likes
+        }
+      }));
+    } catch (e) {
+      return this.fallbackToLLM(niche, 'TikTok', userId);
+    }
+  }
+
+  async fetchPinterestTrends(niche: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(niche)}` },
         { action: 'wait', value: '[data-test-id="pin"]' },
-        { 
-          action: 'extract', 
+        {
+          action: 'extract',
           selector: '[data-test-id="pin"]',
           multiple: true,
           fields: {
-            description: 'img',
-            alt: 'img@alt'
+            title: '[data-test-id="pin-title"]',
+            description: '[data-test-id="pin-description"]'
           }
         }
-      ]) as Record<string, any>;
-
-      const pins = results['[data-test-id="pin"]'] || [];
-      if (Array.isArray(pins) && pins.length > 0) {
-        // Use AI to summarize trends from pin descriptions/alts
-        const descriptions = pins.slice(0, 10).map((p: any) => p.alt || p.description).join('\n');
-        
-        const model = new ChatOpenAI({
-          modelName: 'gpt-4o-mini',
-          temperature: 0.3,
-          openAIApiKey: process.env.OPENAI_API_KEY,
-        });
-
-        const template = `
-          Based on the following Pinterest search results for "{niche} aesthetic trends":
-          {descriptions}
-
-          Extract 2-3 trending visual styles. For each, provide:
-          - style: Name of the aesthetic
-          - traction: "High" | "Extreme"
-          - platform: "Pinterest"
-          - description: Why it's trending
-
-          Return as a JSON array.
-        `;
-
-        const prompt = PromptTemplate.fromTemplate(template);
-        const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
-        const trends = await chain.invoke({ niche, descriptions });
-        return trends;
-      }
+      ]) as any;
+      const items = results?.['[data-test-id="pin"]'] || [];
+      return items.map((l: any) => ({
+        title: l.title || l.description || `${niche} Pin`,
+        platform: 'Pinterest',
+      }));
     } catch (e) {
-      console.warn('[MarketIntelligence] Trend scraping failed, using fallback:', (e as Error).message);
+      return this.fallbackToLLM(niche, 'Pinterest', userId);
     }
+  }
 
-    // AI-powered analysis fallback if browser scraping fails
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key') {
-      try {
-        const model = new ChatOpenAI({
-          modelName: 'gpt-4o-mini',
-          temperature: 0.3,
-          openAIApiKey: process.env.OPENAI_API_KEY,
-        });
+  private async fallbackToLLM(niche: string, platform: string, userId?: string): Promise<MarketListing[]> {
+    try {
+      const model = userId ? await resolveModelForUser(userId) : getDefaultModel();
+      const template = `Analyze digital product trends for "{niche}" on ${platform}. Return JSON array of objects with title, price (if applicable), tags, style, features, isBestSeller (boolean), platform: "${platform}".`;
+      const prompt = PromptTemplate.fromTemplate(template);
+      const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
+      const result = await chain.invoke({ niche }) as any;
+      return Array.isArray(result) ? result : [];
+    } catch (e) {
+      return [];
+    }
+  }
 
-        const template = `
-          Analyze current visual design trends relevant to the "{niche}" niche on TikTok and Pinterest.
-          Return a JSON array of 2-3 trending styles. Each object must have:
-          - style: string (name of the aesthetic, e.g. "Dark Academia", "Retro Wave")
-          - traction: "Extreme" | "High" | "Medium"
-          - platform: "TikTok" | "Pinterest" | "Instagram"
-          - description: string (brief explanation of why it's trending for this niche)
+  async fetchVisualTrends(niche: string, userId?: string): Promise<any[]> {
+    try {
+      const model = userId ? await resolveModelForUser(userId) : getDefaultModel();
+      const template = `Analyze TikTok and Pinterest trends for "{niche}". Return JSON array: style, traction, platform, description.`;
+      const prompt = PromptTemplate.fromTemplate(template);
+      const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
+      const result = await chain.invoke({ niche }) as any;
+      return Array.isArray(result) ? result : [];
+    } catch (e) {
+      return [];
+    }
+  }
 
-          Only respond with valid JSON array.
-        `;
-
-        const prompt = PromptTemplate.fromTemplate(template);
-        const chain = RunnableSequence.from([prompt, model, new StringOutputParser()]);
-
-        const result = await chain.invoke({ niche });
-        const parsed = JSON.parse(result);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+  async fetchCanvaTemplates(niche: string, userId?: string): Promise<any[]> {
+    try {
+      const results = await neuralBrowserService.executeAutomation(userId || 'system', [
+        { action: 'navigate', url: `https://www.canva.com/templates/?query=${encodeURIComponent(niche)}&pricing=free` },
+        { action: 'wait', value: '[data-testid="template-card"]' },
+        {
+          action: 'extract',
+          selector: '[data-testid="template-card"]',
+          multiple: true,
+          fields: {
+            title: 'img@alt',
+            thumbnail: 'img@src',
+            url: 'a@href'
+          }
         }
-      } catch (e) {
-        console.warn('[MarketIntelligence] Trend AI analysis failed:', (e as Error).message);
-      }
+      ]) as any;
+      const templates = results?.['[data-testid="template-card"]'] || [];
+      return Array.isArray(templates) ? templates : [];
+    } catch (e) {
+      console.warn('[MarketIntelligence] Canva scraping failed');
+      return [];
     }
-
-    // Smart fallback trends based on niche
-    return [
-      { style: `${niche} Signature Aesthetic`, traction: "High", platform: "TikTok", description: `Custom ${niche} visual language gaining traction` },
-      { style: "Modern Minimalism", traction: "Extreme", platform: "Pinterest", description: "Universal high-conversion style" },
-    ];
   }
 }
 

@@ -5,7 +5,7 @@ import { etsyService } from './etsyService.js';
 import { tiktokService } from './tiktokService.js';
 import { integrationService } from './integrationService.js';
 import { revenueOracle } from './revenueOracle.js';
-import { engagementMetrics } from '../db/sqlite-schema.js';
+import { loyaltyLoopWorker } from './loyaltyLoopWorker.js';
 
 /**
  * Growth Ingestion Orchestrator
@@ -42,7 +42,7 @@ export class GrowthIngestionOrchestrator {
         .where(eq(schema.integrations.isActive, true));
 
       // Group by userId to avoid duplicate processing
-      const userIds = [...new Set(integratedUsers.map((i: any) => i.userId))];
+      const userIds = [...new Set(integratedUsers.map((i: any) => i.userId as string))] as string[];
 
       for (const userId of userIds) {
         usersProcessed++;
@@ -106,17 +106,54 @@ export class GrowthIngestionOrchestrator {
     console.log(`[GrowthIngestion] Fetched ${sales.length} Etsy sales for user ${userId}`);
 
     // Transform and ingest
-    const transactions = sales.map((sale: any) => ({
-      amount: Math.round((sale.amount?.amount || 0) * 100), // Convert to cents
-      currency: sale.amount?.currency_code || 'usd',
-      id: sale.transaction_id?.toString() || sale.receipt_id?.toString() || `${uuidv4()}`,
-      date: sale.creation_tsz ? new Date(sale.creation_tsz * 1000) : new Date(),
-      customerEmail: sale.buyer?.email,
-      productName: sale.title || sale.listing_title || 'Etsy Product',
+    const transactions = await Promise.all(sales.map(async (sale: any) => {
+      const externalProductId = sale.listing_id?.toString();
+      let isAiGenerated = false;
+      let productId = null;
+
+      if (externalProductId) {
+        const [p] = await db.select().from(schema.products)
+          .where(eq(schema.products.externalProductId, externalProductId))
+          .limit(1);
+        if (p) {
+          isAiGenerated = p.isAiGenerated;
+          productId = p.id;
+        }
+      }
+
+      return {
+        amount: Math.round((sale.amount?.amount || 0) * 100), // Convert to cents
+        currency: sale.amount?.currency_code || 'usd',
+        id: sale.transaction_id?.toString() || sale.receipt_id?.toString() || `${uuidv4()}`,
+        date: sale.creation_tsz ? new Date(sale.creation_tsz * 1000) : new Date(),
+        customerEmail: sale.buyer?.email,
+        productName: sale.title || sale.listing_title || 'Etsy Product',
+        productId,
+        isAiGenerated,
+        attributionSource: isAiGenerated ? 'etsy_listing_match' : null,
+      };
     }));
 
-    // Feed into Revenue Oracle — triggers milestone & thank-you email flow
+    // Feed into Revenue Oracle — triggers milestone tracking
     await revenueOracle.ingestFromPlatform(userId, 'etsy', transactions);
+
+    // Trigger Loyalty Loop — AI-drafted thank-you + review request flow
+    for (const txn of transactions) {
+      if (txn.customerEmail) {
+        try {
+          await loyaltyLoopWorker.processPurchase({
+            transactionId: txn.id,
+            userId,
+            customerEmail: txn.customerEmail,
+            productName: txn.productName || 'Product',
+            amount: txn.amount,
+            niche: 'etsy', // Will be refined with actual niche data
+          });
+        } catch (err) {
+          console.error(`[GrowthIngestion] Loyalty loop failed for ${txn.customerEmail}:`, err);
+        }
+      }
+    }
 
     return transactions.length;
   }
@@ -146,7 +183,7 @@ export class GrowthIngestionOrchestrator {
       try {
         const videoId = video.id || `tt_${uuidv4()}`;
         
-        await db.insert(engagementMetrics).values({
+        await db.insert(schema.engagementMetrics).values({
           id: uuidv4(),
           userId,
           platform: 'tiktok',

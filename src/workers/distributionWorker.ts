@@ -3,6 +3,7 @@ import { redisConnection } from '../config/redis.js';
 import { metaService } from '../services/metaService.js';
 import { tiktokService } from '../services/tiktokService.js';
 import { youtubeService } from '../services/youtubeService.js';
+import { pinterestService } from '../services/pinterestService.js';
 import { hunterGathererService } from '../services/hunterGathererService.js';
 import { webSocketService } from '../services/websocketService.js';
 import { notificationService } from '../services/notificationService.js';
@@ -31,7 +32,9 @@ export const startDistributionWorker = () => {
 
         try {
             if (platform === 'instagram' || platform === 'facebook') {
-                result = await metaService.publishPost(userId, { ...content, caption, imageUrl });
+                result = await metaService.publishPost(userId, { ...content, caption, imageUrl, platform });
+            } else if (platform === 'pinterest') {
+                result = await pinterestService.publishPost(userId, { ...content, caption, imageUrl, platform });
             } else if (platform === 'tiktok') {
                 result = await tiktokService.publishVideo(
                     userId, 
@@ -46,6 +49,10 @@ export const startDistributionWorker = () => {
                     title,
                     caption
                 );
+            } else if (platform === 'etsy' || platform === 'fiverr' || platform === 'shopify') {
+                // Route Marketplace listings through the ListingEngine or Hunter-Gatherer
+                console.log(`[DistributionWorker] Routing ${platform} to neural browser...`);
+                throw new Error(`API distribution restricted for ${platform}. Triggering Browser Agent.`);
             } else {
                 throw new Error(`Platform ${platform} not supported for distribution`);
             }

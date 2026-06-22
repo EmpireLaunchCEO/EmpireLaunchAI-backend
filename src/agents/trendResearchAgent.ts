@@ -1,4 +1,4 @@
-import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { MemoryVectorStore } from "@langchain/classic/vectorstores/memory";
 import { Document } from "@langchain/core/documents";
 import { researchService } from "../services/researchService.js";
@@ -11,15 +11,29 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export class TrendResearchAgent {
-  private embeddings: OpenAIEmbeddings;
+  private embeddings: GoogleGenerativeAIEmbeddings;
 
   constructor() {
-    this.embeddings = new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY,
-    });
+    if (!process.env.GOOGLE_API_KEY) {
+      console.warn('[TrendResearchAgent] GOOGLE_API_KEY not found. Agent will operate in reduced mode.');
+      // Initialize with a dummy key to prevent crash if not used immediately
+      this.embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: 'DUMMY_KEY',
+        modelName: "embedding-001",
+      });
+    } else {
+      this.embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: process.env.GOOGLE_API_KEY,
+        modelName: "embedding-001",
+      });
+    }
   }
 
   async analyzeTrends(goal: string, userId?: string) {
+    if (!process.env.GOOGLE_API_KEY) {
+       console.error('[TrendResearchAgent] Cannot analyze trends: GOOGLE_API_KEY is missing.');
+       return JSON.stringify({ trendingNiches: [], suggestedStrategy: "Market research requires a configured GOOGLE_API_KEY." });
+    }
     console.log("Ingesting trend data...");
     const rawData = await researchService.getAllTrends();
 

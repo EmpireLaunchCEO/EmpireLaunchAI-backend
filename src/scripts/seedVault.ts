@@ -1,6 +1,6 @@
 import { dnaVaultService } from '../services/dnaVaultService.js';
-import { db } from '../db/index.js';
-import { dnaStrands } from '../db/sqlite-schema.js';
+import { db, schema } from '../db/index.js';
+const { dnaStrands } = schema;
 
 async function seed() {
   console.log('🌱 Seeding DNA Vault...');
