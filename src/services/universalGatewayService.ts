@@ -353,6 +353,13 @@ class UniversalGatewayService {
     const config = this.getConfig(platform);
     if (!config) throw new Error(`Platform ${platform} not supported`);
 
+    const clientId = config.clientId();
+    if (!clientId || clientId === 'mock' || clientId.includes('placeholder')) {
+      const error = new Error('MISSING_KEYS');
+      (error as any).key = `${platform.toUpperCase()}_CLIENT_ID`;
+      throw error;
+    }
+
     const state = crypto.randomBytes(16).toString('hex');
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
@@ -466,31 +473,31 @@ class UniversalGatewayService {
     let accountId: string | undefined = tokenData.shop_id || tokenData.sub?.toString();
 
     try {
-      if (platform === 'tiktok') {
+      if (config.platform === 'tiktok') {
         const profileRes = await axios.get('https://open.tiktokapis.com/v2/user/info/?fields=username', {
           headers: { Authorization: `Bearer ${tokenData.access_token}` }
         });
         accountHandle = `@${profileRes.data.data.user.username}`;
         accountId = profileRes.data.data.user.open_id;
-      } else if (platform === 'google') {
+      } else if (config.platform === 'google') {
         const profileRes = await axios.get('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
           headers: { Authorization: `Bearer ${tokenData.access_token}` }
         });
         accountHandle = profileRes.data.items?.[0]?.snippet?.title;
         accountId = profileRes.data.items?.[0]?.id;
-      } else if (platform === 'meta') {
+      } else if (config.platform === 'meta') {
         const profileRes = await axios.get('https://graph.facebook.com/v18.0/me?fields=name', {
           headers: { Authorization: `Bearer ${tokenData.access_token}` }
         });
         accountHandle = profileRes.data.name;
         accountId = profileRes.data.id;
-      } else if (platform === 'canva') {
+      } else if (config.platform === 'canva') {
         const profileRes = await axios.get('https://api.canva.com/v1/users/me', {
           headers: { Authorization: `Bearer ${tokenData.access_token}` }
         });
         accountHandle = profileRes.data.team_name || profileRes.data.name;
         accountId = profileRes.data.id;
-      } else if (platform === 'etsy') {
+      } else if (config.platform === 'etsy') {
         const profileRes = await axios.get('https://api.etsy.com/v3/application/shops', {
           headers: {
             Authorization: `Bearer ${tokenData.access_token}`,
@@ -500,7 +507,7 @@ class UniversalGatewayService {
         const shop = profileRes.data.results?.[0];
         accountHandle = shop?.shop_name;
         accountId = shop?.shop_id?.toString();
-      } else if (platform === 'fiverr') {
+      } else if (config.platform === 'fiverr') {
         const profileRes = await axios.get('https://api.fiverr.com/v2/users/me', {
           headers: { Authorization: `Bearer ${tokenData.access_token}` }
         });
