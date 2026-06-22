@@ -149,3 +149,4 @@ app.get('/infra-health-v13', (req, res) => {
 export default app;
 /* Wake up Railway - Attempt 3 */
 /* Force build Mon Jun 22 22:57:48 UTC 2026 */
+/* Force Railway redeploy - Mon Jun 22 23:53:15 UTC 2026 */
