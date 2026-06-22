@@ -9,12 +9,6 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install build dependencies for native modules
-RUN apt-get update && apt-get install -y \
-    make \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY package*.json ./
 # Use --legacy-peer-deps to avoid the recursive dependency issues we saw on Vercel
 RUN npm install --legacy-peer-deps
@@ -27,7 +21,7 @@ RUN npm prune --production
 
 FROM node:20-slim
 
-# Install python3 in runtime image as well, just in case
+# Some native modules might need python3 at runtime (rare but happens)
 RUN apt-get update && apt-get install -y \
     python3 \
     && rm -rf /var/lib/apt/lists/*
