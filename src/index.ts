@@ -139,7 +139,7 @@ app.use('/api/dispatch', dispatchRoutes);
 app.use('/api/integrations', integrationRoutes);
 app.use('/api/mobile', mobileRoutes);
 
-app.get('/health', (req, res) => {
+app.get(''/infra-health-v13', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_infra_fix_v13' });
 });
 
