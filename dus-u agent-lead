@@ -1,0 +1,71 @@
+[1mdiff --git a/Dockerfile b/Dockerfile[m
+[1mindex 00abc64..e0265c6 100644[m
+[1m--- a/Dockerfile[m
+[1m+++ b/Dockerfile[m
+[36m@@ -1,48 +1,20 @@[m
+[31m-# Cache breaker: 1782170109090[m
+[31m-FROM node:20-bullseye AS builder[m
+[32m+[m[32mFROM node:20-bullseye[m
+ [m
+[31m-# Install build dependencies for native modules[m
+[32m+[m[32m# Install runtime dependencies[m
+ RUN apt-get update && apt-get install -y \[m
+[31m-    python3 \[m
+[31m-    make \[m
+[31m-    g++ \[m
+[31m-    libvips-dev \[m
+[31m-    libfftw3-dev \[m
+[31m-    build-essential \[m
+[31m-    pkg-config \[m
+[32m+[m[32m    libvips42 \[m
+[32m+[m[32m    ffmpeg \[m
+[32m+[m[32m    ca-certificates \[m
+     && rm -rf /var/lib/apt/lists/*[m
+ [m
+ WORKDIR /app[m
+ [m
+ COPY package*.json ./[m
+[31m-# Use --legacy-peer-deps to avoid the recursive dependency issues we saw on Vercel[m
+ RUN npm install --legacy-peer-deps[m
+ [m
+ COPY . .[m
+ RUN npm run build[m
+ [m
+[31m-# Prune dev dependencies[m
+[31m-RUN npm prune --production[m
+[31m-[m
+[31m-FROM node:20-bullseye-slim[m
+[31m-[m
+[31m-# Runtime dependencies[m
+[31m-RUN apt-get update && apt-get install -y \[m
+[31m-    libvips42 \[m
+[31m-    ffmpeg \[m
+[31m-    && rm -rf /var/lib/apt/lists/*[m
+[31m-[m
+[31m-WORKDIR /app[m
+[31m-[m
+[31m-# Copy production node_modules from builder[m
+[31m-COPY --from=builder /app/package*.json ./[m
+[31m-COPY --from=builder /app/node_modules ./node_modules[m
+[31m-COPY --from=builder /app/dist ./dist[m
+[31m-COPY --from=builder /app/drizzle ./drizzle[m
+[31m-COPY --from=builder /app/drizzle-pg ./drizzle-pg[m
+[31m-COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts[m
+[31m-COPY --from=builder /app/drizzle-pg.config.ts ./drizzle-pg.config.ts[m
+[31m-[m
+ # Ensure production environment[m
+ ENV NODE_ENV=production[m
+ ENV PORT=3000[m
+[1mdiff --git a/src/index.ts b/src/index.ts[m
+[1mindex d20c5f8..be773bc 100644[m
+[1m--- a/src/index.ts[m
+[1m+++ b/src/index.ts[m
+[36m@@ -140,7 +140,7 @@[m [mapp.use('/api/integrations', integrationRoutes);[m
+ app.use('/api/mobile', mobileRoutes);[m
+ [m
+ app.get('/health', (req, res) => {[m
+[31m-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_force_docker_v10' });[m
+[32m+[m[32m  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_final_docker_v11' });[m
+ });[m
+ [m
+ export default app;[m
