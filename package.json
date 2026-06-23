@@ -1,6 +1,6 @@
 {
   "name": "bizrunner-backend",
-  "version": "3.1.2-emergency-v14-final",
+  "version": "3.1.2-debug-reg-v3",
   "description": "",
   "main": "index.js",
   "scripts": {
