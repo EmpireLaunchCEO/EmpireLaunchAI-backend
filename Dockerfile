@@ -1,6 +1,6 @@
-# Cache breaker v14 - Tue Jun 23 00:01:09 UTC 2026
-# Cache breaker: 1782170110003
-FROM node:20-bullseye AS builder
+# Cache breaker v14_final_forced - Tue Jun 23 00:15:00 UTC 2026
+# Cache breaker: 1782170110100
+FROM node:20.14-bullseye AS builder
 
 # Install build dependencies for native modules
 RUN apt-get update && apt-get install -y \
@@ -25,7 +25,7 @@ RUN npm run build
 # Prune dev dependencies
 RUN npm prune --production
 
-FROM node:20-bullseye-slim
+FROM node:20.14-bullseye-slim
 
 # Runtime dependencies
 RUN apt-get update && apt-get install -y \
