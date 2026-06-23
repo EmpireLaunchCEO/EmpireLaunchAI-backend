@@ -142,6 +142,15 @@ app.use('/api/mobile', mobileRoutes);
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14_final' });
 });
+
+app.get('/debug-build', (req, res) => {
+  res.json({ 
+    message: 'Build successful', 
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV,
+    version: 'v3.1.2_emergency_v14_final'
+  });
+});
 app.get('/infra-health-v13', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14_final' });
 });
