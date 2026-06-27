@@ -20,6 +20,14 @@ export const OWNER_CONFIG = {
   masterKey: 'OWNER-ADMIN-MAX-ACCESS',
 
   /**
+   * Additional promotional or family master keys.
+   */
+  allowedMasterKeys: [
+    'OWNER-ADMIN-MAX-ACCESS',
+    'EMPIRE-SON-ULTIMATE'
+  ],
+
+  /**
    * Whether to send a startup notification to the owner.
    * When true, the notification service emails the owner on system boot.
    */

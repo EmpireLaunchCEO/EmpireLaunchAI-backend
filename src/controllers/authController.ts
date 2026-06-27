@@ -237,7 +237,7 @@ export const redeemKey = async (req: Request, res: Response) => {
   if (!userId || !key) return res.status(400).json({ error: 'Missing userId or key' });
   try {
     const cleanKey = key.trim().toUpperCase();
-    if (cleanKey === OWNER_CONFIG.masterKey) {
+    if (OWNER_CONFIG.allowedMasterKeys.includes(cleanKey as any)) {
       await db.update(users).set({ tier: 'EMPIRE_MASTER', businessSlots: 5, updatedAt: new Date() }).where(eq(users.id, userId));
       return res.json({ status: 'success', message: 'Master access granted' });
     }
