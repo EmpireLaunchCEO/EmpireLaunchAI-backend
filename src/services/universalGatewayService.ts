@@ -319,8 +319,120 @@ class UniversalGatewayService {
         extraAuthParams: { response_type: 'code' },
         extraTokenParams: { grant_type: 'authorization_code' },
         tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      },
-    ];
+        },
+
+        // ─── AMAZON ────────────────────────────────────────────────
+        {
+          platform: 'amazon',
+          authUrl: 'https://www.amazon.com/ap/oa',
+          tokenUrl: 'https://api.amazon.com/auth/o2/token',
+          scopes: ['profile', 'spapi:listings'],
+          usePKCE: true,
+          clientId: () => process.env.AMAZON_CLIENT_ID || '',
+          clientSecret: () => process.env.AMAZON_CLIENT_SECRET || '',
+          redirectUri: () => process.env.AMAZON_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── EBAY ──────────────────────────────────────────────────
+        {
+          platform: 'ebay',
+          authUrl: 'https://auth.ebay.com/oauth2/authorize',
+          tokenUrl: 'https://api.ebay.com/identity/v1/oauth2/token',
+          scopes: ['https://api.ebay.com/oauth/api_scope/sell.inventory', 'https://api.ebay.com/oauth/api_scope/sell.fulfillment'],
+          usePKCE: true,
+          clientId: () => process.env.EBAY_CLIENT_ID || '',
+          clientSecret: () => process.env.EBAY_CLIENT_SECRET || '',
+          redirectUri: () => process.env.EBAY_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code', prompt: 'login' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── SQUARESPACE ───────────────────────────────────────────
+        {
+          platform: 'squarespace',
+          authUrl: 'https://account.squarespace.com/api/oauth/authorize',
+          tokenUrl: 'https://api.squarespace.com/api/v1/oauth/token',
+          scopes: ['commerce:read', 'commerce:write', 'content:read', 'content:write'],
+          usePKCE: true,
+          clientId: () => process.env.SQUARESPACE_CLIENT_ID || '',
+          clientSecret: () => process.env.SQUARESPACE_CLIENT_SECRET || '',
+          redirectUri: () => process.env.SQUARESPACE_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── WIX ────────────────────────────────────────────────────
+        {
+          platform: 'wix',
+          authUrl: 'https://www.wix.com/oauth/authorize',
+          tokenUrl: 'https://www.wix.com/oauth/access',
+          scopes: ['online-store.read', 'online-store.write', 'contacts.read'],
+          usePKCE: true,
+          clientId: () => process.env.WIX_CLIENT_ID || '',
+          clientSecret: () => process.env.WIX_CLIENT_SECRET || '',
+          redirectUri: () => process.env.WIX_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── GUMROAD ───────────────────────────────────────────────
+        {
+          platform: 'gumroad',
+          authUrl: 'https://gumroad.com/oauth/authorize',
+          tokenUrl: 'https://api.gumroad.com/oauth/token',
+          scopes: ['sales:read', 'products:read', 'products:write'],
+          usePKCE: true,
+          clientId: () => process.env.GUMROAD_CLIENT_ID || '',
+          clientSecret: () => process.env.GUMROAD_CLIENT_SECRET || '',
+          redirectUri: () => process.env.GUMROAD_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── PATREON ───────────────────────────────────────────────
+        {
+          platform: 'patreon',
+          authUrl: 'https://www.patreon.com/oauth2/authorize',
+          tokenUrl: 'https://www.patreon.com/api/oauth2/token',
+          scopes: ['identity', 'identity.memberships', 'campaigns'],
+          usePKCE: true,
+          clientId: () => process.env.PATREON_CLIENT_ID || '',
+          clientSecret: () => process.env.PATREON_CLIENT_SECRET || '',
+          redirectUri: () => process.env.PATREON_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── LINKEDIN ──────────────────────────────────────────────
+        {
+          platform: 'linkedin',
+          authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+          tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+          scopes: ['profile', 'w_member_social', 'rw_organization_admin'],
+          usePKCE: true,
+          clientId: () => process.env.LINKEDIN_CLIENT_ID || '',
+          clientSecret: () => process.env.LINKEDIN_CLIENT_SECRET || '',
+          redirectUri: () => process.env.LINKEDIN_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+
+        // ─── TWITCH ─────────────────────────────────────────────────
+        {
+          platform: 'twitch',
+          authUrl: 'https://id.twitch.tv/oauth2/authorize',
+          tokenUrl: 'https://id.twitch.tv/oauth2/token',
+          scopes: ['user:read:email', 'channel:read:stream_key', 'channel:manage:broadcast'],
+          usePKCE: true,
+          clientId: () => process.env.TWITCH_CLIENT_ID || '',
+          clientSecret: () => process.env.TWITCH_CLIENT_SECRET || '',
+          redirectUri: () => process.env.TWITCH_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+        ];
   }
 
   /**
