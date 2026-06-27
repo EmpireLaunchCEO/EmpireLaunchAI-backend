@@ -1,3 +1,6 @@
+# Cache breaker: bump this to force a fresh build (bypasses Railway's corrupted "wheelhouse" cache)
+ARG CACHE_BREAKER=v22-cache-purge
+
 FROM node:20.14-bullseye AS builder
 WORKDIR /app
 COPY package*.json ./

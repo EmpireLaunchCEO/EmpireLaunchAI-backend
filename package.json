@@ -1,6 +1,6 @@
 {
   "name": "bizrunner-backend",
-  "version": "3.1.2-emergency-v15-final-fix",
+  "version": "3.1.2-emergency-v22-cache-purge",
   "description": "",
   "main": "index.js",
   "scripts": {
