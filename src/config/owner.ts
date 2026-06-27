@@ -17,12 +17,13 @@ export const OWNER_CONFIG = {
    * This bypasses all standard authorization checks.
    * Keep this value in sync with authController.ts.
    */
-  masterKey: 'OWNER-ADMIN-MAX-ACCESS',
+  masterKey: 'OWNER-MAX-ADMIN',
 
   /**
    * Additional promotional or family master keys.
    */
   allowedMasterKeys: [
+    'OWNER-MAX-ADMIN',
     'OWNER-ADMIN-MAX-ACCESS',
     'EMPIRE-SON-ULTIMATE'
   ],
