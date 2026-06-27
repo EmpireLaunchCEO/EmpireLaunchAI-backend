@@ -234,10 +234,24 @@ export const tiktokCallback = async (req: Request, res: Response) => {
 
 export const redeemKey = async (req: Request, res: Response) => {
   const { userId, key } = req.body;
-  if (!userId || !key) return res.status(400).json({ error: 'Missing userId or key' });
+  if (!key) return res.status(400).json({ error: 'Missing key' });
+  
   try {
     const cleanKey = key.trim().toUpperCase();
-    if (OWNER_CONFIG.allowedMasterKeys.includes(cleanKey as any)) {
+    const isMasterKey = OWNER_CONFIG.allowedMasterKeys.includes(cleanKey as any);
+    
+    // If no userId, we are just verifying the key's existence and validity
+    if (!userId) {
+      if (isMasterKey) {
+        return res.json({ status: 'success', message: 'Master key valid' });
+      }
+      const [accessKey] = await db.select().from(schema.accessKeys).where(eq(schema.accessKeys.key, key)).limit(1);
+      if (!accessKey || accessKey.isUsed) return res.status(400).json({ error: 'Invalid or used key' });
+      return res.json({ status: 'success', message: 'Key valid' });
+    }
+
+    // Standard redemption logic with userId
+    if (isMasterKey) {
       await db.update(users).set({ tier: 'EMPIRE_MASTER', businessSlots: 3, updatedAt: new Date() }).where(eq(users.id, userId));
       return res.json({ status: 'success', message: 'Master access granted' });
     }
