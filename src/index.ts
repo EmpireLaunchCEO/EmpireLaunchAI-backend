@@ -155,10 +155,11 @@ app.get('/infra-health-v13', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_emergency_v14' });
 });
 
+// Global Express error handler to prevent crashes
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error('[GlobalErrorHandler]', err?.message || err);
+  res.status(err?.status || 500).json({ error: err?.message || 'Internal server error' });
+});
+
 export default app;
-/* Wake up Railway - Attempt 3 */
-/* Force build Mon Jun 22 22:57:48 UTC 2026 */
-/* Force Railway redeploy - Mon Jun 22 23:53:15 UTC 2026 */
-/* Force Railway redeploy - Tue Jun 23 00:01:09 UTC 2026 */
-/* Force Railway redeploy - backend-dev - Tue Jun 23 00:32:05 UTC 2026 */
-/* Force Railway redeploy - backend-dev - Tue Jun 23 00:41:20 UTC 2026 */
+/* Tech Troubleshooter Fix - Sat Jun 27 20:45:00 UTC 2026 */

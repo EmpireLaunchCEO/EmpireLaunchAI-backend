@@ -1,5 +1,6 @@
-# Cache breaker v15_final_fix - Tue Jun 23 02:10:00 UTC 2026
-# Cache breaker: 1719108600000
+# Cache breaker v16_tech_troubleshooter_fix - Sat Jun 27 20:40:00 UTC 2026
+# Cache breaker: 1748541600000
+# FIX: Removed Dockerfile/railway.toml from .dockerignore to ensure proper build context
 FROM node:20.14-bullseye AS builder
 
 # Install build dependencies for native modules
