@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python3"]
+
+[phases.install]
+cmds = ["echo 'nixpacks: using Dockerfile for build'"]
+
+[deploy]
+path = "/health"
