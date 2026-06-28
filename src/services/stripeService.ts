@@ -8,13 +8,23 @@ import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-  apiVersion: '2025-01-27-acacia' as any,
-});
+let stripe: Stripe;
+function getStripe(): Stripe {
+  if (!stripe) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) {
+      throw new Error('STRIPE_SECRET_KEY not configured. Stripe operations unavailable.');
+    }
+    stripe = new Stripe(key, {
+      apiVersion: '2025-01-27-acacia' as any,
+    });
+  }
+  return stripe;
+}
 
 export class StripeService {
   async createConnectAccount(email: string) {
-    const account = await stripe.accounts.create({
+    const account = await getStripe().accounts.create({
       type: 'express',
       email,
       capabilities: {
@@ -26,7 +36,7 @@ export class StripeService {
   }
 
   async createAccountLink(accountId: string, returnUrl: string, refreshUrl: string) {
-    const accountLink = await stripe.accountLinks.create({
+    const accountLink = await getStripe().accountLinks.create({
       account: accountId,
       refresh_url: refreshUrl,
       return_url: returnUrl,
@@ -36,14 +46,14 @@ export class StripeService {
   }
 
   async createProductAndPrice(accountId: string, name: string, description: string, priceInCents: number) {
-    const product = await stripe.products.create({
+    const product = await getStripe().products.create({
       name,
       description,
     }, {
       stripeAccount: accountId,
     });
 
-    const price = await stripe.prices.create({
+    const price = await getStripe().prices.create({
       unit_amount: priceInCents,
       currency: 'usd',
       product: product.id,
@@ -55,7 +65,7 @@ export class StripeService {
   }
 
   async createPaymentLink(accountId: string, priceId: string) {
-    const paymentLink = await stripe.paymentLinks.create({
+    const paymentLink = await getStripe().paymentLinks.create({
       line_items: [
         {
           price: priceId,
@@ -92,14 +102,14 @@ export class StripeService {
   }
 
   async getAccount(accountId: string) {
-    return await stripe.accounts.retrieve(accountId);
+    return await getStripe().accounts.retrieve(accountId);
   }
 
   /**
    * Triggers an Instant Payout to the user's linked debit card.
    */
   async triggerInstantPayout(userId: string, accountId: string, amountInCents: number) {
-    const balance = await stripe.balance.retrieve({}, { stripeAccount: accountId });
+    const balance = await getStripe().balance.retrieve({}, { stripeAccount: accountId });
     const totalAvailable = balance.available.reduce((sum, b) => sum + b.amount, 0);
 
     const withdrawalLimit = await revenueOracle.getWithdrawalLimit(userId, totalAvailable);
@@ -110,7 +120,7 @@ export class StripeService {
 
     console.log(`[Stripe] Triggering Instant Payout for user ${userId}: ${(amountInCents / 100).toFixed(2)}`);
 
-    return await stripe.payouts.create({
+    return await getStripe().payouts.create({
       amount: amountInCents,
       currency: 'usd',
       method: 'instant',
@@ -123,7 +133,7 @@ export class StripeService {
    * Transfers funds to user account while respecting Pending Dues lock.
    */
   async transferToUser(userId: string, accountId: string, amountInCents: number) {
-    const balance = await stripe.balance.retrieve({}, { stripeAccount: accountId });
+    const balance = await getStripe().balance.retrieve({}, { stripeAccount: accountId });
     const totalAvailable = balance.available.reduce((sum, b) => sum + b.amount, 0);
     
     const withdrawalLimit = await revenueOracle.getWithdrawalLimit(userId, totalAvailable);
@@ -132,7 +142,7 @@ export class StripeService {
       throw new Error(`Withdrawal exceeds limit. Available after dues: ${(withdrawalLimit / 100).toFixed(2)}`);
     }
 
-    return await stripe.transfers.create({
+    return await getStripe().transfers.create({
       amount: amountInCents,
       currency: 'usd',
       destination: accountId,
@@ -163,7 +173,7 @@ export class StripeService {
   }
 
   async createPlatformCheckoutSession(userId: string, returnUrl: string) {
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
         {
@@ -189,11 +199,11 @@ export class StripeService {
   }
 
   async getSession(sessionId: string) {
-    return await stripe.checkout.sessions.retrieve(sessionId);
+    return await getStripe().checkout.sessions.retrieve(sessionId);
   }
 
   async createFinancialConnectionsSession(accountId: string, userId: string) {
-    const session = await stripe.financialConnections.sessions.create({
+    const session = await getStripe().financialConnections.sessions.create({
       account_holder: {
         type: 'account',
         account: accountId,
