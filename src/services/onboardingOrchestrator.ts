@@ -4,6 +4,7 @@ import { integrationService } from './integrationService.js';
 import { canvaDnaService } from './canvaDnaService.js';
 import { vaultService } from './vaultService.js';
 import { neuralBrowserService } from './neuralBrowserService.js';
+import { universalGatewayService } from './universalGatewayService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
@@ -146,6 +147,40 @@ export class OnboardingOrchestrator {
     }
   }
 
+  /**
+   * Check if OAuth credentials are configured for a platform.
+   */
+  private hasOAuthCredentials(platform: string): boolean {
+    const config = universalGatewayService.getConfig(platform);
+    if (!config) return false;
+    const clientId = config.clientId();
+    const clientSecret = config.clientSecret();
+    return !!(clientId && clientSecret && 
+      clientId !== 'mock' && !clientId.includes('placeholder') &&
+      clientSecret !== 'mock' && !clientSecret.includes('placeholder'));
+  }
+
+  /**
+   * Platforms that have OAuth config available.
+   */
+  private oauthCapablePlatforms: string[] = [
+    'canva', 'etsy', 'tiktok', 'tiktok_shop', 'meta', 'google',
+    'pinterest', 'shopify', 'amazon', 'ebay', 'squarespace', 'wix',
+    'gumroad', 'patreon', 'linkedin', 'twitch', 'fiverr',
+    'microsoft', 'woocommerce', 'shipstation', 'printful', 'printify'
+  ];
+
+  /**
+   * Map alias platforms to their OAuth config name.
+   */
+  private resolveOAuthPlatform(platform: string): string {
+    const aliasMap: Record<string, string> = {
+      instagram: 'meta', facebook: 'meta',
+      youtube: 'google', gmail: 'google'
+    };
+    return aliasMap[platform] || platform;
+  }
+
   // Moved to onboardingWorker.ts for async execution
   public async processOnboarding(sessionId: string, userId: string, platform: string) {
     console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
@@ -153,7 +188,6 @@ export class OnboardingOrchestrator {
     try {
       let userNiche: string | undefined;
 
-      // Get the user's niche from their latest goal
       const latestGoal = await this.getLatestUserGoal(userId);
       if (latestGoal?.description) {
         const nicheMatch = latestGoal.description.match(/Empire Niche:\s*([^.]+)/i);
@@ -163,29 +197,54 @@ export class OnboardingOrchestrator {
       }
 
       const platformLower = platform.toLowerCase();
+      const oauthPlatform = this.resolveOAuthPlatform(platformLower);
+      const hasOAuth = this.oauthCapablePlatforms.includes(oauthPlatform) && 
+                        this.hasOAuthCredentials(oauthPlatform);
 
-      if (platformLower === 'canva') {
-        await this.executeCanvaFlow(sessionId, userId);
-      } else if (platformLower === 'etsy') {
-        await this.executeEtsyFlow(sessionId, userId);
-      } else if (platformLower === 'tiktok') {
-        await this.executeTikTokFlow(sessionId, userId);
-      } else if (platformLower === 'godaddy') {
-        await this.executeGoDaddyFlow(sessionId, userId);
-      } else if (platformLower === 'systeme_io') {
-        await this.executeSystemeIoFlow(sessionId, userId);
-      } else if (platformLower === 'behance') {
-        await this.executeBehanceFlow(sessionId, userId);
-      } else if (platformLower === 'figma') {
-        await this.executeFigmaFlow(sessionId, userId);
-      } else if (platformLower === 'kittl') {
-        await this.executeKittlFlow(sessionId, userId);
-      } else if (platformLower === 'redbubble') {
-        await this.executeRedbubbleFlow(sessionId, userId);
-      } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
-        await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
+      if (hasOAuth) {
+        // OAuth priority path — API keys configured
+        console.log(`[OnboardingOrchestrator] Using OAuth for ${platform}`);
+        const { url, state, sessionId: oauthSessionId } = await universalGatewayService.initiateOAuth(
+          userId, oauthPlatform
+        );
+        await db.update(onboardingSessions)
+          .set({ 
+            status: 'in_progress', 
+            currentState: 'OAUTH_AUTHORIZATION',
+            metadata: { oauthUrl: url, oauthState: state, oauthSessionId },
+            updatedAt: new Date() 
+          })
+          .where(eq(onboardingSessions.id, sessionId));
+        webSocketService.notifyUser(userId, 'ai-log', {
+          message: `[ONBOARD] 🔗 ${platform} OAuth ready. Open the authorization link in your browser.`
+        });
       } else {
-        throw new Error(`Platform ${platform} not supported yet`);
+        // Browser handshake path — Universal Neural Handshake
+        console.log(`[OnboardingOrchestrator] Using Neural Handshake (browser) for ${platform}`);
+        
+        if (platformLower === 'canva') {
+          await this.executeCanvaFlow(sessionId, userId);
+        } else if (platformLower === 'etsy') {
+          await this.executeEtsyFlow(sessionId, userId);
+        } else if (platformLower === 'tiktok') {
+          await this.executeTikTokFlow(sessionId, userId);
+        } else if (platformLower === 'godaddy') {
+          await this.executeGoDaddyFlow(sessionId, userId);
+        } else if (platformLower === 'systeme_io') {
+          await this.executeSystemeIoFlow(sessionId, userId);
+        } else if (platformLower === 'behance') {
+          await this.executeBehanceFlow(sessionId, userId);
+        } else if (platformLower === 'figma') {
+          await this.executeFigmaFlow(sessionId, userId);
+        } else if (platformLower === 'kittl') {
+          await this.executeKittlFlow(sessionId, userId);
+        } else if (platformLower === 'redbubble') {
+          await this.executeRedbubbleFlow(sessionId, userId);
+        } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
+          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
+        } else {
+          throw new Error(`No browser flow defined for ${platform}`);
+        }
       }
 
       // ─── DNA HUNT TRIGGER ───────────────────────────────────────────────
