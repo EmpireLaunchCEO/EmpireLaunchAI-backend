@@ -9,6 +9,7 @@
     "build": "tsc",
     "build-vercel": "tsc",
     "build-local": "tsc",
+    "postinstall": "npx playwright install chromium --with-deps || true",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "smoke-test": "NODE_OPTIONS='--loader ts-node/esm' node src/smokeTest.ts"

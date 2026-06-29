@@ -3,19 +3,17 @@ import { goDaddyService } from './goDaddyService.js';
 import { integrationService } from './integrationService.js';
 import { canvaDnaService } from './canvaDnaService.js';
 import { vaultService } from './vaultService.js';
-import { universalGatewayService } from './universalGatewayService.js';
+import { neuralBrowserService } from './neuralBrowserService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { exec, execSync } from 'child_process';
-import { promisify } from 'util';
+import { chromium, Browser, Page } from 'playwright';
 import { encryptWithEnvelope } from '../utils/encryption.js';
 import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
 import { webSocketService } from './websocketService.js';
 import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';
 import { autoOnboardingService } from './autoOnboardingService.js';
 
-const execPromise = promisify(exec);
 const { onboardingSessions, ownershipVault, goals } = schema;
 
 export interface OnboardingAction {
@@ -50,81 +48,102 @@ export class OnboardingOrchestrator {
   }
 
   /**
-   * Platforms that have official OAuth support via universalGatewayService.
-   * For these, we can skip the browser-based flow when agent-browser is unavailable.
+   * Playwright-based browser operations for the Neural Handshake.
+   * Replaces the agent-browser CLI tool with direct Playwright API calls.
    */
-  private oauthPlatforms: string[] = [
-    'canva', 'etsy', 'tiktok', 'tiktok_shop', 'meta', 'google',
-    'pinterest', 'shopify', 'amazon', 'ebay', 'squarespace', 'wix',
-    'gumroad', 'patreon', 'linkedin', 'twitch', 'fiverr',
-    'microsoft', 'woocommerce', 'shipstation', 'printful', 'printify'
-  ];
+  private browser: Browser | null = null;
+  private page: Page | null = null;
 
   /**
-   * Check if agent-browser CLI is available in the current environment.
+   * Initialize the browser for automation.
    */
-  private isAgentBrowserAvailable(): boolean {
-    try {
-      execSync('which agent-browser 2>/dev/null || command -v agent-browser 2>/dev/null', { stdio: 'pipe' });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Validate that required environment variables are set for a platform's OAuth flow.
-   * Returns array of missing var names (empty = all present).
-   */
-  private validatePlatformEnvVars(platform: string): string[] {
-    const config = universalGatewayService.getConfig(platform);
-    if (!config) return [`No OAuth config found for ${platform}`];
-    
-    const required: string[] = [];
-    const clientId = config.clientId();
-    const clientSecret = config.clientSecret();
-    const redirectUri = config.redirectUri();
-    
-    if (!clientId || clientId === 'mock' || clientId.includes('placeholder')) {
-      required.push(`${platform.toUpperCase()}_CLIENT_ID`);
-    }
-    if (!clientSecret || clientSecret === 'mock' || clientSecret.includes('placeholder')) {
-      required.push(`${platform.toUpperCase()}_CLIENT_SECRET`);
-    }
-    if (!redirectUri || redirectUri === 'mock' || redirectUri.includes('placeholder') || redirectUri === '') {
-      required.push(`${platform.toUpperCase()}_REDIRECT_URI`);
-    }
-    
-    return required;
-  }
-
-  /**
-   * Complete onboarding via OAuth notification (for production when agent-browser unavailable).
-   * Lets the user know to use the standard OAuth linking flow instead.
-   */
-  private async completeViaOAuth(sessionId: string, userId: string, platform: string) {
-    const missing = this.validatePlatformEnvVars(platform);
-    
-    await db.update(onboardingSessions)
-      .set({ 
-        status: missing.length > 0 ? 'failed' : 'completed',
-        currentState: missing.length > 0 ? 'OAUTH_KEYS_MISSING' : 'OAUTH_LINK_REQUIRED',
-        metadata: { missingEnvVars: missing, message: 'Use standard OAuth linking flow' },
-        error: missing.length > 0 ? `Missing OAuth env vars: ${missing.join(', ')}` : undefined,
-        updatedAt: new Date() 
-      })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    if (missing.length > 0) {
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: `[ONBOARD] ⚠️ ${platform} onboarding requires API keys: ${missing.join(', ')}. Please configure in Settings.`
+  private async initBrowser(): Promise<void> {
+    if (!this.browser) {
+      console.log('[OnboardingOrchestrator] Launching Playwright Chromium...');
+      this.browser = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
       });
-      throw new Error(`Missing OAuth env vars for ${platform}: ${missing.join(', ')}`);
     }
+  }
 
-    webSocketService.notifyUser(userId, 'ai-log', {
-      message: `[ONBOARD] ✅ ${platform} ready for OAuth linking. Use the Neural Link Center to connect.`
-    });
+  /**
+   * Create a new page and navigate to a URL.
+   */
+  private async openPage(url: string): Promise<Page> {
+    await this.initBrowser();
+    const context = await this.browser!.newContext();
+    this.page = await context.newPage();
+    await this.page.goto(url, { waitUntil: 'networkidle' });
+    return this.page;
+  }
+
+  /**
+   * Get snapshot text from the current page.
+   */
+  private async getPageSnapshot(): Promise<string> {
+    if (!this.page) throw new Error('Page not initialized');
+    return await this.page.textContent('body') || '';
+  }
+
+  /**
+   * Wait for a URL pattern or selector.
+   */
+  private async waitForPage(urlPattern?: string, selector?: string, timeout: number = 300000): Promise<void> {
+    if (!this.page) throw new Error('Page not initialized');
+    if (urlPattern) {
+      await this.page.waitForURL(urlPattern, { timeout });
+    }
+    if (selector) {
+      await this.page.waitForSelector(selector, { timeout });
+    }
+  }
+
+  /**
+   * Wait for network idle.
+   */
+  private async waitForNetworkIdle(): Promise<void> {
+    if (!this.page) throw new Error('Page not initialized');
+    await this.page.waitForLoadState('networkidle');
+  }
+
+  /**
+   * Click on an element.
+   */
+  private async clickElement(selector: string): Promise<void> {
+    if (!this.page) throw new Error('Page not initialized');
+    await this.page.click(selector);
+  }
+
+  /**
+   * Fill an input field.
+   */
+  private async fillElement(selector: string, value: string): Promise<void> {
+    if (!this.page) throw new Error('Page not initialized');
+    await this.page.fill(selector, value);
+  }
+
+  /**
+   * Extract text from an element.
+   */
+  private async extractText(selector: string): Promise<string> {
+    if (!this.page) throw new Error('Page not initialized');
+    const text = await this.page.textContent(selector);
+    return text?.trim() || '';
+  }
+
+  /**
+   * Close the browser session.
+   */
+  private async closeBrowser(): Promise<void> {
+    if (this.page) {
+      try { await this.page.context().close(); } catch {}
+      this.page = null;
+    }
+    if (this.browser) {
+      try { await this.browser.close(); } catch {}
+      this.browser = null;
+    }
   }
 
   // Moved to onboardingWorker.ts for async execution
@@ -137,27 +156,15 @@ export class OnboardingOrchestrator {
       // Get the user's niche from their latest goal
       const latestGoal = await this.getLatestUserGoal(userId);
       if (latestGoal?.description) {
-        // Extract niche from goal description (format: "Empire Niche: X. Angle: Y. Mode: Z")
         const nicheMatch = latestGoal.description.match(/Empire Niche:\s*([^.]+)/i);
         if (nicheMatch) {
           userNiche = nicheMatch[1].trim();
         }
       }
 
-      const agentBrowserAvailable = this.isAgentBrowserAvailable();
       const platformLower = platform.toLowerCase();
 
-      if (!agentBrowserAvailable && this.oauthPlatforms.includes(platformLower)) {
-        // Production path: use OAuth notification instead of browser automation
-        console.log(`[OnboardingOrchestrator] agent-browser not available. Using OAuth flow for ${platform}`);
-        await this.completeViaOAuth(sessionId, userId, platformLower);
-      } else if (!agentBrowserAvailable) {
-        // No agent-browser AND no OAuth fallback — give clear error
-        throw new Error(
-          `Cannot process ${platform}: agent-browser CLI not available and no OAuth fallback. ` +
-          `This platform requires browser automation which is not supported in the current production environment.`
-        );
-      } else if (platformLower === 'canva') {
+      if (platformLower === 'canva') {
         await this.executeCanvaFlow(sessionId, userId);
       } else if (platformLower === 'etsy') {
         await this.executeEtsyFlow(sessionId, userId);
@@ -176,15 +183,7 @@ export class OnboardingOrchestrator {
       } else if (platformLower === 'redbubble') {
         await this.executeRedbubbleFlow(sessionId, userId);
       } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
-        if (!agentBrowserAvailable) {
-          // Fiverr has OAuth, YouTube/Gmail use Google OAuth, IG/FB use Meta OAuth
-          await this.completeViaOAuth(sessionId, userId, 
-            platformLower === 'fiverr' ? 'fiverr' :
-            ['youtube', 'gmail'].includes(platformLower) ? 'google' : 'meta'
-          );
-        } else {
-          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
-        }
+        await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
       } else {
         throw new Error(`Platform ${platform} not supported yet`);
       }
@@ -288,202 +287,182 @@ export class OnboardingOrchestrator {
   }
 
   private async executeCanvaFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
-    // 1. Open Canva login
-    await this.runCommand('agent-browser open "https://www.canva.com/login"', sessionEnv);
-    
-    // 2. Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-    
-    if (snapshot.includes('Log in')) {
-      // Pause and wait for HITL
+    try {
+      // 1. Open Canva login
+      await this.openPage('https://www.canva.com/login');
+      
+      // 2. Check if login is required
+      const snapshot = await this.getPageSnapshot();
+      
+      if (snapshot.includes('Log in')) {
+        // Pause and wait for HITL
+        await db.update(onboardingSessions)
+          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+        
+        console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in`);
+        
+        try {
+          await this.waitForPage('**/home', undefined, 300000);
+        } catch (e) {
+          throw new Error('Login timeout or failed');
+        }
+      }
+
+      // 3. Resume Autonomy: Navigate to Settings/Apps
       await db.update(onboardingSessions)
-        .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+        .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      await this.page!.goto('https://www.canva.com/settings/apps', { waitUntil: 'networkidle' });
+      await this.waitForNetworkIdle();
+
+      // 4. Connection phase
+      await db.update(onboardingSessions)
+        .set({ currentState: 'CONNECTING_APP', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
       
-      console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in`);
+      // 5. Extraction & Handoff
+      await db.update(onboardingSessions)
+        .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      // For Canva MVP, simulate finding a token/key
+      const mockApiKey = `cv_${uuidv4().replace(/-/g, '')}`;
+      await vaultService.storeSecretWithEnvelope(userId, 'CANVA', 'API_KEY', mockApiKey);
+      await integrationService.saveIntegration(
+        userId,
+        'canva',
+        { accessToken: mockApiKey },
+        `cv_acc_${uuidv4().split('-')[0]}`,
+        'Canva Account'
+      );
+
+      // 6. Deep DNA Extraction
+      await canvaDnaService.performDeepExtraction(userId);
+
+      // 7. Completion
+      await db.update(onboardingSessions)
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
       
-      // In a real system, we'd wait for a signal from the frontend.
-      // For this MVP/Playbook, we'll poll the session status or wait for the URL change.
-      // The playbook used: agent-browser wait --url "**/home" --timeout 300000
-      
-      try {
-        await this.runCommand('agent-browser wait --url "**/home" --timeout 300000', sessionEnv);
-      } catch (e) {
-        throw new Error('Login timeout or failed');
-      }
+      console.log(`[OnboardingOrchestrator] Canva onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
     }
-
-    // 3. Resume Autonomy: Filling Profile / Connecting
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    await this.runCommand('agent-browser navigate "https://www.canva.com/settings/apps"', sessionEnv);
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
-
-    // Mocking the Connect flow for Canva as per playbook
-    // In a real scenario, we'd interact with specific elements
-    await db.update(onboardingSessions)
-      .set({ currentState: 'CONNECTING_APP', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    // Example interaction (commented out in playbook but we'll simulate the state transition)
-    // await this.runCommand('agent-browser click "@connect_button"', sessionEnv);
-    
-    // Extraction & Handoff
-    await db.update(onboardingSessions)
-      .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    // For Canva MVP, we'll simulate finding a token/key
-    const mockApiKey = `cv_${uuidv4().replace(/-/g, '')}`;
-    
-    // Use Vault Service with Envelope Encryption
-    await vaultService.storeSecretWithEnvelope(userId, 'CANVA', 'API_KEY', mockApiKey);
-
-    // SYNC: Store in integrations table for canvaService.ts access
-    await integrationService.saveIntegration(
-      userId,
-      'canva',
-      { accessToken: mockApiKey },
-      `cv_acc_${uuidv4().split('-')[0]}`,
-      'Canva Account'
-    );
-
-    // 5. Deep DNA Extraction (Phase 3)
-    await canvaDnaService.performDeepExtraction(userId);
-
-    // 6. Completion
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] Onboarding completed for session ${sessionId}`);
   }
 
   private async executeEtsyFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
-    // 1. Open Etsy login
-    await this.runCommand('agent-browser open "https://www.etsy.com/signin"', sessionEnv);
-    
-    // 2. Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-    
-    if (snapshot.includes('Email address')) {
-      // Pause and wait for HITL
+    try {
+      // 1. Open Etsy login
+      await this.openPage('https://www.etsy.com/signin');
+      
+      // 2. Check if login is required
+      const snapshot = await this.getPageSnapshot();
+      
+      if (snapshot.includes('Email address')) {
+        await db.update(onboardingSessions)
+          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+        
+        console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in to Etsy`);
+        
+        try {
+          await this.waitForPage('**/your/shop**', undefined, 300000);
+        } catch (e) {
+          throw new Error('Etsy login timeout or failed');
+        }
+      }
+
+      // 3. Resume Autonomy: Navigate to Shop About Section
       await db.update(onboardingSessions)
-        .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+        .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      const latestGoal = await this.getLatestUserGoal(userId);
+      const goalText = latestGoal ? latestGoal.description || latestGoal.title : "Digital Marketing Empire";
+
+      await this.page!.goto('https://www.etsy.com/your/shop/about', { waitUntil: 'networkidle' });
+      await this.waitForNetworkIdle();
+
+      // 4. Fill Profile
+      await db.update(onboardingSessions)
+        .set({ currentState: 'FILLING_PROFILE', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      await this.fillElement('@about_text_area', goalText);
+      await this.clickElement('@save_button');
+      
+      // 5. Extraction & Handoff
+      await db.update(onboardingSessions)
+        .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      const mockEtsyKey = `et_${uuidv4().replace(/-/g, '')}`;
+      await vaultService.storeSecretWithEnvelope(userId, 'ETSY', 'SESSION_TOKEN', mockEtsyKey);
+      await integrationService.saveIntegration(userId, 'etsy', { sessionToken: mockEtsyKey }, undefined, 'Etsy Shop');
+
+      // 6. Completion
+      await db.update(onboardingSessions)
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
       
-      console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in to Etsy`);
-      
-      try {
-        // Wait for the shop manager or home page to indicate login success
-        await this.runCommand('agent-browser wait --url "**/your/shop**" --timeout 300000', sessionEnv);
-      } catch (e) {
-        throw new Error('Etsy login timeout or failed');
-      }
+      console.log(`[OnboardingOrchestrator] Etsy onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
     }
-
-    // 3. Resume Autonomy: Navigate to Shop About Section
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    // Get user's goal to fill profile
-    const latestGoal = await this.getLatestUserGoal(userId);
-    const goalText = latestGoal ? latestGoal.description || latestGoal.title : "Digital Marketing Empire";
-
-    await this.runCommand('agent-browser navigate "https://www.etsy.com/your/shop/about"', sessionEnv);
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
-
-    // 4. Fill Profile
-    await db.update(onboardingSessions)
-      .set({ currentState: 'FILLING_PROFILE', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    await this.runCommand(`agent-browser fill "@about_text_area" "${goalText}"`, sessionEnv);
-    await this.runCommand('agent-browser click "@save_button"', sessionEnv);
-    
-    // 5. Extraction & Handoff (Simulated for MVP, similar to Canva)
-    await db.update(onboardingSessions)
-      .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    const mockEtsyKey = `et_\${uuidv4().replace(/-/g, '')}`;
-    await vaultService.storeSecretWithEnvelope(userId, 'ETSY', 'SESSION_TOKEN', mockEtsyKey);
-
-    // Save to integrations for Green Check UI and service access
-    await integrationService.saveIntegration(userId, 'etsy', { sessionToken: mockEtsyKey }, undefined, 'Etsy Shop');
-
-    // 6. Completion
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] Etsy onboarding completed for session ${sessionId}`);
   }
 
   private async executeTikTokFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-    
-    // 1. Open TikTok Authorize (Simulated URL for MVP)
-    await this.runCommand('agent-browser open "https://www.tiktok.com/auth/authorize?client_key=EMPIRE_ID&scope=user.info.basic,video.list,video.upload&redirect_uri=https://empirelaunch.ai/auth/callback/tiktok"', sessionEnv);
-    
-    // 2. Check if login/authorization is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-    
-    if (snapshot.includes('Login') || snapshot.includes('Authorize')) {
-      // Pause and wait for HITL
+    try {
+      // 1. Open TikTok Authorize
+      await this.openPage('https://www.tiktok.com/auth/authorize?client_key=EMPIRE_ID&scope=user.info.basic,video.list,video.upload&redirect_uri=https://empirelaunch.ai/auth/callback/tiktok');
+      
+      // 2. Check if login/authorization is required
+      const snapshot = await this.getPageSnapshot();
+      
+      if (snapshot.includes('Login') || snapshot.includes('Authorize')) {
+        await db.update(onboardingSessions)
+          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+        
+        console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must authorize TikTok`);
+        
+        try {
+          await this.waitForPage('**/auth/callback/tiktok*', undefined, 300000);
+        } catch (e) {
+          throw new Error('TikTok authorization timeout or failed');
+        }
+      }
+
+      // 3. Verify connection
       await db.update(onboardingSessions)
-        .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+        .set({ status: 'in_progress', currentState: 'VERIFYING_CONNECTION', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      await this.waitForNetworkIdle();
+      
+      // 4. Handoff to Vault
+      await db.update(onboardingSessions)
+        .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      const mockTikTokToken = `tt_${uuidv4().replace(/-/g, '')}`;
+      await vaultService.storeSecretWithEnvelope(userId, 'TIKTOK', 'OAUTH_REFRESH', mockTikTokToken);
+      await integrationService.saveIntegration(userId, 'tiktok', { refreshToken: mockTikTokToken }, undefined, 'TikTok Account');
+
+      // 5. Completion
+      await db.update(onboardingSessions)
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
       
-      console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must authorize TikTok`);
-      
-      try {
-        // Wait for the redirect back to our callback URL
-        await this.runCommand('agent-browser wait --url "**/auth/callback/tiktok*" --timeout 300000', sessionEnv);
-      } catch (e) {
-        throw new Error('TikTok authorization timeout or failed');
-      }
+      console.log(`[OnboardingOrchestrator] TikTok onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
     }
-
-    // 3. Verification
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'VERIFYING_CONNECTION', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    // For TikTok, we simulate verifying the code/token
-    await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
-    
-    // 4. Handoff to Vault
-    await db.update(onboardingSessions)
-      .set({ currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    const mockTikTokToken = `tt_\${uuidv4().replace(/-/g, '')}`;
-    await vaultService.storeSecretWithEnvelope(userId, 'TIKTOK', 'OAUTH_REFRESH', mockTikTokToken);
-
-    // Save to integrations for Green Check UI and service access
-    await integrationService.saveIntegration(userId, 'tiktok', { refreshToken: mockTikTokToken }, undefined, 'TikTok Account');
-
-    // 5. Completion
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] TikTok onboarding completed for session ${sessionId}`);
   }
 
   private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
     const urls: Record<string, string> = {
       fiverr: 'https://www.fiverr.com/login',
       youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
@@ -495,88 +474,70 @@ export class OnboardingOrchestrator {
       kittl: 'https://www.kittl.com/login',
       redbubble: 'https://www.redbubble.com/auth/login'
     };
-
     const waitUrls: Record<string, string> = {
-      fiverr: '**/dashboard**',
-      youtube: '**/home**',
-      instagram: '**/home**',
-      facebook: '**/home**',
-      gmail: '**/mail**',
-      behance: '**/for_you',
-      figma: '**/files',
-      kittl: '**/dashboard',
-      redbubble: '**/explore'
+      fiverr: '**/dashboard**', youtube: '**/home**', instagram: '**/home**',
+      facebook: '**/home**', gmail: '**/mail**', behance: '**/for_you',
+      figma: '**/files', kittl: '**/dashboard', redbubble: '**/explore'
     };
 
-    const url = urls[platform];
-    const waitUrl = waitUrls[platform];
-
-    await this.runCommand(`agent-browser open "${url}"`, sessionEnv);
-    
-    // Check if login is required
-    const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-    
-    if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
-      await db.update(onboardingSessions)
-        .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
-        .where(eq(onboardingSessions.id, sessionId));
-      
-      try {
-        await this.runCommand(`agent-browser wait --url "${waitUrl}" --timeout 300000`, sessionEnv);
-      } catch (e) {
-        throw new Error(`${platform} login timeout or failed`);
-      }
-    }
-
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    // Extract username/handle if possible for "High-Trust" feedback
-    let accountHandle = `\${platform.charAt(0).toUpperCase()}\${platform.slice(1)} Account`;
     try {
-        // Try multiple extraction strategies for "Neural Handshake"
-        const selectors: Record<string, string> = {
-            behance: '.Profile-name, .Project-owner-name',
-            figma: '[class*="profile_page--name"], [class*="top_nav--userName"]',
-            kittl: '.user-name, .profile-name',
-            redbubble: '.shop-name, .user-name',
-            fiverr: '.user-name, .seller-name',
-            instagram: 'header h2, ._aa_y',
-            facebook: '[role="main"] h1, .x1heor9g',
-            youtube: '#channel-name, .ytd-channel-name',
-            gmail: '[aria-label*="Account:"], .gb_d'
-        };
+      const url = urls[platform];
+      const waitUrl = waitUrls[platform];
+      if (!url) throw new Error(`No URL configured for: ${platform}`);
 
+      await this.openPage(url);
+      const snapshot = await this.getPageSnapshot();
+
+      if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
+        await db.update(onboardingSessions)
+          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+        try {
+          await this.waitForPage(waitUrl, undefined, 300000);
+        } catch (e) {
+          throw new Error(`${platform} login timeout or failed`);
+        }
+      }
+
+      await db.update(onboardingSessions)
+        .set({ status: 'in_progress', currentState: 'EXTRACTING_CREDENTIALS', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      let accountHandle = `${platform.charAt(0).toUpperCase()}${platform.slice(1)} Account`;
+      try {
+        const selectors: Record<string, string> = {
+          behance: '.Profile-name, .Project-owner-name',
+          figma: '[class*="profile_page--name"], [class*="top_nav--userName"]',
+          kittl: '.user-name, .profile-name',
+          redbubble: '.shop-name, .user-name',
+          fiverr: '.user-name, .seller-name',
+          instagram: 'header h2, ._aa_y',
+          facebook: '[role="main"] h1, .x1heor9g',
+          youtube: '#channel-name, .ytd-channel-name',
+          gmail: '[aria-label*="Account:"], .gb_d'
+        };
         const selector = selectors[platform];
         if (selector) {
-            const { stdout: handle } = await this.runCommand(`agent-browser extract "\${selector}"`, sessionEnv);
-            if (handle && handle.trim()) {
-                accountHandle = handle.trim().split('\n')[0];
-            }
-        } else {
-            const { stdout: handle } = await this.runCommand('agent-browser extract "body" --regex "(?i)@([a-zA-Z0-9_.-]+)"', sessionEnv);
-            if (handle) {
-                accountHandle = handle.split('\n')[0].trim();
-            }
+          try {
+            const handle = await this.extractText(selector);
+            if (handle && handle.trim()) accountHandle = handle.trim().split('\n')[0];
+          } catch {}
         }
-    } catch (e) {
-        console.warn(`[OnboardingOrchestrator] Failed to extract handle for \${platform}:`, e);
+      } catch (e) {
+        console.warn(`[OnboardingOrchestrator] Failed to extract handle for ${platform}:`, e);
+      }
+
+      const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
+      await vaultService.storeSecretWithEnvelope(userId, platform, 'SESSION_TOKEN', mockToken);
+      await integrationService.saveIntegration(userId, platform, { sessionToken: mockToken }, undefined, accountHandle);
+
+      await db.update(onboardingSessions)
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+      console.log(`[OnboardingOrchestrator] ${platform} onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
     }
-
-    // Simulate extraction of a session-level identifier
-    const mockToken = `gen_\${uuidv4().replace(/-/g, '')}`;
-    await vaultService.storeSecretWithEnvelope(userId, platform, 'SESSION_TOKEN', mockToken);
-
-    // Save to integrations for Green Check UI and service access
-    await integrationService.saveIntegration(userId, platform, { sessionToken: mockToken }, undefined, accountHandle);
-
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] ${platform} onboarding completed for session ${sessionId}`);
   }
 
   private async executeBehanceFlow(sessionId: string, userId: string) {
@@ -596,53 +557,41 @@ export class OnboardingOrchestrator {
   }
 
   private async executeGoDaddyFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-
-    // 1. Check if we already have credentials
-    const creds = await integrationService.getCredentials(userId, 'godaddy');
-    
-    if (!creds) {
-      // 2. Browser: Navigate to GoDaddy Keys
-      await this.runCommand('agent-browser open "https://developer.godaddy.com/keys"', sessionEnv);
+    try {
+      const creds = await integrationService.getCredentials(userId, 'godaddy');
       
-      const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-      
-      if (snapshot.includes('Sign in') || snapshot.includes('Username')) {
-        await db.update(onboardingSessions)
-          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
-          .where(eq(onboardingSessions.id, sessionId));
+      if (!creds) {
+        await this.openPage('https://developer.godaddy.com/keys');
+        const snapshot = await this.getPageSnapshot();
         
-        console.log(`[OnboardingOrchestrator] HITL Required for GoDaddy session ${sessionId}`);
-        
-        try {
-          // Wait for the keys page to load after login
-          await this.runCommand('agent-browser wait --url "**/keys" --timeout 300000', sessionEnv);
-        } catch (e) {
-          throw new Error('GoDaddy login/navigation timeout');
+        if (snapshot.includes('Sign in') || snapshot.includes('Username')) {
+          await db.update(onboardingSessions)
+            .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+            .where(eq(onboardingSessions.id, sessionId));
+          console.log(`[OnboardingOrchestrator] HITL Required for GoDaddy session ${sessionId}`);
+          try {
+            await this.waitForPage('**/keys', undefined, 300000);
+          } catch (e) {
+            throw new Error('GoDaddy login/navigation timeout');
+          }
         }
-      }
 
-      // 3. Extract Keys
-      await db.update(onboardingSessions)
-        .set({ status: 'in_progress', currentState: 'EXTRACTING_KEYS', updatedAt: new Date() })
-        .where(eq(onboardingSessions.id, sessionId));
+        await db.update(onboardingSessions)
+          .set({ status: 'in_progress', currentState: 'EXTRACTING_KEYS', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
 
-      // Click "Create New API Key" and capture
-      try {
-          // Attempting to generate a new key autonomously
-          await this.runCommand('agent-browser click "button:has-text(\'Create New API Key\')"', sessionEnv);
-          await this.runCommand('agent-browser fill "input[name=\'name\']" "EmpireLaunch AI"', sessionEnv);
-          await this.runCommand('agent-browser click "button:has-text(\'Next\')"', sessionEnv);
-          await this.runCommand('agent-browser wait --selector "input[readonly]"', sessionEnv);
+        try {
+          await this.clickElement('button:has-text("Create New API Key")');
+          await this.fillElement('input[name="name"]', 'EmpireLaunch AI');
+          await this.clickElement('button:has-text("Next")');
+          await this.waitForPage(undefined, 'input[readonly]', 30000);
           
-          const { stdout: keyValue } = await this.runCommand('agent-browser extract "input[readonly]:nth-child(1)"', sessionEnv);
-          const { stdout: secretValue } = await this.runCommand('agent-browser extract "input[readonly]:nth-child(2)"', sessionEnv);
+          const keyValue = await this.extractText('input[readonly]:nth-child(1)');
+          const secretValue = await this.extractText('input[readonly]:nth-child(2)');
           
           if (keyValue && secretValue) {
               const key = keyValue.trim();
               const secret = secretValue.trim();
-              
-              // Fetch account info (Task requirement e6dedab1-b2c5-4bf6-a47b-2faec48d0839)
               let platformAccountId = undefined;
               let platformAccountHandle = undefined;
               try {
@@ -652,12 +601,10 @@ export class OnboardingOrchestrator {
               } catch (infoErr) {
                   console.warn(`[OnboardingOrchestrator] Failed to fetch GoDaddy shopper info:`, infoErr);
               }
-
               await vaultService.storeSecretWithEnvelope(userId, 'GODADDY', 'API_KEY', key);
               await vaultService.storeSecretWithEnvelope(userId, 'GODADDY', 'API_SECRET', secret);
               await integrationService.saveIntegration(userId, 'godaddy', { api_key: key, api_secret: secret }, platformAccountId, platformAccountHandle);
 
-              // Update session metadata for frontend display
               const [currentSession] = await db.select().from(onboardingSessions).where(eq(onboardingSessions.id, sessionId)).limit(1);
               await db.update(onboardingSessions)
                 .set({ 
@@ -672,95 +619,80 @@ export class OnboardingOrchestrator {
           } else {
               throw new Error('Key extraction returned empty values');
           }
-      } catch (e: any) {
-          console.warn(`[OnboardingOrchestrator] GoDaddy extraction failed (\${e.message}), using fallback mock`);
-          const mockKey = `gd_key_\${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-          const mockSecret = `gd_sec_\${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-
+        } catch (e: any) {
+          console.warn(`[OnboardingOrchestrator] GoDaddy extraction failed (${e.message}), using fallback mock`);
+          const mockKey = `gd_key_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+          const mockSecret = `gd_sec_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
           await vaultService.storeSecretWithEnvelope(userId, 'GODADDY', 'API_KEY', mockKey);
           await vaultService.storeSecretWithEnvelope(userId, 'GODADDY', 'API_SECRET', mockSecret);
           await integrationService.saveIntegration(userId, 'godaddy', { api_key: mockKey, api_secret: mockSecret });
-      }
-    }
-
-    // 4. Proceed to DNS Setup
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'SETTING_UP_DNS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    const [session] = await db.select().from(onboardingSessions).where(eq(onboardingSessions.id, sessionId)).limit(1);
-    const metadata = session?.metadata as any;
-    const domain = metadata?.domain;
-
-    if (!domain) {
-      throw new Error('Domain not found in session metadata for GoDaddy onboarding');
-    }
-
-    await autoOnboardingService.setupGoDaddyDns(userId, domain);
-
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] GoDaddy onboarding completed for session ${sessionId}`);
-  }
-
-  private async executeSystemeIoFlow(sessionId: string, userId: string) {
-    const sessionEnv = { ...process.env, AGENT_BROWSER_SESSION: sessionId };
-
-    // 1. Check if we already have credentials
-    const creds = await integrationService.getCredentials(userId, 'systeme_io');
-    
-    if (!creds) {
-      // 2. Browser: Navigate to Systeme.io Login
-      await this.runCommand('agent-browser open "https://systeme.io/login"', sessionEnv);
-      
-      const { stdout: snapshot } = await this.runCommand('agent-browser snapshot -i', sessionEnv);
-      
-      if (snapshot.includes('Log in') || snapshot.includes('Email')) {
-        await db.update(onboardingSessions)
-          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
-          .where(eq(onboardingSessions.id, sessionId));
-        
-        console.log(`[OnboardingOrchestrator] HITL Required for Systeme.io session ${sessionId}`);
-        
-        try {
-          // Wait for dashboard to load
-          await this.runCommand('agent-browser wait --url "**/dashboard" --timeout 300000', sessionEnv);
-        } catch (e) {
-          throw new Error('Systeme.io login timeout');
         }
       }
 
-      // 3. Navigate to API keys
       await db.update(onboardingSessions)
-        .set({ status: 'in_progress', currentState: 'NAVIGATING_TO_KEYS', updatedAt: new Date() })
+        .set({ status: 'in_progress', currentState: 'SETTING_UP_DNS', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
 
-      // We'll navigate to settings. Actual URL needs verification.
-      // Based on common patterns: https://systeme.io/dashboard/settings/api_keys
-      await this.runCommand('agent-browser navigate "https://systeme.io/dashboard/settings/api_keys"', sessionEnv);
-      await this.runCommand('agent-browser wait --load networkidle', sessionEnv);
+      const [session] = await db.select().from(onboardingSessions).where(eq(onboardingSessions.id, sessionId)).limit(1);
+      const metadata = session?.metadata as any;
+      const domain = metadata?.domain;
 
-      // 4. Extract Key
+      if (!domain) {
+        throw new Error('Domain not found in session metadata for GoDaddy onboarding');
+      }
+
+      await autoOnboardingService.setupGoDaddyDns(userId, domain);
+
       await db.update(onboardingSessions)
-        .set({ currentState: 'EXTRACTING_KEYS', updatedAt: new Date() })
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
+      console.log(`[OnboardingOrchestrator] GoDaddy onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
+    }
+  }
 
-      try {
-          // Attempting to generate a new key autonomously
-          await this.runCommand('agent-browser click "button:has-text(\'Create\')"', sessionEnv);
-          await this.runCommand('agent-browser fill "input[placeholder=\'Name\']" "EmpireLaunch AI"', sessionEnv);
-          await this.runCommand('agent-browser click "button:has-text(\'Save\')"', sessionEnv);
-          await this.runCommand('agent-browser wait --selector "input.api-key-value"', sessionEnv);
+  private async executeSystemeIoFlow(sessionId: string, userId: string) {
+    try {
+      const creds = await integrationService.getCredentials(userId, 'systeme_io');
+      
+      if (!creds) {
+        await this.openPage('https://systeme.io/login');
+        const snapshot = await this.getPageSnapshot();
+        
+        if (snapshot.includes('Log in') || snapshot.includes('Email')) {
+          await db.update(onboardingSessions)
+            .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+            .where(eq(onboardingSessions.id, sessionId));
+          console.log(`[OnboardingOrchestrator] HITL Required for Systeme.io session ${sessionId}`);
+          try {
+            await this.waitForPage('**/dashboard', undefined, 300000);
+          } catch (e) {
+            throw new Error('Systeme.io login timeout');
+          }
+        }
+
+        await db.update(onboardingSessions)
+          .set({ status: 'in_progress', currentState: 'NAVIGATING_TO_KEYS', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+
+        await this.page!.goto('https://systeme.io/dashboard/settings/api_keys', { waitUntil: 'networkidle' });
+        await this.waitForNetworkIdle();
+
+        await db.update(onboardingSessions)
+          .set({ currentState: 'EXTRACTING_KEYS', updatedAt: new Date() })
+          .where(eq(onboardingSessions.id, sessionId));
+
+        try {
+          await this.clickElement('button:has-text("Create")');
+          await this.fillElement('input[placeholder="Name"]', 'EmpireLaunch AI');
+          await this.clickElement('button:has-text("Save")');
+          await this.waitForPage(undefined, 'input.api-key-value', 30000);
           
-          const { stdout: keyValue } = await this.runCommand('agent-browser extract "input.api-key-value"', sessionEnv);
+          const keyValue = await this.extractText('input.api-key-value');
           
           if (keyValue) {
               const key = keyValue.trim();
-              
-              // Fetch account info (Task requirement e6dedab1-b2c5-4bf6-a47b-2faec48d0839)
               let platformAccountId = undefined;
               let platformAccountHandle = undefined;
               try {
@@ -770,11 +702,9 @@ export class OnboardingOrchestrator {
               } catch (infoErr) {
                   console.warn(`[OnboardingOrchestrator] Failed to fetch Systeme.io account info:`, infoErr);
               }
-
               await vaultService.storeSecretWithEnvelope(userId, 'SYSTEME_IO', 'API_KEY', key);
               await integrationService.saveIntegration(userId, 'systeme_io', { api_key: key }, platformAccountId, platformAccountHandle);
 
-              // Update session metadata for frontend display
               const [currentSession] = await db.select().from(onboardingSessions).where(eq(onboardingSessions.id, sessionId)).limit(1);
               await db.update(onboardingSessions)
                 .set({ 
@@ -789,32 +719,31 @@ export class OnboardingOrchestrator {
           } else {
               throw new Error('Key extraction returned empty value');
           }
-      } catch (e: any) {
-          console.warn(`[OnboardingOrchestrator] Systeme.io extraction failed (\${e.message}), using fallback mock`);
-          const mockKey = `si_\${uuidv4().replace(/-/g, '')}`;
+        } catch (e: any) {
+          console.warn(`[OnboardingOrchestrator] Systeme.io extraction failed (${e.message}), using fallback mock`);
+          const mockKey = `si_${uuidv4().replace(/-/g, '')}`;
           await vaultService.storeSecretWithEnvelope(userId, 'SYSTEME_IO', 'API_KEY', mockKey);
           await integrationService.saveIntegration(userId, 'systeme_io', { api_key: mockKey });
+        }
       }
+
+      await db.update(onboardingSessions)
+        .set({ status: 'in_progress', currentState: 'CONFIGURING_CAMPAIGNS', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+
+      await autoOnboardingService.setupSystemeIoCampaigns(userId);
+
+      webSocketService.notifyUser(userId, 'ai-log', { 
+          message: '[BRIEFING] Automated setup complete. Please choose your campaign strategy: [High-Pressure] or [Relationship-Builder]?' 
+      });
+
+      await db.update(onboardingSessions)
+        .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+      console.log(`[OnboardingOrchestrator] Systeme.io onboarding completed for session ${sessionId}`);
+    } finally {
+      await this.closeBrowser();
     }
-
-    // 5. Proceed to Campaign Setup
-    await db.update(onboardingSessions)
-      .set({ status: 'in_progress', currentState: 'CONFIGURING_CAMPAIGNS', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-
-    await autoOnboardingService.setupSystemeIoCampaigns(userId);
-
-    // 6. Trigger Campaign Briefing Prompt (per task 199ee101-c8bf-4f97-94ea-08c39e4604a2)
-    webSocketService.notifyUser(userId, 'ai-log', { 
-        message: '[BRIEFING] Automated setup complete. Please choose your campaign strategy: [High-Pressure] or [Relationship-Builder]?' 
-    });
-
-    await db.update(onboardingSessions)
-      .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
-      .where(eq(onboardingSessions.id, sessionId));
-    
-    await this.runCommand('agent-browser close', sessionEnv);
-    console.log(`[OnboardingOrchestrator] Systeme.io onboarding completed for session ${sessionId}`);
   }
 
   private async getLatestUserGoal(userId: string) {
@@ -825,22 +754,6 @@ export class OnboardingOrchestrator {
       .orderBy(desc(goals.createdAt))
       .limit(1);
     return goal;
-  }
-
-  private async runCommand(command: string, env: any) {
-    console.log(`[OnboardingOrchestrator] Executing: ${command}`);
-    try {
-      return await execPromise(command, { env });
-    } catch (error: any) {
-      // Handle "command not found" gracefully
-      if (error.code === 'ENOENT' || (error.stderr && error.stderr.includes('command not found'))) {
-        const cmdName = command.split(' ')[0];
-        console.error(`[OnboardingOrchestrator] Command "${cmdName}" not found in environment`);
-        throw new Error(`Required CLI tool "${cmdName}" is not available in this environment. ` +
-          `Please use the standard OAuth linking flow instead.`);
-      }
-      throw error;
-    }
   }
 
   async getSessionStatus(sessionId: string) {
