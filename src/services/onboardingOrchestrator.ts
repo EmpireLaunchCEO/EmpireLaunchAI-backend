@@ -3,10 +3,11 @@ import { goDaddyService } from './goDaddyService.js';
 import { integrationService } from './integrationService.js';
 import { canvaDnaService } from './canvaDnaService.js';
 import { vaultService } from './vaultService.js';
+import { universalGatewayService } from './universalGatewayService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { encryptWithEnvelope } from '../utils/encryption.js';
 import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
@@ -48,6 +49,84 @@ export class OnboardingOrchestrator {
     return { sessionId };
   }
 
+  /**
+   * Platforms that have official OAuth support via universalGatewayService.
+   * For these, we can skip the browser-based flow when agent-browser is unavailable.
+   */
+  private oauthPlatforms: string[] = [
+    'canva', 'etsy', 'tiktok', 'tiktok_shop', 'meta', 'google',
+    'pinterest', 'shopify', 'amazon', 'ebay', 'squarespace', 'wix',
+    'gumroad', 'patreon', 'linkedin', 'twitch', 'fiverr',
+    'microsoft', 'woocommerce', 'shipstation', 'printful', 'printify'
+  ];
+
+  /**
+   * Check if agent-browser CLI is available in the current environment.
+   */
+  private isAgentBrowserAvailable(): boolean {
+    try {
+      execSync('which agent-browser 2>/dev/null || command -v agent-browser 2>/dev/null', { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Validate that required environment variables are set for a platform's OAuth flow.
+   * Returns array of missing var names (empty = all present).
+   */
+  private validatePlatformEnvVars(platform: string): string[] {
+    const config = universalGatewayService.getConfig(platform);
+    if (!config) return [`No OAuth config found for ${platform}`];
+    
+    const required: string[] = [];
+    const clientId = config.clientId();
+    const clientSecret = config.clientSecret();
+    const redirectUri = config.redirectUri();
+    
+    if (!clientId || clientId === 'mock' || clientId.includes('placeholder')) {
+      required.push(`${platform.toUpperCase()}_CLIENT_ID`);
+    }
+    if (!clientSecret || clientSecret === 'mock' || clientSecret.includes('placeholder')) {
+      required.push(`${platform.toUpperCase()}_CLIENT_SECRET`);
+    }
+    if (!redirectUri || redirectUri === 'mock' || redirectUri.includes('placeholder') || redirectUri === '') {
+      required.push(`${platform.toUpperCase()}_REDIRECT_URI`);
+    }
+    
+    return required;
+  }
+
+  /**
+   * Complete onboarding via OAuth notification (for production when agent-browser unavailable).
+   * Lets the user know to use the standard OAuth linking flow instead.
+   */
+  private async completeViaOAuth(sessionId: string, userId: string, platform: string) {
+    const missing = this.validatePlatformEnvVars(platform);
+    
+    await db.update(onboardingSessions)
+      .set({ 
+        status: missing.length > 0 ? 'failed' : 'completed',
+        currentState: missing.length > 0 ? 'OAUTH_KEYS_MISSING' : 'OAUTH_LINK_REQUIRED',
+        metadata: { missingEnvVars: missing, message: 'Use standard OAuth linking flow' },
+        error: missing.length > 0 ? `Missing OAuth env vars: ${missing.join(', ')}` : undefined,
+        updatedAt: new Date() 
+      })
+      .where(eq(onboardingSessions.id, sessionId));
+
+    if (missing.length > 0) {
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `[ONBOARD] ⚠️ ${platform} onboarding requires API keys: ${missing.join(', ')}. Please configure in Settings.`
+      });
+      throw new Error(`Missing OAuth env vars for ${platform}: ${missing.join(', ')}`);
+    }
+
+    webSocketService.notifyUser(userId, 'ai-log', {
+      message: `[ONBOARD] ✅ ${platform} ready for OAuth linking. Use the Neural Link Center to connect.`
+    });
+  }
+
   // Moved to onboardingWorker.ts for async execution
   public async processOnboarding(sessionId: string, userId: string, platform: string) {
     console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
@@ -65,26 +144,47 @@ export class OnboardingOrchestrator {
         }
       }
 
-      if (platform.toLowerCase() === 'canva') {
+      const agentBrowserAvailable = this.isAgentBrowserAvailable();
+      const platformLower = platform.toLowerCase();
+
+      if (!agentBrowserAvailable && this.oauthPlatforms.includes(platformLower)) {
+        // Production path: use OAuth notification instead of browser automation
+        console.log(`[OnboardingOrchestrator] agent-browser not available. Using OAuth flow for ${platform}`);
+        await this.completeViaOAuth(sessionId, userId, platformLower);
+      } else if (!agentBrowserAvailable) {
+        // No agent-browser AND no OAuth fallback — give clear error
+        throw new Error(
+          `Cannot process ${platform}: agent-browser CLI not available and no OAuth fallback. ` +
+          `This platform requires browser automation which is not supported in the current production environment.`
+        );
+      } else if (platformLower === 'canva') {
         await this.executeCanvaFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'etsy') {
+      } else if (platformLower === 'etsy') {
         await this.executeEtsyFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'tiktok') {
+      } else if (platformLower === 'tiktok') {
         await this.executeTikTokFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'godaddy') {
+      } else if (platformLower === 'godaddy') {
         await this.executeGoDaddyFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'systeme_io') {
+      } else if (platformLower === 'systeme_io') {
         await this.executeSystemeIoFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'behance') {
+      } else if (platformLower === 'behance') {
         await this.executeBehanceFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'figma') {
+      } else if (platformLower === 'figma') {
         await this.executeFigmaFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'kittl') {
+      } else if (platformLower === 'kittl') {
         await this.executeKittlFlow(sessionId, userId);
-      } else if (platform.toLowerCase() === 'redbubble') {
+      } else if (platformLower === 'redbubble') {
         await this.executeRedbubbleFlow(sessionId, userId);
-      } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platform.toLowerCase())) {
-        await this.executeGenericBrowserLogin(sessionId, userId, platform.toLowerCase());
+      } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
+        if (!agentBrowserAvailable) {
+          // Fiverr has OAuth, YouTube/Gmail use Google OAuth, IG/FB use Meta OAuth
+          await this.completeViaOAuth(sessionId, userId, 
+            platformLower === 'fiverr' ? 'fiverr' :
+            ['youtube', 'gmail'].includes(platformLower) ? 'google' : 'meta'
+          );
+        } else {
+          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
+        }
       } else {
         throw new Error(`Platform ${platform} not supported yet`);
       }
@@ -729,7 +829,18 @@ export class OnboardingOrchestrator {
 
   private async runCommand(command: string, env: any) {
     console.log(`[OnboardingOrchestrator] Executing: ${command}`);
-    return execPromise(command, { env });
+    try {
+      return await execPromise(command, { env });
+    } catch (error: any) {
+      // Handle "command not found" gracefully
+      if (error.code === 'ENOENT' || (error.stderr && error.stderr.includes('command not found'))) {
+        const cmdName = command.split(' ')[0];
+        console.error(`[OnboardingOrchestrator] Command "${cmdName}" not found in environment`);
+        throw new Error(`Required CLI tool "${cmdName}" is not available in this environment. ` +
+          `Please use the standard OAuth linking flow instead.`);
+      }
+      throw error;
+    }
   }
 
   async getSessionStatus(sessionId: string) {
