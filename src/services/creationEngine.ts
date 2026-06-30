@@ -29,6 +29,7 @@ export interface CreationRequest {
   niche: string;
   productName: string;
   platforms: string[];
+  archetype?: string;
 }
 
 export class CreationEngine {
@@ -37,13 +38,13 @@ export class CreationEngine {
    * Bypasses Canva/CapCut completely. Zero external subscriptions.
    */
   async generateMasterAsset(request: CreationRequest) {
-    const { userId, campaignId, niche, productName, platforms } = request;
-    console.log(`[CreationEngine] Generating master asset for campaign ${campaignId} (native mode)...`);
+    const { userId, campaignId, niche, productName, platforms, archetype } = request;
+    console.log(`[CreationEngine] Generating master asset for campaign ${campaignId} (native mode, archetype: ${archetype})...`);
 
     webSocketService.notifyUser(userId, 'ai-log', { message: `🎬 [STUDIO] Native mode: Initializing master asset for ${productName}...` });
 
     // 1. Generate/Retrieve Style DNA
-    const styleDna = await this.generateStyleDNA(userId, campaignId, niche, productName);
+    const styleDna = await this.generateStyleDNA(userId, campaignId, niche, productName, archetype);
     
     // 2. Update Campaign with Style DNA
     await db.update(campaigns)
@@ -66,6 +67,7 @@ export class CreationEngine {
         visualAesthetic: styleDna.visualAesthetic,
       },
       platform: platforms[0] || 'tiktok',
+      archetype,
     });
 
     // 4. Render the video using native RenderingEngine (DALL-E 3 + Sharp + FFmpeg)
@@ -97,7 +99,7 @@ export class CreationEngine {
     return { masterAssetUrl, styleDna, scenes: prodScriptData.scenes };
   }
 
-  private async generateStyleDNA(userId: string, campaignId: string, niche: string, productName: string): Promise<StyleDNA> {
+  private async generateStyleDNA(userId: string, campaignId: string, niche: string, productName: string, archetype: string = 'creator'): Promise<StyleDNA> {
     // 1. Check for viral links in campaign
     const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
     const viralLinks = campaign?.viralLinks ? JSON.parse(campaign.viralLinks as string) : [];
@@ -127,7 +129,8 @@ export class CreationEngine {
 
       const template = `
         You are the Empire Studio Intelligence Layer (Style DNA Architect). 
-        Generate a StyleDNA for a digital product in the "{niche}" niche called "{productName}".
+        You are designing for a business with the archetype: {archetype} (creator = product design, catalyst = marketing/viral growth).
+        Generate a StyleDNA for a digital product/service in the "{niche}" niche called "{productName}".
 
         Return JSON:
         - colors: string[] (3 hex color codes that define the brand)
@@ -140,7 +143,7 @@ export class CreationEngine {
       const prompt = PromptTemplate.fromTemplate(template);
       const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
 
-      const parsed = await chain.invoke({ niche, productName }) as any;
+      const parsed = await chain.invoke({ niche, productName, archetype }) as any;
       if (parsed.colors && parsed.fonts && parsed.visualAesthetic) {
         console.log(`[CreationEngine] High-Intelligence StyleDNA generated for "${productName}"`);
         return parsed as StyleDNA;

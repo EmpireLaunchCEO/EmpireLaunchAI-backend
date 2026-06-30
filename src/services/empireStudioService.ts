@@ -63,10 +63,11 @@ export class EmpireStudioService {
     description?: string;
     price?: number;          // in cents
     scheduleInMinutes?: number; // minutes from now to schedule
+    archetype?: string;
   }) {
     const {
       userId, campaignId: existingCampaignId, niche, angle,
-      platforms, title, description, price, scheduleInMinutes
+      platforms, title, description, price, scheduleInMinutes, archetype
     } = params;
 
     const assetId = uuidv4();
@@ -78,7 +79,7 @@ export class EmpireStudioService {
     });
 
     // Step 1: Resolve StyleDNA — either provided, or injected from Vault, or AI-generated
-    const styleDna = params.styleDna || await this.resolveStyleDnaFromVault(userId, niche, angle);
+    const styleDna = params.styleDna || await this.resolveStyleDnaFromVault(userId, niche, angle, archetype);
 
     webSocketService.notifyUser(userId, 'ai-log', {
       message: `🧬 Studio DNA loaded: ${styleDna.colors.length} colors, ${styleDna.fonts.length} fonts, tone: ${styleDna.tone}`
@@ -86,7 +87,7 @@ export class EmpireStudioService {
 
     // Step 2: Run the High-Intelligence Design Reasoner before generating
     const designReasoning = await this.runDesignReasoner(userId, {
-      niche, angle, styleDna, title: title || `${niche} - ${angle}`
+      niche, angle, styleDna, title: title || `${niche} - ${angle}`, archetype
     });
 
     webSocketService.notifyUser(userId, 'ai-log', {
@@ -96,7 +97,7 @@ export class EmpireStudioService {
     // Step 3: Generate the master asset using enriched DNA + reasoning
     const masterResult = await this.generateMasterAsset(userId, {
       niche, angle, styleDna, assetId, title: title || `${niche} - ${angle}`,
-      designReasoning,
+      designReasoning, archetype,
     });
 
     // Step 3.5: Anti-Copycat Uniqueness Gate
@@ -229,8 +230,8 @@ export class EmpireStudioService {
    * Resolves best-fit StyleDNA from the Universal Vault for a given niche.
    * Queries top-performing DNA strands and synthesizes them into a StyleDNA object.
    */
-  private async resolveStyleDnaFromVault(userId: string, niche: string, angle: string): Promise<StyleDNA> {
-    console.log(`[EmpireStudio] Resolving StyleDNA from Vault for "${niche}"`);
+  private async resolveStyleDnaFromVault(userId: string, niche: string, angle: string, archetype: string = 'creator'): Promise<StyleDNA> {
+    console.log(`[EmpireStudio] Resolving StyleDNA from Vault for "${niche}" (archetype: ${archetype})`);
 
     // Phase 1: Query the Vault for top-performing strands relevant to this niche
     const layoutStrands = await dnaVaultService.findTopPerformers('layout', 70, 5);
@@ -244,6 +245,7 @@ export class EmpireStudioService {
 
         const template = `
           You are a Style DNA Architect for the "{niche}" niche (angle: "{angle}").
+          The business archetype is "{archetype}" (creator = product design, catalyst = marketing/viral growth).
 
           Available vault DNA strands:
           Layouts: {layoutStrands}
@@ -253,6 +255,8 @@ export class EmpireStudioService {
 
           Analyze these and generate an optimal StyleDNA object. Be analytical and specific.
           Use the vault data as inspiration but produce unique, high-converting combinations.
+          For 'catalyst' archetype, prioritize high-contrast, high-energy palettes and aggressive/engaging hooks.
+          For 'creator' archetype, prioritize professional/aesthetic layouts and niche-specific fonts.
 
           Return a JSON object:
           - colors: string[] (3 hex color codes — pick the best from palette strands or create)
@@ -272,6 +276,7 @@ export class EmpireStudioService {
         const result = await chain.invoke({
           niche,
           angle,
+          archetype,
           layoutStrands: JSON.stringify(layoutStrands.map(s => ({ category: s.category, subCategory: s.subCategory, score: s.performanceScore, manifest: s.manifest }))),
           paletteStrands: JSON.stringify(paletteStrands.map(s => ({ category: s.category, subCategory: s.subCategory, score: s.performanceScore, manifest: s.manifest }))),
           typographyStrands: JSON.stringify(typographyStrands.map(s => ({ category: s.category, subCategory: s.subCategory, score: s.performanceScore, manifest: s.manifest }))),
@@ -345,7 +350,7 @@ export class EmpireStudioService {
    * EMPIRE_MASTER users get deeper reasoning (gpt-4o).
    */
   private async runDesignReasoner(userId: string, params: {
-    niche: string; angle: string; styleDna: StyleDNA; title: string;
+    niche: string; angle: string; styleDna: StyleDNA; title: string; archetype?: string;
   }): Promise<{
     strategy: string;
     reasoning: string;
@@ -356,6 +361,7 @@ export class EmpireStudioService {
     // Get tier config to determine reasoning depth
     const modelConfig = await getModelConfig(userId);
     const isDeepReasoning = modelConfig.modelName === 'gemini-1.5-pro';
+    const archetype = params.archetype || 'creator';
 
     webSocketService.notifyUser(userId, 'ai-log', {
       message: `🧠 Studio Intelligence: High-Reasoning Layer Activated (Gemini 3 Flash logic)`
@@ -375,6 +381,7 @@ export class EmpireStudioService {
         You are the Empire Studio Intelligence Layer (High-Reasoning Designer).
         
         System Status: {reasoningTier}
+        Business Archetype: {archetype} (creator = product design, catalyst = marketing/viral growth).
         
         Task: Design an optimal content strategy for:
         - Niche: {niche}
@@ -386,7 +393,7 @@ export class EmpireStudioService {
         {vaultContext}
 
         Analyze this problem step-by-step:
-        1. What visual style will maximize conversion for {niche}?
+        1. What visual style will maximize conversion for {niche} and the given {archetype}?
         2. Which platforms will this perform best on, and why?
         3. What hook/CTA combination drives the most engagement?
         4. How should the DNA be optimized for {angle}?
@@ -405,6 +412,7 @@ export class EmpireStudioService {
 
       const result = await chain.invoke({
         reasoningTier: isDeepReasoning ? 'Premium Deep Reasoning' : 'Standard Intelligence',
+        archetype,
         niche: params.niche,
         angle: params.angle,
         title: params.title,
@@ -456,6 +464,7 @@ export class EmpireStudioService {
       assetId: string;
       title: string;
       designReasoning: any;
+      archetype?: string;
     }
   ): Promise<{
     videoUrl?: string;

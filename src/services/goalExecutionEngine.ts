@@ -347,6 +347,8 @@ export class GoalExecutionEngine {
     }
 
     // ── Dimension 6: Productive State — CREATE_CONTENT or SCHEDULE_POST ──
+    const archetype = (context.goal as any).archetype || 'creator';
+
     if (context.completedTasks.length >= 1) {
       // If we have a completed task, create content for the next step
       const lastTask = context.completedTasks[context.completedTasks.length - 1];
@@ -354,7 +356,8 @@ export class GoalExecutionEngine {
         p => ['tiktok', 'instagram', 'facebook', 'youtube'].includes(p)
       );
 
-      if (availablePlatforms.length > 0) {
+      // Catalysts prioritize social content distribution
+      if (archetype === 'catalyst' && availablePlatforms.length > 0) {
         return {
           type: 'CREATE_CONTENT',
           taskId: lastTask.id,
@@ -362,12 +365,22 @@ export class GoalExecutionEngine {
         };
       }
 
-      // No social platforms connected — try listing
-      if (context.connectedPlatforms.some(p => ['etsy', 'shopify', 'etsy_shop'].includes(p))) {
+      // Creators follow the normal pipeline (Listing then Promotion)
+      if (archetype === 'creator') {
+        if (context.connectedPlatforms.some(p => ['etsy', 'shopify', 'etsy_shop'].includes(p))) {
+          return {
+            type: 'DRAFT_LISTING',
+            productName: context.goal.title || 'New Product',
+            platform: context.connectedPlatforms.find(p => ['etsy', 'shopify'].includes(p)) || 'etsy',
+          };
+        }
+      }
+
+      if (availablePlatforms.length > 0) {
         return {
-          type: 'DRAFT_LISTING',
-          productName: context.goal.title || 'New Product',
-          platform: context.connectedPlatforms.find(p => ['etsy', 'shopify'].includes(p)) || 'etsy',
+          type: 'CREATE_CONTENT',
+          taskId: lastTask.id,
+          platform: availablePlatforms[0],
         };
       }
     }

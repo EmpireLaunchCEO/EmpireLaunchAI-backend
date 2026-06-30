@@ -43,18 +43,27 @@ export class AutonomousMarketResearcher {
 
       for (const user of targetUsers) {
         try {
-          // Get the user's niches from their integrations/context
-          const niches = await this.getNichesForUser(user.id);
-          if (niches.length === 0) continue;
+          // Get the user's empires (goals) to understand their niches and archetypes
+          const empires = await db.select().from(schema.goals).where(eq(schema.goals.userId, user.id));
+          
+          if (empires.length === 0) {
+            // Fallback to basic niche detection if no empires exist
+            const niches = await this.getNichesForUser(user.id);
+            for (const niche of niches) {
+              await this.researchNiche(user.id, niche, 'creator');
+            }
+            continue;
+          }
 
-          for (const niche of niches) {
+          for (const empire of empires) {
             try {
-              const cycleResult = await this.researchNiche(user.id, niche);
+              const archetype = (empire as any).archetype || 'creator';
+              const cycleResult = await this.researchNiche(user.id, empire.title, archetype);
               result.signalsFound += cycleResult.signalsCreated;
               result.highConfidenceSignals += cycleResult.highConfidenceCount;
               result.approvalGatesTriggered.push(...cycleResult.approvalIds);
             } catch (err: any) {
-              result.errors.push(`Niche "${niche}": ${err.message}`);
+              result.errors.push(`Empire "${empire.title}": ${err.message}`);
             }
           }
         } catch (err: any) {
@@ -71,7 +80,7 @@ export class AutonomousMarketResearcher {
   /**
    * Research a specific niche across all platforms.
    */
-  async researchNiche(userId: string, niche: string): Promise<{
+  async researchNiche(userId: string, niche: string, archetype: string = 'creator'): Promise<{
     signalsCreated: number;
     highConfidenceCount: number;
     approvalIds: string[];
@@ -79,39 +88,41 @@ export class AutonomousMarketResearcher {
     const output = { signalsCreated: 0, highConfidenceCount: 0, approvalIds: [] as string[] };
     const now = new Date();
 
-    // ── 1. Etsy: Top sellers & keywords ──
-    try {
-      const etsyListings = await marketIntelligenceService.fetchEtsyBestSellers(niche, userId);
-      if (etsyListings && etsyListings.length > 0) {
-        for (const listing of etsyListings.slice(0, 5)) {
-          // Heat Signal logic: 10+ in basket = high velocity
-          const hasHighHeat = listing.signals?.inBasket?.includes('10+') || listing.isBestSeller;
-          const confidence = hasHighHeat ? 0.95 : 0.75;
+    // ── 1. Etsy: Top sellers & keywords (Prioritize for 'creator') ──
+    if (archetype === 'creator') {
+      try {
+        const etsyListings = await marketIntelligenceService.fetchEtsyBestSellers(niche, userId);
+        if (etsyListings && etsyListings.length > 0) {
+          for (const listing of etsyListings.slice(0, 5)) {
+            // Heat Signal logic: 10+ in basket = high velocity
+            const hasHighHeat = listing.signals?.inBasket?.includes('10+') || listing.isBestSeller;
+            const confidence = hasHighHeat ? 0.95 : 0.75;
 
-          await this.saveSignal({
-            niche,
-            platform: 'etsy',
-            signalType: 'trend',
-            title: `Etsy High-Velocity: ${listing.title}`,
-            description: `Heat Signal: ${listing.signals?.inBasket || 'Best Seller'}. URL: ${listing.url || 'N/A'}`,
-            confidence,
-            actionable: true,
-          });
-          output.signalsCreated++;
-          if (confidence > 0.9) {
-            output.highConfidenceCount++;
-            // Trigger DNA Hunt automatically for high confidence signals
-            try {
-              const { dnaHuntOrchestrator } = await import('./dnaHuntOrchestrator.js');
-              await dnaHuntOrchestrator.triggerHunt(userId, 'etsy', niche);
-            } catch (huntErr: any) {
-              console.error(`[MarketResearch] Failed to trigger hunt for etsy:`, huntErr.message);
+            await this.saveSignal({
+              niche,
+              platform: 'etsy',
+              signalType: 'trend',
+              title: `Etsy High-Velocity: ${listing.title}`,
+              description: `Heat Signal: ${listing.signals?.inBasket || 'Best Seller'}. URL: ${listing.url || 'N/A'}`,
+              confidence,
+              actionable: true,
+            });
+            output.signalsCreated++;
+            if (confidence > 0.9) {
+              output.highConfidenceCount++;
+              // Trigger DNA Hunt automatically for high confidence signals
+              try {
+                const { dnaHuntOrchestrator } = await import('./dnaHuntOrchestrator.js');
+                await dnaHuntOrchestrator.triggerHunt(userId, 'etsy', niche);
+              } catch (huntErr: any) {
+                console.error(`[MarketResearch] Failed to trigger hunt for etsy:`, huntErr.message);
+              }
             }
           }
         }
+      } catch (err: any) {
+        console.error(`[MarketResearch] Etsy research error for "${niche}":`, err.message);
       }
-    } catch (err: any) {
-      console.error(`[MarketResearch] Etsy research error for "${niche}":`, err.message);
     }
 
     // ── 1b. New Platforms: Figma, Kittl, Behance, Redbubble, ArtStation, Substack ──

@@ -42,8 +42,10 @@ export class StrategyOrchestrator {
 
     const niche = goal.title;
     const angle = goal.description;
+    const archetype = (goal as any).archetype || 'creator';
 
     // 2. Fetch market data
+    // For 'catalyst' archetype, we might want to prioritize different data, but for now, let's just make the AI aware.
     const bestSellers = await marketIntelligenceService.fetchEtsyBestSellers(niche);
     const visualTrends = await marketIntelligenceService.fetchVisualTrends(niche);
 
@@ -52,6 +54,7 @@ export class StrategyOrchestrator {
       You are the "Strategic Orchestrator", the high-intelligence brain of the Bizrunner app.
       Your mission is to problem-solve for a business and determine the absolute best order of execution to ensure success.
 
+      Business Archetype: {archetype} (Note: 'creator' means product-focused/physical goods, 'catalyst' means marketing-focused/high-volume links/leads).
       Business Niche: {niche}
       Business Angle: {angle}
 
@@ -83,6 +86,7 @@ export class StrategyOrchestrator {
     ]);
 
     const result = await chain.invoke({
+      archetype,
       niche,
       angle: angle || "Not specified",
       bestSellers: JSON.stringify(bestSellers),

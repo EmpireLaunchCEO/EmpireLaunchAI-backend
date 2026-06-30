@@ -69,14 +69,21 @@ export class ProductionDirector {
     angle?: string;
     styleDna?: Record<string, any>;
     platform?: string;
+    archetype?: string;
   }): Promise<ProductionScriptData> {
     const platform = params.platform || 'tiktok';
     const styleDna = params.styleDna || { colors: ['#2D4F1E', '#E4D5B7'], pacing: 'fast' };
+    const archetype = params.archetype || 'creator';
 
     // Use Gemini via the existing STUDIO_INTEL configuration (gemini-1.5-flash)
     const model = await resolveStudioReasoner();
 
-    const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video promoting a digital product.
+    const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video.
+    
+ARCHETYPE CONTEXT:
+The business archetype is "${archetype}".
+- 'creator': Focus on the product, aesthetic, and features of a physical or digital good.
+- 'catalyst': Focus on the viral hook, the transformation, the "Daily Pay" lifestyle, or the lead magnet. High-energy and marketing-driven.
 
 CRITICAL RULES:
 1. Each scene MUST have a detailed DALL-E image generation prompt — describe the scene visually (lighting, colors, composition, mood)
