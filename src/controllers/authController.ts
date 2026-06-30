@@ -252,7 +252,7 @@ export const redeemKey = async (req: Request, res: Response) => {
 
     // Standard redemption logic with userId
     if (isMasterKey) {
-      await db.update(users).set({ tier: 'EMPIRE_MASTER', businessSlots: 3, updatedAt: new Date() }).where(eq(users.id, userId));
+      await db.update(users).set({ tier: 'OWNER_MASTER', businessSlots: 10, updatedAt: new Date() }).where(eq(users.id, userId));
       return res.json({ status: 'success', message: 'Master access granted' });
     }
     const [accessKey] = await db.select().from(schema.accessKeys).where(eq(schema.accessKeys.key, key)).limit(1);

@@ -6,7 +6,7 @@ export const users = pgTable('users', {
   stripeAccountId: text('stripe_account_id'),
   paypalMerchantId: text('paypal_merchant_id'),
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
-  businessSlots: integer('business_slots').default(3).notNull(),
+  businessSlots: integer('business_slots').default(1).notNull(),
   tier: text('tier').default('STANDARD_USER').notNull(),
   isLocked: boolean('is_locked').default(false).notNull(),
   passwordHash: text('password_hash'),

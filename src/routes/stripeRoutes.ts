@@ -6,6 +6,7 @@ import {
   createPaymentButton, 
   triggerInstantPayout,
   createPlatformCheckout,
+  createExpansionCheckout,
   verifyPlatformPayment,
   createFinancialConnectionsSession
 } from '../controllers/stripeController.js';
@@ -19,6 +20,7 @@ router.post('/payment-button', mobileAuth, createPaymentButton);
 router.get('/status', mobileAuth, getAccountStatus);
 router.post('/payout/instant', mobileAuth, triggerInstantPayout);
 router.post('/checkout/platform', mobileAuth, createPlatformCheckout);
+router.post('/checkout/expansion', mobileAuth, createExpansionCheckout);
 router.get('/verify/platform', mobileAuth, verifyPlatformPayment);
 router.post('/financial-connections/session', mobileAuth, createFinancialConnectionsSession);
 

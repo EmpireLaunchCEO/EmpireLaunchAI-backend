@@ -46,6 +46,9 @@ export interface UserSettingsDTO {
   // Empire notes (freeform text array)
   empireNotes?: string[];
 
+  // Slots
+  businessSlots?: number;
+
   // Protocol
   protocolAccepted?: boolean;
 
@@ -76,7 +79,10 @@ export class UserSettingsService {
     }
 
     const dto = this.mapRowToDTO(settings);
-    if (user) dto.email = user.email;
+    if (user) {
+      dto.email = user.email;
+      dto.businessSlots = user.businessSlots;
+    }
     return dto;
   }
 

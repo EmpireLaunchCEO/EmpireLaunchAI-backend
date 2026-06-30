@@ -5,7 +5,7 @@ import { protectedButtonService } from '../services/protectedButtonService.js';
 import { vaultService } from '../services/vaultService.js';
 import { db, schema } from '../db/index.js';
 const { users, products, paymentLinks } = schema;
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 export const onboardUser = async (req: Request, res: Response) => {
@@ -209,6 +209,19 @@ export const createPlatformCheckout = async (req: Request, res: Response) => {
   }
 };
 
+export const createExpansionCheckout = async (req: Request, res: Response) => {
+  try {
+    const userId = req.headers['x-user-id'] as string;
+    const { returnUrl } = req.body;
+    if (!userId) return res.status(401).json({ error: 'Auth required' });
+
+    const session = await stripeService.createExpansionCheckoutSession(userId, returnUrl);
+    res.json({ url: session.url });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 export const verifyPlatformPayment = async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.query;
@@ -218,7 +231,15 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
     if (session.payment_status === 'paid') {
       const userId = session.client_reference_id;
       if (userId) {
-        await db.update(users).set({ tier: 'STANDARD_USER', updatedAt: new Date() }).where(eq(users.id, userId));
+        if (session.metadata?.type === 'expansion') {
+           // Increment business slots
+           await db.update(users).set({ 
+             businessSlots: sql`${users.businessSlots} + 1`, 
+             updatedAt: new Date() 
+           }).where(eq(users.id, userId));
+        } else {
+           await db.update(users).set({ tier: 'STANDARD_USER', updatedAt: new Date() }).where(eq(users.id, userId));
+        }
       }
       return res.json({ status: 'paid' });
     }

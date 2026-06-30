@@ -198,6 +198,31 @@ export class StripeService {
     return session;
   }
 
+  async createExpansionCheckoutSession(userId: string, returnUrl: string) {
+    const session = await getStripe().checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: 'Empire Expansion Slot',
+              description: 'Unlock an additional business slot in your empire. Includes +1 multi-tenant expansion.',
+            },
+            unit_amount: 4000, // $40.00 one-time
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${returnUrl}?session_id={CHECKOUT_SESSION_ID}&expansion=true`,
+      cancel_url: `${returnUrl}?canceled=true`,
+      client_reference_id: userId,
+      metadata: { userId, type: 'expansion' },
+    });
+    return session;
+  }
+
   async getSession(sessionId: string) {
     return await getStripe().checkout.sessions.retrieve(sessionId);
   }

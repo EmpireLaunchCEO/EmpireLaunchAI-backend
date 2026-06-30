@@ -83,6 +83,7 @@ export class SubscriptionGuard {
   async promptManualSubscription(userId: string) {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     const tier = user?.tier || 'STANDARD_USER';
+    const slots = user?.businessSlots || 1;
     
     if (tier === 'OWNER_MASTER' || tier === 'BETA_TESTER') {
       console.log(`SubscriptionGuard: Skipping subscription prompt for ${tier} user ${userId}`);
@@ -90,14 +91,15 @@ export class SubscriptionGuard {
     }
 
     const id = uuidv4();
+    const amount = 4000 * slots;
     await db.insert(schema.approvals).values({
         id,
         userId,
         type: 'subscription',
         status: 'pending',
         payload: {
-            amount: 3000,
-            message: "Your monthly subscription is due. Please approve to process payment.",
+            amount,
+            message: `Your monthly subscription for ${slots} business slot${slots > 1 ? 's' : ''} is due. Please approve to process payment.`,
             action: 'manual_payment'
         },
         createdAt: new Date(),
@@ -110,7 +112,7 @@ export class SubscriptionGuard {
         userId,
         type: 'billing',
         title: 'Subscription Due',
-        message: 'Your monthly subscription of $30.00 is due.',
+        message: `Your monthly subscription of ${(amount/100).toFixed(2)} is due.`,
         createdAt: new Date()
     });
     

@@ -24,8 +24,9 @@ export class RevenueOracleService {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     
     const tier = user?.tier || 'STANDARD_USER';
+    const slots = user?.businessSlots || 1;
     
-    let subscriptionFee = 3000; // $30 in cents
+    let subscriptionFee = 4000 * slots; // $40 per business slot in cents
     let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
 
     if (tier === 'OWNER_MASTER') {
