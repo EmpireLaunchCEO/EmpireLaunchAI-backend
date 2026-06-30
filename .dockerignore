@@ -1,20 +1,28 @@
+# Dependencies
 node_modules
-dist
-.git
-.env
+.pnp
+.pnp.*
+
+# Build output
+dist/
+.next/
+
+# Logs and debug files
 *.log
-*.db
-*.db-wal
-*.db-shm
-tsc_output.txt
 build_output*.txt
-all_tasks.json
-task_info.json
-drizzle/meta
-drizzle-pg/meta
-Android
-android
-ios
-Capacitor
-capacitor
-README.md
+build_output*.log
+build_errors*.txt
+build_attempt_*.log
+build_vercel_debug*.log
+
+# Environment
+.env*
+
+# Git
+.git
+.gitignore
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
