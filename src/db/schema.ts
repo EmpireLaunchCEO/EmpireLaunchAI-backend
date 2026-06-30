@@ -55,6 +55,7 @@ export const notifications = pgTable('notifications', {
 export const integrations = pgTable('integrations', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
+  goalId: uuid('goal_id').references(() => goals.id), // Scoped to specific empire
   platform: text('platform').notNull(), // 'etsy', 'fiverr', 'tiktok', 'gmail', etc.
   platformAccountId: text('platform_account_id'), // Indexed for lookups
   platformAccountHandle: text('platform_account_handle'), // For UI display (e.g. @username)
@@ -70,6 +71,7 @@ export const goals = pgTable('goals', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status').default('pending').notNull(), // 'pending', 'active', 'completed', 'failed'
+  archetype: text('archetype').default('CREATOR').notNull(), // 'CREATOR', 'CATALYST'
   approvalRequired: boolean('approval_required').default(true).notNull(),
   autoPost: boolean('auto_post').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),

@@ -5,14 +5,15 @@ import { encrypt, decrypt } from '../utils/security.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export class IntegrationService {
-  async saveIntegration(userId: string, platform: string, credentials: any, platformAccountId?: string, platformAccountHandle?: string) {
+  async saveIntegration(userId: string, platform: string, credentials: any, platformAccountId?: string, platformAccountHandle?: string, goalId?: string) {
     const encryptedCredentials = encrypt(JSON.stringify(credentials));
     
     const existing = await db.select()
       .from(integrations)
       .where(and(
         eq(integrations.userId, userId),
-        eq(integrations.platform, platform)
+        eq(integrations.platform, platform),
+        goalId ? eq(integrations.goalId, goalId) : eq(integrations.userId, userId) // Scope to goal if provided
       ))
       .limit(1);
 
@@ -22,6 +23,7 @@ export class IntegrationService {
           credentials: encryptedCredentials,
           platformAccountId: platformAccountId || existing[0].platformAccountId,
           platformAccountHandle: platformAccountHandle || existing[0].platformAccountHandle,
+          goalId: goalId || existing[0].goalId,
           updatedAt: new Date(),
         })
         .where(eq(integrations.id, existing[0].id));
@@ -33,6 +35,7 @@ export class IntegrationService {
       await db.insert(integrations).values({
         id,
         userId,
+        goalId,
         platform,
         platformAccountId,
         platformAccountHandle,
@@ -70,13 +73,14 @@ export class IntegrationService {
     }
   }
 
-  async getCredentials(userId: string, platform: string) {
+  async getCredentials(userId: string, platform: string, goalId?: string) {
     const results = await db.select()
       .from(integrations)
       .where(and(
         eq(integrations.userId, userId),
         eq(integrations.platform, platform),
-        eq(integrations.isActive, true)
+        eq(integrations.isActive, true),
+        goalId ? eq(integrations.goalId, goalId) : eq(integrations.userId, userId)
       ))
       .limit(1);
 

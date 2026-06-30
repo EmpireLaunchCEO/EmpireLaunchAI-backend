@@ -10,7 +10,7 @@ const { goals, users, approvals, tasks } = schema;
 
 export const initializeAgent = async (req: Request, res: Response) => {
   try {
-    const { userId, name, niche, angle, automationMode } = req.body;
+    const { userId, name, niche, angle, archetype, automationMode } = req.body;
     
     if (!userId || !name || !niche) {
       return res.status(400).json({ error: 'Missing required fields: userId, name, niche' });
@@ -50,6 +50,7 @@ export const initializeAgent = async (req: Request, res: Response) => {
       await db.update(goals)
         .set({ 
           description,
+          archetype: archetype || existingGoal.archetype,
           updatedAt: new Date() 
         })
         .where(eq(goals.id, existingGoal.id));
@@ -73,6 +74,7 @@ export const initializeAgent = async (req: Request, res: Response) => {
       title: name,
       description: `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`,
       status: 'pending', // Will be set to 'active' by the worker
+      archetype: archetype || 'CREATOR',
       approvalRequired: automationMode !== 'full_autopilot',
       autoPost: automationMode === 'full_autopilot',
       createdAt: new Date(),
