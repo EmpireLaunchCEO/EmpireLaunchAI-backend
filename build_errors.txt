@@ -1,4 +1,0 @@
-
-> bizrunner-backend@1.0.0 build-local
-> tsc
-

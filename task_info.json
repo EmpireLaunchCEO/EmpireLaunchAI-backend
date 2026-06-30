@@ -1,9 +1,0 @@
-[
-  {
-    "id": "1acc45af-b449-4866-9536-4d5373cdb511",
-    "title": "Backend: Activate Automated Trend Harvesting Workers",
-    "description": "Activate the Phase 5 automated harvesting background workers (The Brain).\n1. Seed the `market_signals` and `niche_dna_repository` targets using the configuration provided in `/home/team/shared/Phase5_Harvest_Targets.json`.\n2. Ensure the `massDnaHarvestWorker.ts` and `HunterGathererService` are correctly pulling from these targets.\n3. Verify that viral signals exceeding the `critical_alert_triggers` (defined in the JSON) are correctly inserted into the `strategy_suggestions` table.\n4. Ensure the `UniversalGatewayService` and `OnboardingOrchestrator` are correctly providing active sessions for these workers to use.",
-    "assigned_to": "agent-backend-developer",
-    "status": "in-progress"
-  }
-]
