@@ -1,5 +1,5 @@
 # Single-stage Dockerfile for Railway - explicitly bypasses nixpacks auto-detection
-ARG CACHE_BREAKER=v1-docker-revival
+ARG CACHE_BREAKER=v1-docker-revival-v2
 FROM node:20-slim
 RUN apt-get update && apt-get install -y \
     libvips42 ffmpeg python3 build-essential \
