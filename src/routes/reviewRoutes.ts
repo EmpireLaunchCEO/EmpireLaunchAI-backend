@@ -16,4 +16,7 @@ router.post('/approve', reviewController.approveReview);
 router.get('/pulse', mobileAuth, reviewController.getTrustPulse);
 router.get('/sentiment', mobileAuth, reviewController.getSentimentMap);
 
+// Owner inbox: returns all feedback submissions
+router.get('/inbox', reviewController.getFeedbackInbox);
+
 export default router;

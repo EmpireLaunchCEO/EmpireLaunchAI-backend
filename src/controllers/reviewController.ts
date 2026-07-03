@@ -60,6 +60,15 @@ export class ReviewController {
       res.status(500).json({ error: error.message });
     }
   }
+
+  async getFeedbackInbox(req: Request, res: Response) {
+    try {
+      const reviews = await reviewService.getAllReviews();
+      res.json(reviews);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 }
 
 export const reviewController = new ReviewController();

@@ -146,6 +146,13 @@ export class ReviewService {
       label: r.rating >= 4 ? 'Positive' : 'Neutral'
     })).reverse();
   }
+
+  async getAllReviews() {
+    // @ts-ignore
+    return await db.select().from(reviews)
+      .orderBy(desc(reviews.createdAt))
+      .limit(50);
+  }
 }
 
 export const reviewService = new ReviewService();
