@@ -1,13 +1,1 @@
-{
-  "version": "7",
-  "dialect": "postgresql",
-  "entries": [
-    {
-      "idx": 0,
-      "version": "7",
-      "when": 1782159449090,
-      "tag": "0000_aspiring_deathbird",
-      "breakpoints": true
-    }
-  ]
-}
+{"version":"7","dialect":"postgresql","entries":[{"idx":0,"version":"7","when":1746307200000,"tag":"0001_create_audit_statements","breakpoints":true}]}
