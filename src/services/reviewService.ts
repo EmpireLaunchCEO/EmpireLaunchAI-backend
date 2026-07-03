@@ -2,6 +2,7 @@ import { db, schema } from '../db/index.js';
 const { reviews, scheduledPosts, campaigns } = schema;
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { appendNotification } from './feedbackNotifier.js';
 
 export class ReviewService {
   async submitReview(userId: string, rating: number, comment?: string) {
@@ -13,7 +14,7 @@ export class ReviewService {
     const [user] = await db.select().from(schema.users).where(eq(schema.users.id, userId)).limit(1);
     const userEmail = user?.email || 'stacipeabody@gmail.com'; // Default to owner for demo/mock users
 
-    console.log(`[Feedback Channel] Intelligence from ${userEmail} (${userId}): ${rating} stars. Message: "${comment}"`);
+    console.log(`[Feedback] from ${userEmail} (${userId}): ${rating} stars. Message: "${comment}"`);
 
     // @ts-ignore
     const [review] = await db.insert(reviews).values({
@@ -26,6 +27,9 @@ export class ReviewService {
       createdAt: new Date(),
       updatedAt: new Date()
     }).returning();
+
+    // Write notification for the team lead to email the owner
+    appendNotification({ ...review, userEmail });
 
     return review;
   }
