@@ -35,6 +35,7 @@ import massDnaRoutes from './routes/massDnaRoutes.js';
 import dispatchRoutes from './routes/dispatchRoutes.js';
 import integrationRoutes from './routes/integrationRoutes.js';
 import mobileRoutes from './routes/mobileRoutes.js';
+import auditRoutes from './routes/auditRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -138,6 +139,7 @@ app.use('/api/mass-dna', massDnaRoutes);
 app.use('/api/dispatch', dispatchRoutes);
 app.use('/api/integrations', integrationRoutes);
 app.use('/api/mobile', mobileRoutes);
+app.use('/api/audit', auditRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v3' });
