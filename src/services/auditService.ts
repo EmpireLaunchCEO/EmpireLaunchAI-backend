@@ -5,6 +5,14 @@ const { auditStatements, revenueMilestones, revenueTransactions, scheduledPosts,
 
 export class AuditService {
   /**
+   * Log an audit event (used by privacyService and other services).
+   */
+  async log(userId: string, action: string, targetUserId?: string) {
+    console.log(`[Audit] User ${userId} performed ${action}${targetUserId ? ` on user ${targetUserId}` : ''}`);
+    // In production, this would store to an audit_logs table
+  }
+
+  /**
    * Generates a monthly audit statement by querying real data.
    */
   async generateMonthlyStatement(userId: string, month: number, year: number) {
