@@ -175,12 +175,13 @@ export class CinemaController {
       const neuralRemaining = await usageService.getDailyRemaining(userId, 'neural_twin');
       const enhancedRemaining = await usageService.getDailyRemaining(userId, 'enhanced_video');
       const designRemaining = await usageService.getDailyRemaining(userId, 'high_res_design');
+      const customizeRemaining = await usageService.getDailyRemaining(userId, 'customize_video');
 
       res.json({
         userId,
         neural: {
           remaining: neuralRemaining,
-          limit: 21,
+          limit: 14,
           period: 'week',
         },
         enhanced: {
@@ -191,6 +192,11 @@ export class CinemaController {
           remaining: designRemaining,
           limit: 50,
           period: 'month',
+        },
+        customize: {
+          remaining: customizeRemaining,
+          limit: 14,
+          period: 'week',
         },
       });
     } catch (error: any) {

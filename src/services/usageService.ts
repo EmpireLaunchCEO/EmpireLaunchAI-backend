@@ -2,13 +2,13 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
-const { usageLogs } = schema;
+const { usageLogs, users } = schema;
 
 export class UsageService {
   /**
    * Tracks a new usage event.
    */
-  async logUsage(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless', metadata?: any) {
+  async logUsage(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'customize_video', metadata?: any) {
     try {
       await db.insert(usageLogs).values({
         id: uuidv4(),
@@ -24,20 +24,19 @@ export class UsageService {
 
   /**
    * Gets the remaining count for a specific usage type today/month/week.
+   * For neural_twin and customize_video: 168-hour window from user's signup date.
    */
-  async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design'): Promise<number | 'unlimited'> {
+  async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video'): Promise<number | 'unlimited'> {
     // Unlimited check
     if (type === 'faceless' || type === 'enhanced_video') {
       return 'unlimited';
     }
 
-    const weeklyNeuralLimit = 21;
+    const weeklyNeuralLimit = 14;
     const monthlyDesignLimit = 50;
     
     const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfSevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
     let periodStart: Date;
     let limit: number;
@@ -45,11 +44,28 @@ export class UsageService {
     if (type === 'high_res_design') {
       periodStart = startOfMonth;
       limit = monthlyDesignLimit;
-    } else if (type === 'neural_twin') {
-      periodStart = startOfSevenDaysAgo;
+      // TODO: Reset on subscription renewal date instead of calendar month
+    } else if (type === 'neural_twin' || type === 'customize_video') {
+      // Calculate 168-hour window from user's signup date
+      try {
+        const [user] = await db.select({ createdAt: users.createdAt })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1);
+        if (user?.createdAt) {
+          const signupTime = new Date(user.createdAt).getTime();
+          const elapsed = now.getTime() - signupTime;
+          const periodsElapsed = Math.floor(elapsed / (168 * 60 * 60 * 1000));
+          periodStart = new Date(signupTime + periodsElapsed * 168 * 60 * 60 * 1000);
+        } else {
+          periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        }
+      } catch {
+        periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      }
       limit = weeklyNeuralLimit;
     } else {
-      periodStart = startOfToday;
+      periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       limit = 3; // Default daily limit for others
     }
 
@@ -74,7 +90,7 @@ export class UsageService {
   /**
    * Enforces the daily/monthly/weekly limit. Throws if limit reached.
    */
-  async enforceLimit(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design') {
+  async enforceLimit(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video') {
     const remaining = await this.getDailyRemaining(userId, type);
     if (remaining !== 'unlimited' && remaining <= 0) {
       let period = 'day';
@@ -83,9 +99,9 @@ export class UsageService {
       if (type === 'high_res_design') {
         period = 'month';
         limit = 50;
-      } else if (type === 'neural_twin') {
+      } else if (type === 'neural_twin' || type === 'customize_video') {
         period = 'week';
-        limit = 21;
+        limit = 14;
       }
 
       throw new Error(`Usage limit reached. You can generate up to ${limit} ${type.replace(/_/g, ' ')}s per ${period}.`);
