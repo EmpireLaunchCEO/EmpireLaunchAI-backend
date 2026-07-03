@@ -430,3 +430,18 @@ export const usageLogs = pgTable('usage_logs', {
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const auditStatements = pgTable('audit_statements', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  month: integer('month').notNull(), // 1-12
+  year: integer('year').notNull(),
+  totalRevenue: integer('total_revenue').default(0).notNull(),
+  aiAttributedRevenue: integer('ai_attributed_revenue').default(0).notNull(),
+  successShareDue: integer('success_share_due').default(0).notNull(),
+  lifetimeSurchargesPaid: integer('lifetime_surcharges_paid').default(0).notNull(),
+  contentCreated: integer('content_created').default(0).notNull(),
+  activeCampaigns: integer('active_campaigns').default(0).notNull(),
+  milestoneHit: integer('milestone_hit').default(0).notNull(), // Last $1k milestone
+  generatedAt: timestamp('generated_at').defaultNow().notNull(),
+});
