@@ -82,7 +82,7 @@ router.get('/success-share', mobileAuth, async (req: any, res: any) => {
           eq(integrations.isActive, true)
         )
       );
-    const connectedPlatforms = platformRows.map(r => r.platform);
+    const connectedPlatforms = platformRows.map((r: { platform: string }) => r.platform);
 
     // 7. Subscription check
     const [subResult] = await db.select({
