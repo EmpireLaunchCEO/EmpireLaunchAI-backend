@@ -243,7 +243,10 @@ export class OnboardingOrchestrator {
         } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
           await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
         } else {
-          throw new Error(`No browser flow defined for ${platform}`);
+          // Catch-all: ANY platform the user selects gets a generic Neural Handshake
+          // No developer app approvals needed — Playwright handles the browser login
+          console.log(`[OnboardingOrchestrator] No specific flow for ${platform}; using generic browser login`);
+          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
         }
       }
 
@@ -540,7 +543,7 @@ export class OnboardingOrchestrator {
     };
 
     try {
-      const url = urls[platform];
+      const url = urls[platform] || `https://${platform}.com/login`;
       const waitUrl = waitUrls[platform];
       if (!url) throw new Error(`No URL configured for: ${platform}`);
 
