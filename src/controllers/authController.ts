@@ -122,30 +122,57 @@ export const acceptTerms = async (req: Request, res: Response) => {
 };
 
 export const getEtsyAuthUrl = async (req: Request, res: Response) => {
-  const userId = (req as any).userId || req.headers['x-user-id'];
-  if (!userId) {
-    return res.status(401).json({ error: 'Authentication required' });
-  }
+    const userId = (req as any).userId || req.headers['x-user-id'];
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-  const state = crypto.randomBytes(16).toString('hex');
-  const codeVerifier = crypto.randomBytes(32).toString('base64url');
-  const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    // Check if Etsy OAuth credentials are configured and working
+    const clientId = process.env.ETSY_CLIENT_ID;
+    const clientSecret = process.env.ETSY_CLIENT_SECRET;
+    if (!clientId || !clientSecret || clientId.length < 10) {
+      return res.status(400).json({
+        error: 'MISSING_KEYS',
+        key: 'ETSY_CLIENT_ID',
+        platform: 'etsy'
+      });
+    }
 
-  const sessionId = uuidv4();
-  await db.insert(oauthSessions).values({
-    id: sessionId,
-    userId,
-    platform: 'etsy',
-    state,
-    codeVerifier,
-    used: false,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-    createdAt: new Date(),
-  });
+    const state = crypto.randomBytes(16).toString('hex');
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-  const url = etsyService.getAuthUrl(state, codeChallenge);
-  res.json({ url, state, sessionId });
-};
+    const sessionId = uuidv4();
+    await db.insert(oauthSessions).values({
+      id: sessionId,
+      userId,
+      platform: 'etsy',
+      state,
+      codeVerifier,
+      used: false,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      createdAt: new Date(),
+    });
+
+    try {
+      const url = etsyService.getAuthUrl(state, codeChallenge);
+      if (!url || url.includes('client_id=&')) {
+        throw new Error('MISSING_KEYS');
+      }
+      res.json({ url, state, sessionId });
+    } catch (error: any) {
+      // Clean up the session since we can't use it
+      await db.delete(oauthSessions).where(eq(oauthSessions.id, sessionId)).catch(() => {});
+      if (error.message === 'MISSING_KEYS') {
+        return res.status(400).json({
+          error: 'MISSING_KEYS',
+          key: 'ETSY_CLIENT_ID',
+          platform: 'etsy'
+        });
+      }
+      res.status(500).json({ error: 'Failed to initiate Etsy OAuth' });
+    }
+  };
 
 export const etsyCallback = async (req: Request, res: Response) => {
   const { code, state, sessionId } = req.body;
