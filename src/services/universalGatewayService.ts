@@ -432,6 +432,36 @@ class UniversalGatewayService {
           extraAuthParams: { response_type: 'code' },
           extraTokenParams: { grant_type: 'authorization_code' },
         },
+        // ─── RAILWAY ────────────────────────────────────────────────
+        {
+          platform: 'railway',
+          authUrl: 'https://railway.com/oauth/authorize',
+          tokenUrl: 'https://railway.com/oauth/token',
+          scopes: ['read:credits', 'read:projects', 'read:deployments'],
+          usePKCE: true,
+          clientId: () => process.env.RAILWAY_CLIENT_ID || '',
+          clientSecret: () => process.env.RAILWAY_CLIENT_SECRET || '',
+          redirectUri: () => process.env.RAILWAY_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+        },
+        // ─── GOOGLE STUDIO (Gemini / Vertex AI) ──────────────────────
+        {
+          platform: 'google_studio',
+          authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          scopes: [
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/generative-language.readonly',
+          ],
+          usePKCE: true,
+          clientId: () => process.env.GOOGLE_CLIENT_ID || '',
+          clientSecret: () => process.env.GOOGLE_CLIENT_SECRET || '',
+          redirectUri: () => process.env.GOOGLE_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code', access_type: 'offline', prompt: 'consent' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+          tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
         ];
   }
 

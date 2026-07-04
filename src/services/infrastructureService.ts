@@ -8,7 +8,77 @@ export interface InfrastructureBalance {
   status: 'active' | 'low' | 'depleted' | 'unknown';
 }
 
+export interface PlatformSubscriptionCost {
+  platform: string;
+  connected: boolean;
+  estimatedMonthlyCost: number;
+  tier?: string;
+  currency: string;
+}
+
 export class InfrastructureService {
+  /**
+   * Detect connected platform subscription tiers and estimate monthly costs.
+   * Checks integrations for platforms with known subscription models.
+   */
+  async getConnectedPlatformSubscriptions(): Promise<PlatformSubscriptionCost[]> {
+    // Known platform subscription tiers and their estimated monthly costs
+    const subscriptionPlatforms: Record<string, { free: number; pro: number; enterprise: number }> = {
+      canva: { free: 0, pro: 1499, enterprise: 4999 },   // $14.99/mo Pro, $49.99/mo Enterprise
+      stripe: { free: 0, pro: 0, enterprise: 0 },        // Stripe is per-transaction
+      shopify: { free: 0, pro: 2999, enterprise: 7999 },  // $29/mo Basic, $79/mo Advanced
+      fiverr: { free: 0, pro: 0, enterprise: 0 },         // Fiverr is per-gig
+      etsy: { free: 0, pro: 0, enterprise: 0 },          // Etsy is commission-based
+    };
+
+    try {
+      const { db, schema } = await import('../db/index.js');
+      const { integrations } = schema;
+      const { eq, and } = await import('drizzle-orm');
+
+      const rows = await db.select({ platform: integrations.platform, credentials: integrations.credentials })
+        .from(integrations)
+        .where(eq(integrations.isActive, true));
+
+      const results: PlatformSubscriptionCost[] = [];
+      const seen = new Set<string>();
+
+      for (const row of rows) {
+        const p = row.platform.toLowerCase();
+        if (seen.has(p)) continue;
+        seen.add(p);
+
+        const tiers = subscriptionPlatforms[p];
+        if (!tiers) {
+          results.push({ platform: row.platform, connected: true, estimatedMonthlyCost: 0, currency: 'USD' });
+          continue;
+        }
+
+        // Detect tier from stored credentials metadata
+        const creds = row.credentials as any;
+        let tier = 'free';
+        if (creds?.subscriptionTier) {
+          tier = creds.subscriptionTier;
+        } else if (creds?.plan) {
+          tier = creds.plan;
+        }
+
+        const cost = tiers[tier as keyof typeof tiers] ?? tiers.free;
+        results.push({
+          platform: row.platform,
+          connected: true,
+          estimatedMonthlyCost: cost,
+          tier,
+          currency: 'USD',
+        });
+      }
+
+      return results;
+    } catch (error) {
+      console.error('[InfrastructureService] Failed to get platform subscriptions:', error);
+      return [];
+    }
+  }
   /**
    * Fetches the current usage/balance from OpenAI.
    * Note: This usually requires a management/admin key or specific billing permissions.
@@ -102,12 +172,14 @@ export class InfrastructureService {
     };
   }
 
-  async getAllBalances(): Promise<InfrastructureBalance[]> {
-    return Promise.all([
+  async getAllBalances(): Promise<{ balances: InfrastructureBalance[]; subscriptions: PlatformSubscriptionCost[] }> {
+    const balances = await Promise.all([
       this.getOpenAIBalance(),
       this.getRailwayBalance(),
       this.getGoogleBalance()
     ]);
+    const subscriptions = await this.getConnectedPlatformSubscriptions();
+    return { balances, subscriptions };
   }
 }
 
