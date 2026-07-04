@@ -266,3 +266,22 @@ export const redeemKey = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+export const masterLogin = async (req: Request, res: Response) => {
+  const { email, key } = req.body;
+  if (!email || !key) return res.status(400).json({ error: 'Email and master key are required' });
+  
+  try {
+    const cleanKey = key.trim().toUpperCase();
+    const isMasterKey = OWNER_CONFIG.allowedMasterKeys.includes(cleanKey as any);
+    if (!isMasterKey) return res.status(401).json({ error: 'Invalid master key' });
+    
+    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+    
+    await db.update(users).set({ tier: 'OWNER_MASTER', businessSlots: 3, updatedAt: new Date() }).where(eq(users.id, user.id));
+    res.json({ status: 'success', userId: user.id });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};

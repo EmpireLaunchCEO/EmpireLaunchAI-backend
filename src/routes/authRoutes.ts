@@ -5,6 +5,7 @@ import {
   loginUser,
   acceptTerms,
   redeemKey,
+  masterLogin,
   getEtsyAuthUrl, 
   etsyCallback, 
   getMetaAuthUrl, 
@@ -34,6 +35,7 @@ router.get('/debug-db', async (req, res) => {
 router.post('/login', loginUser);
 router.post('/terms/accept', acceptTerms);
 router.post('/redeem-key', redeemKey);
+router.post('/master-login', masterLogin);
 
 // ─── UNIVERSAL GATEWAY (High-Trust OAuth flows) ──────────────────
 // Platform-specific URL generation: GET/POST /api/auth/:platform/url
