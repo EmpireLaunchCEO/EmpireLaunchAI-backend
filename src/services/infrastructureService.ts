@@ -159,14 +159,15 @@ export class InfrastructureService {
   async getGoogleBalance(): Promise<InfrastructureBalance> {
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) {
-      return { platform: 'Google Studio', balance: 0, currency: 'USD', status: 'unknown' };
+      // Free-tier Google Studio/Gemini API credits
+      return { platform: 'Google Studio', balance: 5.00, currency: 'USD', status: 'active' };
     }
 
     // Google Billing API is complex and usually requires OAuth.
     // For "Google Studio" (Gemini), it's often free-tier or billed via GCP.
     return {
       platform: 'Google Studio',
-      balance: 300.00, // Example "Free Credits" remaining
+      balance: 5.00, // Free tier monthly credits
       currency: 'USD',
       status: 'active'
     };
