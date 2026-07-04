@@ -17,6 +17,8 @@ export class IntegrationService {
       ))
       .limit(1);
 
+    let integrationId: string;
+
     if (existing.length > 0) {
       await db.update(integrations)
         .set({
@@ -29,11 +31,11 @@ export class IntegrationService {
         .where(eq(integrations.id, existing[0].id));
       
       await this.updateStatusInSettings(userId, platform);
-      return existing[0].id;
+      integrationId = existing[0].id;
     } else {
-      const id = uuidv4();
+      integrationId = uuidv4();
       await db.insert(integrations).values({
-        id,
+        id: integrationId,
         userId,
         goalId,
         platform,
@@ -45,7 +47,34 @@ export class IntegrationService {
       });
 
       await this.updateStatusInSettings(userId, platform);
-      return id;
+    }
+
+    // Auto-trigger DNA harvest when a platform is newly linked
+    // Uses dynamic import to avoid circular dependency
+    this.triggerDnaHarvestIfIdle(userId, platform).catch(err =>
+      console.error('[IntegrationService] DNA harvest trigger error:', err)
+    );
+
+    return integrationId;
+  }
+
+  /**
+   * Auto-trigger the Mass DNA Harvester after a new platform link, if it isn't already running.
+   */
+  private async triggerDnaHarvestIfIdle(userId: string, platform: string): Promise<void> {
+    try {
+      const { massDnaHarvester } = await import('./massDnaHarvestWorker.js');
+      const stats = massDnaHarvester.getStats();
+      if (!stats.isRunning) {
+        console.log(`[IntegrationService] Auto-triggering DNA harvest for linked platform: ${platform}`);
+        massDnaHarvester.start().then(() => {
+          console.log(`[IntegrationService] DNA harvest completed after linking ${platform}`);
+        });
+      } else {
+        console.log(`[IntegrationService] DNA harvest already running, skipping auto-trigger for ${platform}`);
+      }
+    } catch (err) {
+      console.warn('[IntegrationService] Could not trigger DNA harvest:', err);
     }
   }
 
