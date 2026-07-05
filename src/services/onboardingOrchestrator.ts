@@ -399,8 +399,12 @@ export class OnboardingOrchestrator {
         'Canva Account'
       );
 
-      // 6. Deep DNA Extraction
-      await canvaDnaService.performDeepExtraction(userId);
+      // 6. Deep DNA Extraction (non-blocking — won't fail the link if it errors)
+      try {
+        await canvaDnaService.performDeepExtraction(userId);
+      } catch (dnaErr) {
+        console.warn(`[OnboardingOrchestrator] DNA extraction failed (non-critical):`, dnaErr);
+      }
 
       // 7. Completion
       await db.update(onboardingSessions)
