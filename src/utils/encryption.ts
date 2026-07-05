@@ -3,7 +3,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const MASTER_KEY = process.env.ENCRYPTION_KEY || 'default_master_key_32_chars_long_!!';
+const RAW_KEY = process.env.ENCRYPTION_KEY || 'default_master_key_32_chars_long_!!';
+const MASTER_KEY = crypto.createHash('sha256').update(RAW_KEY).digest();
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 const TAG_LENGTH = 16;
