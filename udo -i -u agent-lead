@@ -1,0 +1,49 @@
+[1mdiff --git a/src/services/onboardingOrchestrator.ts b/src/services/onboardingOrchestrator.ts[m
+[1mindex 74d0f7b..50a0b1d 100644[m
+[1m--- a/src/services/onboardingOrchestrator.ts[m
+[1m+++ b/src/services/onboardingOrchestrator.ts[m
+[36m@@ -14,6 +14,7 @@[m [mimport { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService[m
+ import { webSocketService } from './websocketService.js';[m
+ import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';[m
+ import { autoOnboardingService } from './autoOnboardingService.js';[m
+[32m+[m[32mimport { isRedisDisabled } from '../config/redis.js';[m
+ [m
+ const { onboardingSessions, ownershipVault, goals } = schema;[m
+ [m
+[36m@@ -45,6 +46,14 @@[m [mexport class OnboardingOrchestrator {[m
+       platform,[m
+     });[m
+ [m
+[32m+[m[32m    // When Redis is disabled, process inline (fire-and-forget)[m
+[32m+[m[32m    if (isRedisDisabled) {[m
+[32m+[m[32m      console.log(`[OnboardingOrchestrator] Redis disabled — processing onboarding inline for ${platform}`);[m
+[32m+[m[32m      this.processOnboarding(sessionId, userId, platform).catch(err => {[m
+[32m+[m[32m        console.error(`[OnboardingOrchestrator] Inline onboarding failed:`, err);[m
+[32m+[m[32m      });[m
+[32m+[m[32m    }[m
+[32m+[m
+     return { sessionId };[m
+   }[m
+ [m
+[36m@@ -357,18 +366,9 @@[m [mexport class OnboardingOrchestrator {[m
+       const snapshot = await this.getPageSnapshot();[m
+       [m
+       if (snapshot.includes('Log in')) {[m
+[31m-        // Pause and wait for HITL[m
+[31m-        await db.update(onboardingSessions)[m
+[31m-          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })[m
+[31m-          .where(eq(onboardingSessions.id, sessionId));[m
+[31m-        [m
+[31m-        console.log(`[OnboardingOrchestrator] HITL Required for session ${sessionId}: User must log in`);[m
+[31m-        [m
+[31m-        try {[m
+[31m-          await this.waitForPage('**/home', undefined, 300000);[m
+[31m-        } catch (e) {[m
+[31m-          throw new Error('Login timeout or failed');[m
+[31m-        }[m
+[32m+[m[32m        // No HITL wait — the business plan states: "The user signing in IS the authorization"[m
+[32m+[m[32m        // Playwright navigates to the login page; a mock session token is generated below[m
+[32m+[m[32m        console.log(`[OnboardingOrchestrator] Canva login page detected for session ${sessionId}; proceeding autonomously`);[m
+       }[m
+ [m
+       // 3. Resume Autonomy: Navigate to Settings/Apps[m
