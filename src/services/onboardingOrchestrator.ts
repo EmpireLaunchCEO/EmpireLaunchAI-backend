@@ -14,7 +14,6 @@ import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService
 import { webSocketService } from './websocketService.js';
 import { dnaHuntOrchestrator } from './dnaHuntOrchestrator.js';
 import { autoOnboardingService } from './autoOnboardingService.js';
-import { isRedisDisabled } from '../config/redis.js';
 
 const { onboardingSessions, ownershipVault, goals } = schema;
 
@@ -46,13 +45,11 @@ export class OnboardingOrchestrator {
       platform,
     });
 
-    // When Redis is disabled, process inline (fire-and-forget)
-    if (isRedisDisabled) {
-      console.log(`[OnboardingOrchestrator] Redis disabled — processing onboarding inline for ${platform}`);
-      this.processOnboarding(sessionId, userId, platform).catch(err => {
-        console.error(`[OnboardingOrchestrator] Inline onboarding failed:`, err);
-      });
-    }
+    // Always fire-and-forget inline processing (queue is optional for scalability)
+    console.log(`[OnboardingOrchestrator] Processing onboarding inline for ${platform}`);
+    this.processOnboarding(sessionId, userId, platform).catch(err => {
+      console.error(`[OnboardingOrchestrator] Inline onboarding failed:`, err);
+    });
 
     return { sessionId };
   }
