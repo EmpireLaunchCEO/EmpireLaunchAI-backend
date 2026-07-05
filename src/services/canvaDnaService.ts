@@ -3,56 +3,74 @@ import { dnaVaultService } from './dnaVaultService.js';
 import { webSocketService } from './websocketService.js';
 
 export class CanvaDnaService {
-    /**
-     * Performs a deep DNA extraction from a user's Canva account.
-     * This captures Brand Kits (colors, fonts) and Design intelligence (layouts).
-     */
-    async performDeepExtraction(userId: string) {
-        console.log(`[CanvaDna] Starting deep DNA extraction for user \${userId}`);
-        webSocketService.notifyUser(userId, 'ai-log', {
-            message: '[CANVA] 🧬 Starting deep Style DNA harvest from your Brand Kits and Designs...'
-        });
+  /**
+   * Perform deep Style DNA extraction from Canva's public template gallery.
+   * 
+   * Uses Playwright to browse Canva's public template categories (social media,
+   * logos, flyers, presentations, etc.) and extracts color palettes, typography
+   * signatures, and layout patterns from trending public designs.
+   * 
+   * Results are stored as **Global DNA** (`isGlobal: true`) so the AI can use
+   * that intelligence for all users — no personal Canva account accessed.
+   * No API keys needed — browser automation is the only tool.
+   */
+  async performDeepExtraction(userId: string): Promise<number> {
+    console.log(`[CanvaDna] Starting public template Style DNA harvest for user ${userId}`);
+    webSocketService.notifyUser(userId, 'ai-log', {
+      message: '[CANVA] 🧬 Browsing trending public templates for Style DNA (colors, fonts, layouts)...'
+    });
 
-        try {
-            // 1. Extract Brand Kit DNA
-            const brandKitStrands = await canvaService.extractBrandKitDna(userId);
-            console.log(`[CanvaDna] Extracted \${brandKitStrands.length} brand kit strands`);
+    try {
+      // Extract DNA from Canva's public template gallery via Playwright
+      const publicStrands = await canvaService.extractPublicTemplateDna();
+      console.log(`[CanvaDna] Extracted ${publicStrands.length} public template strands`);
 
-            // 2. Extract User Design DNA
-            const designStrands = await canvaService.extractUserDesignDna(userId);
-            console.log(`[CanvaDna] Extracted \${designStrands.length} design strands`);
+      // Store all strands as Global DNA (isGlobal: true, no userId)
+      let savedCount = 0;
+      for (const strand of publicStrands) {
+        const globalStrand = {
+          ...strand,
+          isGlobal: true,
+          isSynthesized: false,
+        };
+        await dnaVaultService.storeStrand(globalStrand);
+        savedCount++;
+      }
 
-            const allStrands = [...brandKitStrands, ...designStrands];
+      // Also add a summary strand for this harvest session
+      await dnaVaultService.storeStrand({
+        category: 'niche_pattern',
+        subCategory: 'canva_public_harvest',
+        manifest: {
+          harvestTimestamp: new Date().toISOString(),
+          strandCount: savedCount,
+          categoriesScanned: publicStrands.map(s => s.metadata?.templateCategory).filter(Boolean),
+          source: 'canva_public_template_gallery',
+        },
+        performanceScore: 85,
+        sourcePlatform: 'canva',
+        isGlobal: true,
+        isSynthesized: false,
+        metadata: {
+          type: 'harvest_summary',
+          userId,
+          harvestDate: new Date().toISOString(),
+        },
+      });
 
-            // 3. Store in Vault
-            let savedCount = 0;
-            for (const strand of allStrands) {
-                // Ensure userId is set and isGlobal is false for user-owned DNA
-                // We also set isSynthesized to false because this is a direct import of user's own style, 
-                // not a new synthesis (though it can be used for synthesis later).
-                const personalizedStrand = {
-                    ...strand,
-                    userId,
-                    isGlobal: false,
-                    isSynthesized: false 
-                };
-                await dnaVaultService.storeStrand(personalizedStrand);
-                savedCount++;
-            }
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `[CANVA] ✅ Public template harvest complete! Added ${savedCount} global Style DNA strands to the Universal Vault.`
+      });
 
-            webSocketService.notifyUser(userId, 'ai-log', {
-                message: `[CANVA] ✅ Deep harvest complete! Added \${savedCount} private style strands to your DNA Vault.`
-            });
-
-            return savedCount;
-        } catch (error: any) {
-            console.error(`[CanvaDna] Deep extraction failed: \${error.message}`);
-            webSocketService.notifyUser(userId, 'ai-log', {
-                message: `[CANVA] ⚠️ Deep harvest encountered an error: \${error.message}`
-            });
-            throw error;
-        }
+      return savedCount;
+    } catch (error: any) {
+      console.error(`[CanvaDna] Public template harvest failed: ${error.message}`);
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `[CANVA] ⚠️ Public template harvest encountered an error: ${error.message}`
+      });
+      throw error;
     }
+  }
 }
 
 export const canvaDnaService = new CanvaDnaService();
