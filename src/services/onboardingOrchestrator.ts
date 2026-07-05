@@ -81,7 +81,7 @@ export class OnboardingOrchestrator {
     await this.initBrowser();
     const context = await this.browser!.newContext();
     this.page = await context.newPage();
-    await this.page.goto(url, { waitUntil: 'networkidle' });
+    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     return this.page;
   }
 
@@ -111,7 +111,9 @@ export class OnboardingOrchestrator {
    */
   private async waitForNetworkIdle(): Promise<void> {
     if (!this.page) throw new Error('Page not initialized');
-    await this.page.waitForLoadState('networkidle');
+    await this.page.waitForLoadState('domcontentloaded');
+    // Small delay to let async content settle
+    await new Promise(r => setTimeout(r, 2000));
   }
 
   /**
@@ -373,7 +375,7 @@ export class OnboardingOrchestrator {
         .set({ status: 'in_progress', currentState: 'RESUMING_AUTONOMY', updatedAt: new Date() })
         .where(eq(onboardingSessions.id, sessionId));
 
-      await this.page!.goto('https://www.canva.com/settings/apps', { waitUntil: 'networkidle' });
+      await this.page!.goto('https://www.canva.com/settings/apps', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await this.waitForNetworkIdle();
 
       // 4. Connection phase
@@ -441,7 +443,7 @@ export class OnboardingOrchestrator {
       const latestGoal = await this.getLatestUserGoal(userId);
       const goalText = latestGoal ? latestGoal.description || latestGoal.title : "Digital Marketing Empire";
 
-      await this.page!.goto('https://www.etsy.com/your/shop/about', { waitUntil: 'networkidle' });
+      await this.page!.goto('https://www.etsy.com/your/shop/about', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await this.waitForNetworkIdle();
 
       // 4. Fill Profile
@@ -735,7 +737,7 @@ export class OnboardingOrchestrator {
           .set({ status: 'in_progress', currentState: 'NAVIGATING_TO_KEYS', updatedAt: new Date() })
           .where(eq(onboardingSessions.id, sessionId));
 
-        await this.page!.goto('https://systeme.io/dashboard/settings/api_keys', { waitUntil: 'networkidle' });
+        await this.page!.goto('https://systeme.io/dashboard/settings/api_keys', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await this.waitForNetworkIdle();
 
         await db.update(onboardingSessions)
