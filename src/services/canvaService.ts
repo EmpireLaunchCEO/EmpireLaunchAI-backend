@@ -124,6 +124,67 @@ export class CanvaService {
         ['#FFE4E1', '#FF6B6B', '#4ECDC4', '#2C3E50'],
       ],
     },
+    {
+      path: '/templates/backgrounds/',
+      label: 'Backgrounds',
+      layoutType: 'background',
+      commonPalettes: [
+        ['#1A1A2E', '#16213E', '#0F3460', '#E94560'],
+        ['#0F0F0F', '#1A1A1A', '#2D2D2D', '#F5F5F5'],
+        ['#FFE4E1', '#FFDAB9', '#E6E6FA', '#F0F8FF'],
+        ['#2C3E50', '#3498DB', '#8E44AD', '#F39C12'],
+      ],
+    },
+    {
+      path: '/templates/banners/',
+      label: 'Banners',
+      layoutType: 'banner',
+      commonPalettes: [
+        ['#FFFFFF', '#E74C3C', '#2C3E50', '#3498DB'],
+        ['#1A1A2E', '#E94560', '#FFFFFF', '#0F3460'],
+        ['#F8F9FA', '#007BFF', '#FFC107', '#28A745'],
+      ],
+    },
+    {
+      path: '/templates/infographics/',
+      label: 'Infographics',
+      layoutType: 'infographic',
+      commonPalettes: [
+        ['#FFFFFF', '#2C3E50', '#3498DB', '#E74C3C'],
+        ['#F0F4F8', '#2D3748', '#3182CE', '#38A169'],
+        ['#1A1A2E', '#16213E', '#E94560', '#F5A623'],
+      ],
+    },
+    {
+      path: '/templates/posters/',
+      label: 'Posters',
+      layoutType: 'poster',
+      commonPalettes: [
+        ['#FFFFFF', '#2C3E50', '#E74C3C', '#F39C12'],
+        ['#0D1117', '#FFFFFF', '#58A6FF', '#FF6B6B'],
+        ['#1A1A2E', '#E94560', '#FFFFFF', '#16213E'],
+      ],
+    },
+    {
+      path: '/templates/cards/',
+      label: 'Cards',
+      layoutType: 'card',
+      commonPalettes: [
+        ['#FFFFFF', '#FFD700', '#8B4513', '#2E8B57'],
+        ['#FFF8E7', '#C0392B', '#2C3E50', '#E67E22'],
+        ['#F0F8FF', '#4169E1', '#FF69B4', '#9370DB'],
+      ],
+    },
+    {
+      path: '/templates/newsletters/',
+      label: 'Newsletters',
+      layoutType: 'newsletter',
+      commonPalettes: [
+        ['#FFFFFF', '#2C3E50', '#3498DB', '#ECF0F1'],
+        ['#F8F9FA', '#343A40', '#007BFF', '#E8F4FD'],
+        ['#FFFFFF', '#4A90D9', '#50C878', '#F5A623'],
+      ],
+    },
   ];
 
   /**
@@ -157,6 +218,30 @@ export class CanvaService {
     educational: [
       { headline: 'Fredoka One Regular', body: 'Nunito Regular' },
       { headline: 'Patrick Hand Regular', body: 'Open Sans Regular' },
+    ],
+    background: [
+      { headline: 'Playfair Display Regular', body: 'Lato Light' },
+      { headline: 'Montserrat Light', body: 'Open Sans Light' },
+    ],
+    banner: [
+      { headline: 'Oswald Bold', body: 'Roboto Condensed Regular' },
+      { headline: 'Bebas Neue Bold', body: 'Montserrat Regular' },
+    ],
+    infographic: [
+      { headline: 'Poppins Bold', body: 'Inter Regular' },
+      { headline: 'Rubik Medium', body: 'Roboto Regular' },
+    ],
+    poster: [
+      { headline: 'Anton Regular', body: 'Lato Regular' },
+      { headline: 'Playfair Display Black', body: 'Montserrat Light' },
+    ],
+    card: [
+      { headline: 'Great Vibes Regular', body: 'Lato Light' },
+      { headline: 'Playfair Display Bold', body: 'Open Sans Regular' },
+    ],
+    newsletter: [
+      { headline: 'Merriweather Bold', body: 'Merriweather Light' },
+      { headline: 'Lora Bold', body: 'Lora Regular' },
     ],
     generic: [
       { headline: 'Montserrat Bold', body: 'Open Sans Regular' },
@@ -314,6 +399,12 @@ export class CanvaService {
       marketing: 'f_pattern_with_cta',
       video: 'dynamic_off_center',
       educational: 'structured_grid',
+      background: 'full_bleed_texture',
+      banner: 'horizontal_band_centered',
+      infographic: 'vertical_flow_diagram',
+      poster: 'bold_center_anchor',
+      card: 'framed_center_composition',
+      newsletter: 'multi_column_grid',
     };
     return styles[layoutType] || 'balanced_grid';
   }
@@ -327,6 +418,12 @@ export class CanvaService {
       marketing: '16:9',
       video: '16:9',
       educational: '4:3',
+      background: '16:9',
+      banner: '1200:628',
+      infographic: '9:16',
+      poster: '11:17',
+      card: '5:7',
+      newsletter: '600:1200',
     };
     return ratios[layoutType] || '16:9';
   }
