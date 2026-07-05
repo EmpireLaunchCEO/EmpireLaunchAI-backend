@@ -10,6 +10,7 @@ import { massDnaHarvester } from '../services/massDnaHarvestWorker.js';
 import { campaignService } from '../services/campaignService.js';
 import { etsyPollingService } from '../services/etsyPollingService.js';
 import { creativeLoopService } from '../services/creativeLoopService.js';
+import { canvaDnaService } from '../services/canvaDnaService.js';
 
 export class SchedulerWorker {
   start() {
@@ -83,6 +84,18 @@ export class SchedulerWorker {
         await creativeLoopService.tick();
       } catch (error) {
         console.error('[SchedulerWorker] Error in Gemini Creative Loop:', error);
+      }
+    });
+
+    // Weekly Canva Public Template DNA Harvest — every Sunday at midnight
+    // Keeps the Global DNA Pool fresh with trending public template styles
+    cron.schedule('0 0 * * 0', async () => {
+      console.log('[SchedulerWorker] Running weekly Canva public template DNA harvest...');
+      try {
+        await canvaDnaService.performDeepExtraction('system');
+        console.log('[SchedulerWorker] Weekly Canva DNA harvest completed successfully');
+      } catch (error) {
+        console.error('[SchedulerWorker] Error in weekly Canva DNA harvest:', error);
       }
     });
   }
