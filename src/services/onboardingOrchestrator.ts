@@ -24,7 +24,7 @@ export interface OnboardingAction {
 
 export class OnboardingOrchestrator {
   
-  async startOnboarding(userId: string, platform: string) {
+  async startOnboarding(userId: string, platform: string, credentials?: { email?: string; password?: string }) {
     const sessionId = uuidv4();
     
     // Create session in DB
@@ -43,11 +43,12 @@ export class OnboardingOrchestrator {
       sessionId,
       userId,
       platform,
+      credentials,
     });
 
     // Always fire-and-forget inline processing (queue is optional for scalability)
     console.log(`[OnboardingOrchestrator] Processing onboarding inline for ${platform}`);
-    this.processOnboarding(sessionId, userId, platform).catch(err => {
+    this.processOnboarding(sessionId, userId, platform, credentials).catch(err => {
       console.error(`[OnboardingOrchestrator] Inline onboarding failed:`, err);
     });
 
@@ -190,7 +191,7 @@ export class OnboardingOrchestrator {
   }
 
   // Moved to onboardingWorker.ts for async execution
-  public async processOnboarding(sessionId: string, userId: string, platform: string) {
+  public async processOnboarding(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string }) {
     console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
     
     try {
@@ -231,7 +232,7 @@ export class OnboardingOrchestrator {
         console.log(`[OnboardingOrchestrator] Using Neural Handshake (browser) for ${platform}`);
         
         if (platformLower === 'canva') {
-          await this.executeCanvaFlow(sessionId, userId);
+          await this.executeCanvaFlow(sessionId, userId, credentials);
         } else if (platformLower === 'etsy') {
           await this.executeEtsyFlow(sessionId, userId);
         } else if (platformLower === 'tiktok') {
@@ -356,18 +357,25 @@ export class OnboardingOrchestrator {
     return targetGoalId;
   }
 
-  private async executeCanvaFlow(sessionId: string, userId: string) {
+  private async executeCanvaFlow(sessionId: string, userId: string, credentials?: { email?: string; password?: string }) {
     try {
       // 1. Open Canva login
       await this.openPage('https://www.canva.com/login');
       
-      // 2. Check if login is required
+      // 2. Check if login is required and we have credentials
       const snapshot = await this.getPageSnapshot();
       
-      if (snapshot.includes('Log in')) {
-        // No HITL wait — the business plan states: "The user signing in IS the authorization"
-        // Playwright navigates to the login page; a mock session token is generated below
-        console.log(`[OnboardingOrchestrator] Canva login page detected for session ${sessionId}; proceeding autonomously`);
+      if (snapshot.includes('Log in') || snapshot.includes('Email')) {
+        if (credentials?.email && credentials?.password) {
+          console.log(`[OnboardingOrchestrator] Using credential-based login for Canva session ${sessionId}`);
+          await this.fillElement('input[type="email"], input[name="email"]', credentials.email);
+          await this.fillElement('input[type="password"]', credentials.password);
+          await this.clickElement('button[type="submit"]');
+          await this.waitForPage('**/home', undefined, 30000);
+        } else {
+          // No credentials — flow continues to generate mock token (user signing in IS the authorization)
+          console.log(`[OnboardingOrchestrator] Canva login page detected for session ${sessionId}; no credentials provided, proceeding autonomously`);
+        }
       }
 
       // 3. Resume Autonomy: Navigate to Settings/Apps

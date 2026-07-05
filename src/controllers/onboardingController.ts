@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm';
 
 export const startOnboarding = async (req: Request, res: Response) => {
   try {
-    const { userId, platform } = req.body;
+    const { userId, platform, credentials } = req.body;
     if (!userId || !platform) {
       return res.status(400).json({ error: 'userId and platform are required' });
     }
@@ -32,7 +32,7 @@ export const startOnboarding = async (req: Request, res: Response) => {
       return res.json({ status: 'success', url: accountLink.url });
     }
 
-    const { sessionId } = await onboardingOrchestrator.startOnboarding(userId, platform);
+    const { sessionId } = await onboardingOrchestrator.startOnboarding(userId, platform, credentials);
 
     res.json({
       status: 'success',
