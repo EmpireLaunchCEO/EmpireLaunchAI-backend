@@ -242,20 +242,20 @@ export class OnboardingOrchestrator {
         } else if (platformLower === 'systeme_io') {
           await this.executeSystemeIoFlow(sessionId, userId);
         } else if (platformLower === 'behance') {
-          await this.executeBehanceFlow(sessionId, userId);
+          await this.executeBehanceFlow(sessionId, userId, credentials);
         } else if (platformLower === 'figma') {
-          await this.executeFigmaFlow(sessionId, userId);
+          await this.executeFigmaFlow(sessionId, userId, credentials);
         } else if (platformLower === 'kittl') {
-          await this.executeKittlFlow(sessionId, userId);
+          await this.executeKittlFlow(sessionId, userId, credentials);
         } else if (platformLower === 'redbubble') {
-          await this.executeRedbubbleFlow(sessionId, userId);
+          await this.executeRedbubbleFlow(sessionId, userId, credentials);
         } else if (['fiverr', 'youtube', 'instagram', 'facebook', 'gmail'].includes(platformLower)) {
-          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
+          await this.executeGenericBrowserLogin(sessionId, userId, platformLower, credentials);
         } else {
           // Catch-all: ANY platform the user selects gets a generic Neural Handshake
           // No developer app approvals needed — Playwright handles the browser login
           console.log(`[OnboardingOrchestrator] No specific flow for ${platform}; using generic browser login`);
-          await this.executeGenericBrowserLogin(sessionId, userId, platformLower);
+          await this.executeGenericBrowserLogin(sessionId, userId, platformLower, credentials);
         }
       }
 
@@ -535,7 +535,7 @@ export class OnboardingOrchestrator {
     }
   }
 
-  private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string) {
+  private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string }) {
     const urls: Record<string, string> = {
       fiverr: 'https://www.fiverr.com/login',
       youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
@@ -562,13 +562,26 @@ export class OnboardingOrchestrator {
       const snapshot = await this.getPageSnapshot();
 
       if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
-        await db.update(onboardingSessions)
-          .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
-          .where(eq(onboardingSessions.id, sessionId));
-        try {
-          await this.waitForPage(waitUrl, undefined, 300000);
-        } catch (e) {
-          throw new Error(`${platform} login timeout or failed`);
+        if (credentials?.email && credentials?.password) {
+          console.log(`[OnboardingOrchestrator] Using credential-based login for ${platform} session ${sessionId}`);
+          await this.fillElement('input[type="email"], input[name="email"], input[name="username"]', credentials.email);
+          await this.fillElement('input[type="password"]', credentials.password);
+          await this.clickElement('button[type="submit"], input[type="submit"]');
+          // Try waiting for the post-login URL, but don't fail if the specific waitUrl isn't matched
+          try {
+            await this.waitForPage(waitUrl, undefined, 30000);
+          } catch {
+            console.log(`[OnboardingOrchestrator] ${platform} post-login URL wait timed out; proceeding with credential extraction`);
+          }
+        } else {
+          await db.update(onboardingSessions)
+            .set({ status: 'hitl_required', currentState: 'LOGIN_REQUIRED', updatedAt: new Date() })
+            .where(eq(onboardingSessions.id, sessionId));
+          try {
+            await this.waitForPage(waitUrl, undefined, 300000);
+          } catch (e) {
+            throw new Error(`${platform} login timeout or failed`);
+          }
         }
       }
 
@@ -613,20 +626,20 @@ export class OnboardingOrchestrator {
     }
   }
 
-  private async executeBehanceFlow(sessionId: string, userId: string) {
-    return this.executeGenericBrowserLogin(sessionId, userId, 'behance');
+  private async executeBehanceFlow(sessionId: string, userId: string, credentials?: { email?: string; password?: string }) {
+    return this.executeGenericBrowserLogin(sessionId, userId, 'behance', credentials);
   }
 
-  private async executeFigmaFlow(sessionId: string, userId: string) {
-    return this.executeGenericBrowserLogin(sessionId, userId, 'figma');
+  private async executeFigmaFlow(sessionId: string, userId: string, credentials?: { email?: string; password?: string }) {
+    return this.executeGenericBrowserLogin(sessionId, userId, 'figma', credentials);
   }
 
-  private async executeKittlFlow(sessionId: string, userId: string) {
-    return this.executeGenericBrowserLogin(sessionId, userId, 'kittl');
+  private async executeKittlFlow(sessionId: string, userId: string, credentials?: { email?: string; password?: string }) {
+    return this.executeGenericBrowserLogin(sessionId, userId, 'kittl', credentials);
   }
 
-  private async executeRedbubbleFlow(sessionId: string, userId: string) {
-    return this.executeGenericBrowserLogin(sessionId, userId, 'redbubble');
+  private async executeRedbubbleFlow(sessionId: string, userId: string, credentials?: { email?: string; password?: string }) {
+    return this.executeGenericBrowserLogin(sessionId, userId, 'redbubble', credentials);
   }
 
   private async executeGoDaddyFlow(sessionId: string, userId: string) {
