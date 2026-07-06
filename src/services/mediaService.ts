@@ -112,6 +112,39 @@ export class MediaService {
 
     return outputPath;
   }
+
+  /**
+   * Overlays background music onto a video with volume ducking
+   * so background music doesn't overpower speech.
+   */
+  async overlayAudio(videoPath: string, audioPath: string, outputName: string, musicVolume: number = 0.15): Promise<string> {
+    const outputPath = path.join(this.tempDir, outputName);
+    console.log(`Overlaying audio onto video: ${outputPath}`);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(videoPath)
+        .input(audioPath)
+        .audioFilters(`volume=${musicVolume}`)
+        .outputOptions([
+          '-c:v copy',
+          '-c:a aac',
+          '-shortest',
+          '-map 0:v:0',
+          '-map 1:a:0'
+        ])
+        .on('start', (cmd) => console.log('FFmpeg overlay command: ' + cmd))
+        .on('error', (err) => {
+          console.error('Error overlaying audio:', err);
+          reject(err);
+        })
+        .on('end', () => {
+          console.log('Audio overlay finished');
+          resolve(outputPath);
+        })
+        .save(outputPath);
+    });
+  }
 }
 
 export const mediaService = new MediaService();
