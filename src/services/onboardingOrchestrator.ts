@@ -236,7 +236,7 @@ export class OnboardingOrchestrator {
         } else if (platformLower === 'etsy') {
           await this.executeEtsyFlow(sessionId, userId);
         } else if (platformLower === 'tiktok') {
-          await this.executeTikTokFlow(sessionId, userId);
+          await this.executeGenericBrowserLogin(sessionId, userId, 'tiktok', credentials);
         } else if (platformLower === 'godaddy') {
           await this.executeGoDaddyFlow(sessionId, userId);
         } else if (platformLower === 'systeme_io') {
