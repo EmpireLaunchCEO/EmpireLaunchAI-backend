@@ -872,7 +872,110 @@ export class NeuralActionEngine {
     }
   }
 
-  // ─── Helper ──────────────────────────────────────────────────────
+  /**
+   * Post to TikTok with optional background music selected from TikTok's own library.
+   * 
+   * Flow:
+   * 1. Upload video to TikTok's upload page
+   * 2. If a mood is specified, click "Add Sound", search for a matching song, and select it
+   * 3. Add caption
+   * 4. Post
+   * 
+   * Uses TikTok's native music library — no copyright issues, proper attribution.
+   */
+  async postToTikTokWithMusic(
+    userId: string,
+    videoPath: string,
+    caption: string,
+    music?: { mood: string; searchTerm: string } | null
+  ): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Posting to TikTok for user ${userId}${music ? ` with ${music.mood} music` : ''}`);
+    
+    try {
+      const session = await this.loadSession(userId, 'tiktok');
+      if (!session) {
+        console.error('[NeuralActionEngine] No TikTok session found');
+        return false;
+      }
+      const { context, page } = session;
+
+      const isValid = await this.verifySession(page);
+      if (!isValid) {
+        await context.close();
+        console.error('[NeuralActionEngine] TikTok session expired');
+        return false;
+      }
+
+      // Navigate to TikTok upload page
+      await page.goto('https://www.tiktok.com/upload', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Upload video file via file input
+      const fileInput = await this.waitForSelector(page, 'input[type="file"]', 10000);
+      if (!fileInput) {
+        console.error('[NeuralActionEngine] Could not find file upload input');
+        await context.close();
+        return false;
+      }
+      await fileInput.setInputFiles(videoPath);
+      console.log('[NeuralActionEngine] Video file selected for upload');
+      await new Promise(r => setTimeout(r, 5000)); // Wait for upload processing
+
+      // If music is requested, use TikTok's native music library
+      if (music) {
+        try {
+          // Click "Add Sound" button
+          const addSoundBtn = await this.waitForSelector(page, 'button:has-text("Add Sound"), [aria-label="Add Sound"], div:has-text("Add sound")', 5000);
+          if (addSoundBtn) {
+            await addSoundBtn.click();
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          // Search for music matching the mood/term
+          const searchInput = await this.waitForSelector(page, 'input[placeholder="Search music"], input[type="search"]', 5000);
+          if (searchInput) {
+            await searchInput.click();
+            await page.fill('input[placeholder="Search music"], input[type="search"]', music.searchTerm);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          // Click on the first search result (song)
+          const firstResult = await this.waitForSelector(page, 'div[data-e2e="music-item"], div[class*="music"], div[class*="MusicList"], div[role="button"]:has(span)', 5000);
+          if (firstResult) {
+            await firstResult.click();
+            console.log(`[NeuralActionEngine] Selected music: ${music.searchTerm}`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        } catch (musicErr: any) {
+          console.warn(`[NeuralActionEngine] Music selection failed (non-fatal): ${musicErr.message}`);
+          // Continue even if music selection fails
+        }
+      }
+
+      // Add caption/description
+      const captionInput = await this.waitForSelector(page, 'textarea[placeholder*="caption"], textarea[placeholder*="description"], [contenteditable="true"]', 5000);
+      if (captionInput) {
+        await captionInput.click();
+        await page.fill('textarea[placeholder*="caption"], textarea[placeholder*="description"], [contenteditable="true"]', caption);
+      }
+
+      // Click Post
+      const postBtn = await this.waitForSelector(page, 'button:has-text("Post"), button:has-text("Upload"), button[type="submit"]', 10000);
+      if (postBtn) {
+        await postBtn.click();
+        console.log('[NeuralActionEngine] TikTok post submitted');
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] TikTok post failed:`, err.message);
+      return false;
+    }
+  }
+
+  // ─── Helper ──────────────────────────────────────────────────────────
 
   private getDomainForPlatform(platform: string): string {
     const domains: Record<string, string> = {
