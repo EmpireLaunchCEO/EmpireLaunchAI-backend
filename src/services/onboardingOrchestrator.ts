@@ -234,13 +234,13 @@ export class OnboardingOrchestrator {
         if (platformLower === 'canva') {
           await this.executeCanvaFlow(sessionId, userId, credentials);
         } else if (platformLower === 'etsy') {
-          await this.executeEtsyFlow(sessionId, userId);
+          await this.executeGenericBrowserLogin(sessionId, userId, 'etsy', credentials);
         } else if (platformLower === 'tiktok') {
           await this.executeGenericBrowserLogin(sessionId, userId, 'tiktok', credentials);
         } else if (platformLower === 'godaddy') {
-          await this.executeGoDaddyFlow(sessionId, userId);
+          await this.executeGenericBrowserLogin(sessionId, userId, 'godaddy', credentials);
         } else if (platformLower === 'systeme_io') {
-          await this.executeSystemeIoFlow(sessionId, userId);
+          await this.executeGenericBrowserLogin(sessionId, userId, 'systeme_io', credentials);
         } else if (platformLower === 'behance') {
           await this.executeBehanceFlow(sessionId, userId, credentials);
         } else if (platformLower === 'figma') {
@@ -545,12 +545,18 @@ export class OnboardingOrchestrator {
       behance: 'https://www.behance.net/login',
       figma: 'https://www.figma.com/login',
       kittl: 'https://www.kittl.com/login',
-      redbubble: 'https://www.redbubble.com/auth/login'
+      redbubble: 'https://www.redbubble.com/auth/login',
+      etsy: 'https://www.etsy.com/signin',
+      godaddy: 'https://sso.godaddy.com/signin',
+      systeme_io: 'https://systeme.io/login',
+      tiktok: 'https://www.tiktok.com/login'
     };
     const waitUrls: Record<string, string> = {
       fiverr: '**/dashboard**', youtube: '**/home**', instagram: '**/home**',
       facebook: '**/home**', gmail: '**/mail**', behance: '**/for_you',
-      figma: '**/files', kittl: '**/dashboard', redbubble: '**/explore'
+      figma: '**/files', kittl: '**/dashboard', redbubble: '**/explore',
+      etsy: '**/your/shop**', godaddy: '**/manage**', systeme_io: '**/dashboard',
+      tiktok: '**/home**'
     };
 
     try {
