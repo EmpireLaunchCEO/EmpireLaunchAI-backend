@@ -573,14 +573,58 @@ export class OnboardingOrchestrator {
 
           // TikTok shows QR code by default — toggle to email/password input first
           if (platform === 'tiktok') {
-            try {
-              const useEmailBtn = await this.page!.waitForSelector('text=Use phone / email / username', { timeout: 5000 });
-              if (useEmailBtn) {
-                await useEmailBtn.click();
-                await new Promise(r => setTimeout(r, 1000)); // Wait for form transition
+            // TikTok is a heavy React SPA — wait for login UI to render fully
+            console.log(`[OnboardingOrchestrator] TikTok: waiting for login UI to render...`);
+            await new Promise(r => setTimeout(r, 3000));
+            
+            // Debug: log current page info
+            const currentUrl = this.page!.url();
+            const bodyText = await this.page!.textContent('body').catch(() => '');
+            const visibleClues = (bodyText || '').substring(0, 500);
+            console.log(`[OnboardingOrchestrator] TikTok URL: ${currentUrl}`);
+            console.log(`[OnboardingOrchestrator] TikTok visible text: ${visibleClues.replace(/\n+/g, ' | ')}`);
+            
+            // Try clicking the toggle with multiple possible selectors
+            let toggled = false;
+            const toggleSelectors = [
+              'text=/phone|email|username/i',
+              'a:has-text("email")',
+              'a:has-text("phone")',
+              'text=/log in with/i',
+              '[data-e2e*="email"]',
+              '[class*="email"]',
+              'button:has-text("email")',
+              'a:has-text("Use phone")',
+              'div:has-text("Email")',
+            ];
+            
+            for (const selector of toggleSelectors) {
+              try {
+                const btn = await this.page!.waitForSelector(selector, { timeout: 2000 });
+                if (btn) {
+                  console.log(`[OnboardingOrchestrator] TikTok: found toggle with selector "${selector}"`);
+                  await btn.click();
+                  await new Promise(r => setTimeout(r, 1500));
+                  toggled = true;
+                  break;
+                }
+              } catch {
+                // Try next selector
               }
-            } catch {
-              console.log(`[OnboardingOrchestrator] TikTok: email login toggle not found, trying direct fill`);
+            }
+
+            if (!toggled) {
+              // Fallback: try navigating directly to the email login URL
+              console.log(`[OnboardingOrchestrator] TikTok: toggle not found, trying direct email login URL`);
+              try {
+                await this.page!.goto('https://www.tiktok.com/login/phone-or-email/', {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 15000
+                });
+                await new Promise(r => setTimeout(r, 2000));
+              } catch {
+                console.log(`[OnboardingOrchestrator] TikTok: direct email URL also failed, proceeding with direct fill`);
+              }
             }
           }
 
