@@ -5,6 +5,7 @@ import { canvaDnaService } from './canvaDnaService.js';
 import { vaultService } from './vaultService.js';
 import { neuralBrowserService } from './neuralBrowserService.js';
 import { universalGatewayService } from './universalGatewayService.js';
+import { neuralActionEngine } from './neuralActionEngine.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
@@ -687,6 +688,11 @@ export class OnboardingOrchestrator {
       const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
       await vaultService.storeSecretWithEnvelope(userId, platform, 'SESSION_TOKEN', mockToken);
       await integrationService.saveIntegration(userId, platform, { sessionToken: mockToken }, undefined, accountHandle);
+
+      // Persist browser session (cookies + localStorage) for future Neural Action Engine use
+      if (this.page) {
+        await neuralActionEngine.persistSession(userId, platform, this.page);
+      }
 
       await db.update(onboardingSessions)
         .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
