@@ -128,7 +128,7 @@ export class NeuralActionEngine {
   async verifySession(page: Page): Promise<boolean> {
     try {
       const currentUrl = page.url();
-      const bodyText = await page.textContent('body').catch(() => '');
+      const bodyText = (await page.textContent('body').catch(() => '')) || '';
       const loginIndicators = ['log in', 'sign in', 'login', 'signin', 'password', 'email address'];
       const isLoginPage = loginIndicators.some(indicator =>
         bodyText.toLowerCase().includes(indicator)
