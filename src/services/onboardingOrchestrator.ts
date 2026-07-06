@@ -570,6 +570,20 @@ export class OnboardingOrchestrator {
       if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
         if (credentials?.email && credentials?.password) {
           console.log(`[OnboardingOrchestrator] Using credential-based login for ${platform} session ${sessionId}`);
+
+          // TikTok shows QR code by default — toggle to email/password input first
+          if (platform === 'tiktok') {
+            try {
+              const useEmailBtn = await this.page!.waitForSelector('text=Use phone / email / username', { timeout: 5000 });
+              if (useEmailBtn) {
+                await useEmailBtn.click();
+                await new Promise(r => setTimeout(r, 1000)); // Wait for form transition
+              }
+            } catch {
+              console.log(`[OnboardingOrchestrator] TikTok: email login toggle not found, trying direct fill`);
+            }
+          }
+
           await this.fillElement('input[type="email"], input[name="email"], input[name="username"]', credentials.email);
           await this.fillElement('input[type="password"]', credentials.password);
           await this.clickElement('button[type="submit"], input[type="submit"]');
