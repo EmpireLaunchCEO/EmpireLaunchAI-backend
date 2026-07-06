@@ -3,6 +3,35 @@ import { eq } from 'drizzle-orm';
 import { vaultService } from './vaultService.js';
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
 
+// ─── Action Types ─────────────────────────────────────────────────
+
+export type ActionStepType = 'navigate' | 'click' | 'fill' | 'select' | 'wait' | 'screenshot' | 'extract' | 'evaluate';
+
+export interface ActionStep {
+  type: ActionStepType;
+  /** URL for 'navigate', selector for 'click'/'fill'/'select'/'extract' */
+  url?: string;
+  selector?: string;
+  /** Value for 'fill'/'select' */
+  value?: string;
+  /** Milliseconds for 'wait' */
+  ms?: number;
+  /** Key to store extracted result under for 'extract' */
+  storeAs?: string;
+  /** JavaScript code to evaluate for 'evaluate' */
+  script?: string;
+  /** Whether to stop on error (default: true) */
+  stopOnError?: boolean;
+}
+
+export interface ActionResult {
+  step: number;
+  type: ActionStepType;
+  success: boolean;
+  data?: any;
+  error?: string;
+}
+
 /**
  * Neural Action Engine
  * 
@@ -107,6 +136,149 @@ export class NeuralActionEngine {
       if (isLoginPage && currentUrl.includes('login')) return false;
       return true;
     } catch { return false; }
+  }
+
+  // ─── General-Purpose Action Executor ─────────────────────────────
+
+  /**
+   * Execute a sequence of actions on a platform using the saved session.
+   * 
+   * Enables the AI to perform arbitrary setup tasks (configure DNS, email
+   * settings, etc.) on any linked platform — no hardcoded pipelines needed.
+   * 
+   * @param userId - The user's ID
+   * @param platform - Platform name (e.g. 'godaddy', 'systeme_io')
+   * @param actions - Array of ActionStep objects to execute in sequence
+   * @returns Array of ActionResult objects for each step
+   */
+  async executeActions(userId: string, platform: string, actions: ActionStep[]): Promise<ActionResult[]> {
+    console.log(`[NeuralActionEngine] Executing ${actions.length} actions on ${platform} for user ${userId}`);
+    const results: ActionResult[] = [];
+    
+    const session = await this.loadSession(userId, platform);
+    if (!session) {
+      return [{ step: 0, type: 'navigate', success: false, error: 'Failed to load session' }];
+    }
+    const { context, page } = session;
+
+    try {
+      const isValid = await this.verifySession(page);
+      if (!isValid) {
+        await context.close();
+        return [{ step: 0, type: 'navigate', success: false, error: 'Session expired — redirected to login' }];
+      }
+
+      for (let i = 0; i < actions.length; i++) {
+        const action = actions[i];
+        const stopOnError = action.stopOnError !== false; // Default: true
+
+        try {
+          const result = await this.executeSingleAction(page, action, i);
+          results.push(result);
+          
+          if (!result.success && stopOnError) {
+            console.error(`[NeuralActionEngine] Action ${i} (${action.type}) failed and stopOnError=true — aborting`);
+            break;
+          }
+        } catch (err: any) {
+          results.push({
+            step: i,
+            type: action.type,
+            success: false,
+            error: err.message,
+          });
+          if (stopOnError) break;
+        }
+      }
+    } catch (err: any) {
+      results.push({
+        step: -1,
+        type: 'navigate',
+        success: false,
+        error: `Session error: ${err.message}`,
+      });
+    } finally {
+      await context.close().catch(() => {});
+    }
+
+    return results;
+  }
+
+  /**
+   * Execute a single action step.
+   */
+  private async executeSingleAction(page: Page, action: ActionStep, stepIndex: number): Promise<ActionResult> {
+    const base: ActionResult = { step: stepIndex, type: action.type, success: false };
+
+    switch (action.type) {
+      case 'navigate': {
+        if (!action.url) return { ...base, error: 'URL is required for navigate' };
+        await page.goto(action.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 1500));
+        return { ...base, success: true, data: { url: page.url() } };
+      }
+
+      case 'click': {
+        if (!action.selector) return { ...base, error: 'Selector is required for click' };
+        await page.waitForSelector(action.selector, { timeout: 10000 });
+        await page.click(action.selector);
+        await new Promise(r => setTimeout(r, 500));
+        return { ...base, success: true };
+      }
+
+      case 'fill': {
+        if (!action.selector || action.value === undefined) {
+          return { ...base, error: 'Selector and value are required for fill' };
+        }
+        await page.waitForSelector(action.selector, { timeout: 10000 });
+        await page.fill(action.selector, action.value);
+        return { ...base, success: true };
+      }
+
+      case 'select': {
+        if (!action.selector || action.value === undefined) {
+          return { ...base, error: 'Selector and value are required for select' };
+        }
+        await page.waitForSelector(action.selector, { timeout: 10000 });
+        await page.selectOption(action.selector, action.value);
+        return { ...base, success: true };
+      }
+
+      case 'wait': {
+        const ms = action.ms || 1000;
+        await new Promise(r => setTimeout(r, ms));
+        return { ...base, success: true, data: { waitedMs: ms } };
+      }
+
+      case 'screenshot': {
+        const screenshotBuffer = await page.screenshot({ fullPage: true });
+        const base64 = screenshotBuffer.toString('base64');
+        return { ...base, success: true, data: { screenshot: base64, length: base64.length } };
+      }
+
+      case 'extract': {
+        if (!action.selector) return { ...base, error: 'Selector is required for extract' };
+        const element = await page.waitForSelector(action.selector, { timeout: 10000 });
+        if (!element) return { ...base, error: `Element not found: ${action.selector}` };
+        const text = await element.textContent();
+        const trimmed = (text || '').trim();
+        const result: ActionResult = {
+          ...base,
+          success: true,
+          data: { [action.storeAs || 'extracted']: trimmed },
+        };
+        return result;
+      }
+
+      case 'evaluate': {
+        if (!action.script) return { ...base, error: 'Script is required for evaluate' };
+        const evalResult = await page.evaluate(action.script);
+        return { ...base, success: true, data: { result: evalResult } };
+      }
+
+      default:
+        return { ...base, error: `Unknown action type: ${action.type}` };
+    }
   }
 
   /**
