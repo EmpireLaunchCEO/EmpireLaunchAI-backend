@@ -549,7 +549,7 @@ export class OnboardingOrchestrator {
       etsy: 'https://www.etsy.com/signin',
       godaddy: 'https://sso.godaddy.com/signin',
       systeme_io: 'https://systeme.io/login',
-      tiktok: 'https://www.tiktok.com/login'
+      tiktok: 'https://www.tiktok.com/login/phone-or-email/'
     };
     const waitUrls: Record<string, string> = {
       fiverr: '**/dashboard**', youtube: '**/home**', instagram: '**/home**',
