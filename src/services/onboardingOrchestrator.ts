@@ -556,7 +556,7 @@ export class OnboardingOrchestrator {
       facebook: '**/home**', gmail: '**/mail**', behance: '**/for_you',
       figma: '**/files', kittl: '**/dashboard', redbubble: '**/explore',
       etsy: '**/your/shop**', godaddy: '**/manage**', systeme_io: '**/dashboard',
-      tiktok: '**/home**'
+      tiktok: '**/foryou**'
     };
 
     try {
@@ -664,7 +664,14 @@ export class OnboardingOrchestrator {
           instagram: 'header h2, ._aa_y',
           facebook: '[role="main"] h1, .x1heor9g',
           youtube: '#channel-name, .ytd-channel-name',
-          gmail: '[aria-label*="Account:"], .gb_d'
+          gmail: '[aria-label*="Account:"], .gb_d',
+          tiktok: '[data-e2e*="user-name"], [class*="share-title"], .tiktok-username',
+          etsy: '.shop-name, .shop-name-and-nav-container',
+          godaddy: '[class*="user-name"], .account-info',
+          systeme_io: '.user-name, .profile-name, [class*="user"]',
+          pinterest: '[data-test-id="user-name"], .profileName',
+          shopify: '.shop-name, .store-name',
+          canva: '[class*="user-name"], [class*="profile"], .account-name'
         };
         const selector = selectors[platform];
         if (selector) {
