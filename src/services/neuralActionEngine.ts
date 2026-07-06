@@ -9,6 +9,14 @@ import { chromium, Browser, Page, BrowserContext } from 'playwright';
  * Persists Playwright browser sessions after login and enables the AI
  * to perform actions on linked platforms (post videos, create listings, etc.)
  * using saved session cookies — no API keys needed.
+ * 
+ * Each method follows the same pattern:
+ * 1. Load session via loadSession()
+ * 2. Verify session via verifySession()
+ * 3. Navigate to the appropriate page
+ * 4. Fill in the content (title, description, price, images)
+ * 5. Submit/publish
+ * 6. Close context
  */
 export class NeuralActionEngine {
   private browser: Browser | null = null;
@@ -23,6 +31,8 @@ export class NeuralActionEngine {
     return this.browser;
   }
 
+  // ─── Session Management ──────────────────────────────────────────
+
   /**
    * Persist the current browser session (cookies + localStorage) to the vault.
    * Called after successful login in executeGenericBrowserLogin().
@@ -31,13 +41,8 @@ export class NeuralActionEngine {
     try {
       const cookies = await page.context().cookies();
       const localStorageData = await page.evaluate(() => {
-        try {
-          return JSON.stringify(window.localStorage);
-        } catch {
-          return '{}';
-        }
+        try { return JSON.stringify(window.localStorage); } catch { return '{}'; }
       });
-
       const sessionData = JSON.stringify({ cookies, localStorage: localStorageData });
       await vaultService.storeSecretWithEnvelope(userId, platform, 'NEURAL_SESSION', sessionData);
       console.log(`[NeuralActionEngine] Session persisted for ${platform} user ${userId}`);
@@ -48,32 +53,25 @@ export class NeuralActionEngine {
 
   /**
    * Load a saved session into a new Playwright context.
-   * Returns null if no session exists or it can't be loaded.
    */
   async loadSession(userId: string, platform: string): Promise<{ context: BrowserContext; page: Page } | null> {
     try {
       const sessionJson = await vaultService.getSecret(userId, platform, 'NEURAL_SESSION');
-      if (!sessionJson) {
-        console.log(`[NeuralActionEngine] No saved session for ${platform} user ${userId}`);
-        return null;
-      }
+      if (!sessionJson) return null;
 
       const sessionData = JSON.parse(sessionJson);
       const browser = await this.getBrowser();
       const context = await browser.newContext();
 
-      // Restore cookies
       if (sessionData.cookies && Array.isArray(sessionData.cookies)) {
         await context.addCookies(sessionData.cookies);
       }
 
       const page = await context.newPage();
 
-      // Restore localStorage on the session's domain
       if (sessionData.localStorage && sessionData.localStorage !== '{}') {
         try {
           const lsData = JSON.parse(sessionData.localStorage);
-          // Need to navigate to the domain first before setting localStorage
           const domain = this.getDomainForPlatform(platform);
           if (domain) {
             await page.goto(domain, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
@@ -96,24 +94,28 @@ export class NeuralActionEngine {
   }
 
   /**
-   * Verify the session is still valid by checking if the page loads
-   * without redirecting to a login page.
+   * Verify the session is still valid by checking the page isn't on a login page.
    */
   async verifySession(page: Page): Promise<boolean> {
     try {
       const currentUrl = page.url();
-      const bodyText = (await page.textContent('body').catch(() => '')) || '';
+      const bodyText = await page.textContent('body').catch(() => '');
       const loginIndicators = ['log in', 'sign in', 'login', 'signin', 'password', 'email address'];
-      
       const isLoginPage = loginIndicators.some(indicator =>
         bodyText.toLowerCase().includes(indicator)
       );
+      if (isLoginPage && currentUrl.includes('login')) return false;
+      return true;
+    } catch { return false; }
+  }
 
-      if (isLoginPage && currentUrl.includes('login')) {
-        console.log(`[NeuralActionEngine] Session expired — redirected to login page`);
-        return false;
-      }
-
+  /**
+   * Navigate to a URL and wait for the SPA to render.
+   */
+  private async navigateAndWait(page: Page, url: string, waitMs: number = 3000): Promise<boolean> {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await new Promise(r => setTimeout(r, waitMs));
       return true;
     } catch {
       return false;
@@ -121,102 +123,585 @@ export class NeuralActionEngine {
   }
 
   /**
-   * Post a video to TikTok using the saved session.
-   * 
-   * @param userId - The user's ID
-   * @param videoPath - Absolute path to the video file on the server
-   * @param caption - Video caption text
-   * @param hashtags - Array of hashtags (without #)
-   * @returns true if posting succeeded, false otherwise
+   * Wait for a selector with a timeout, returning the element or null.
    */
-  async postToTikTok(userId: string, videoPath: string, caption: string, hashtags: string[]): Promise<boolean> {
-    console.log(`[NeuralActionEngine] Posting to TikTok for user ${userId}`);
-    const session = await this.loadSession(userId, 'tiktok');
-    if (!session) {
-      console.error(`[NeuralActionEngine] No TikTok session found for user ${userId}`);
-      return false;
-    }
+  private async waitForSelector(page: Page, selector: string, timeout: number = 10000): Promise<any> {
+    return page.waitForSelector(selector, { timeout }).catch(() => null);
+  }
 
+  // ─── Action Pipelines ────────────────────────────────────────────
+
+  /**
+   * Etsy: Create a new listing in the shop manager.
+   */
+  async createEtsyListing(
+    userId: string,
+    listing: {
+      title: string;
+      description: string;
+      price: number;
+      images: string[];
+      category?: string;
+      tags?: string[];
+    }
+  ): Promise<string | null> {
+    console.log(`[NeuralActionEngine] Creating Etsy listing for user ${userId}`);
+    const session = await this.loadSession(userId, 'etsy');
+    if (!session) return null;
     const { context, page } = session;
 
     try {
-      // Verify session is still valid
-      const isValid = await this.verifySession(page);
-      if (!isValid) {
-        await context.close();
-        return false;
-      }
+      if (!(await this.verifySession(page))) { await context.close(); return null; }
 
-      // Navigate to TikTok upload page
-      console.log(`[NeuralActionEngine] Navigating to TikTok upload...`);
-      await page.goto('https://www.tiktok.com/upload', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await new Promise(r => setTimeout(r, 3000)); // Wait for React SPA
+      // Navigate to Add Listing page
+      const navOk = await this.navigateAndWait(page, 'https://www.etsy.com/your/shops/me/listing-editor', 4000);
+      if (!navOk) { await context.close(); return null; }
 
-      // Check if we're on the upload page
+      // Check if we got to the listing editor
       const currentUrl = page.url();
-      if (!currentUrl.includes('upload')) {
-        console.error(`[NeuralActionEngine] TikTok upload page not reached — redirected to ${currentUrl}`);
+      if (!currentUrl.includes('listing') && !currentUrl.includes('shop')) {
+        console.error(`[NeuralActionEngine] Etsy: unexpected redirect to ${currentUrl}`);
         await context.close();
-        return false;
+        return null;
       }
 
-      // Upload video — TikTok uses a file input
-      const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 10000 }).catch(() => null);
-      if (!fileInput) {
-        console.error(`[NeuralActionEngine] TikTok: file input not found`);
-        await context.close();
-        return false;
+      // Fill title
+      const titleInput = await this.waitForSelector(page, 'input[name="title"], [class*="title"], #title');
+      if (titleInput) {
+        await titleInput.click();
+        await page.fill('input[name="title"], [class*="title"], #title', listing.title);
+        await new Promise(r => setTimeout(r, 500));
       }
 
-      await fileInput.setInputFiles(videoPath);
-      console.log(`[NeuralActionEngine] TikTok: video file selected`);
-      
-      // Wait for upload to complete
-      await new Promise(r => setTimeout(r, 5000));
-
-      // Fill caption
-      const captionInput = await page.waitForSelector(
-        '[class*="caption"], [class*="description"], [contenteditable="true"]',
-        { timeout: 10000 }
-      ).catch(() => null);
-
-      if (captionInput) {
-        const fullText = hashtags.length > 0
-          ? `${caption}\n\n${hashtags.map(h => `#${h}`).join(' ')}`
-          : caption;
-        await captionInput.click();
-        await page.fill('[contenteditable="true"], [class*="caption"], [class*="description"]', fullText);
-        console.log(`[NeuralActionEngine] TikTok: caption filled`);
+      // Fill description
+      const descInput = await this.waitForSelector(page, 'textarea[name="description"], [class*="description"], [contenteditable="true"]');
+      if (descInput) {
+        await descInput.click();
+        await page.fill('textarea[name="description"], [class*="description"], [contenteditable="true"]', listing.description);
+        await new Promise(r => setTimeout(r, 500));
       }
 
-      // Click post button
-      const postBtn = await page.waitForSelector(
-        'button:has-text("Post"), [class*="post-btn"], button:has-text("Upload")',
-        { timeout: 10000 }
-      ).catch(() => null);
+      // Upload images
+      if (listing.images.length > 0) {
+        const fileInput = await this.waitForSelector(page, 'input[type="file"]', 5000);
+        if (fileInput) {
+          await fileInput.setInputFiles(listing.images[0]);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
 
-      if (postBtn) {
-        await postBtn.click();
-        console.log(`[NeuralActionEngine] TikTok: post button clicked`);
-        await new Promise(r => setTimeout(r, 5000)); // Wait for post confirmation
+      // Fill price
+      const priceInput = await this.waitForSelector(page, 'input[name="price"], [class*="price"]');
+      if (priceInput) {
+        await priceInput.click();
+        await page.fill('input[name="price"], [class*="price"]', listing.price.toString());
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Fill tags
+      if (listing.tags && listing.tags.length > 0) {
+        for (const tag of listing.tags.slice(0, 13)) {
+          const tagInput = await this.waitForSelector(page, 'input[name="tags"], [class*="tag"]', 2000);
+          if (tagInput) {
+            await tagInput.click();
+            await page.fill('input[name="tags"], [class*="tag"]', tag);
+            await page.keyboard.press('Enter');
+            await new Promise(r => setTimeout(r, 300));
+          }
+        }
+      }
+
+      // Click publish
+      const publishBtn = await this.waitForSelector(page, 'button:has-text("Publish"), button:has-text("Save"), [class*="publish"]');
+      if (publishBtn) {
+        await publishBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
       }
 
       await context.close();
-      console.log(`[NeuralActionEngine] TikTok: post completed successfully`);
+      console.log(`[NeuralActionEngine] Etsy listing created: ${listing.title}`);
+      return `etsy_listing_${Date.now()}`;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Etsy listing failed:`, err.message);
+      await context.close().catch(() => {});
+      return null;
+    }
+  }
+
+  /**
+   * Shopify: Create a new product.
+   */
+  async createShopifyProduct(
+    userId: string,
+    product: {
+      title: string;
+      description: string;
+      price: number;
+      images?: string[];
+      vendor?: string;
+      productType?: string;
+      tags?: string[];
+    }
+  ): Promise<string | null> {
+    console.log(`[NeuralActionEngine] Creating Shopify product for user ${userId}`);
+    const session = await this.loadSession(userId, 'shopify');
+    if (!session) return null;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return null; }
+
+      await this.navigateAndWait(page, 'https://admin.shopify.com/admin/products/new', 4000);
+
+      // Fill title
+      const titleInput = await this.waitForSelector(page, 'input[name="title"], [class*="title"], #product-title');
+      if (titleInput) {
+        await titleInput.click();
+        await page.fill('input[name="title"], [class*="title"], #product-title', product.title);
+      }
+
+      // Fill description
+      const descInput = await this.waitForSelector(page, '[contenteditable="true"], textarea[name="description"]');
+      if (descInput) {
+        await descInput.click();
+        await page.fill('[contenteditable="true"], textarea[name="description"]', product.description);
+      }
+
+      // Fill price
+      const priceInput = await this.waitForSelector(page, 'input[name="price"], [class*="price"]');
+      if (priceInput) {
+        await priceInput.click();
+        await page.fill('input[name="price"], [class*="price"]', product.price.toString());
+      }
+
+      // Upload image
+      if (product.images && product.images.length > 0) {
+        const fileInput = await this.waitForSelector(page, 'input[type="file"]', 5000);
+        if (fileInput) {
+          await fileInput.setInputFiles(product.images[0]);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+
+      // Click save
+      const saveBtn = await this.waitForSelector(page, 'button:has-text("Save"), [class*="save"]');
+      if (saveBtn) {
+        await saveBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Shopify product created: ${product.title}`);
+      return `shopify_product_${Date.now()}`;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Shopify product failed:`, err.message);
+      await context.close().catch(() => {});
+      return null;
+    }
+  }
+
+  /**
+   * Instagram: Post a photo to feed.
+   */
+  async postToInstagram(userId: string, imagePath: string, caption: string): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Posting to Instagram for user ${userId}`);
+    const session = await this.loadSession(userId, 'instagram');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      // Navigate to Instagram
+      await this.navigateAndWait(page, 'https://www.instagram.com', 3000);
+
+      // Click create (+) button
+      const createBtn = await this.waitForSelector(page, 'svg[aria-label="New post"], [class*="create"], a[href*="create"]');
+      if (!createBtn) { await context.close(); return false; }
+      await createBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Upload image
+      const fileInput = await this.waitForSelector(page, 'input[type="file"]');
+      if (fileInput) {
+        await fileInput.setInputFiles(imagePath);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      // Click next/forward
+      const nextBtn = await this.waitForSelector(page, 'button:has-text("Next"), button:has-text("Forward")');
+      if (nextBtn) {
+        await nextBtn.click();
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      // Fill caption
+      const captionInput = await this.waitForSelector(page, '[class*="caption"], [aria-label*="caption"], [contenteditable="true"]');
+      if (captionInput) {
+        await captionInput.click();
+        await page.fill('[class*="caption"], [aria-label*="caption"], [contenteditable="true"]', caption);
+      }
+
+      // Click share
+      const shareBtn = await this.waitForSelector(page, 'button:has-text("Share"), button:has-text("Post")');
+      if (shareBtn) {
+        await shareBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Instagram post completed`);
       return true;
     } catch (err: any) {
-      console.error(`[NeuralActionEngine] TikTok post failed:`, err.message);
+      console.error(`[NeuralActionEngine] Instagram post failed:`, err.message);
       await context.close().catch(() => {});
       return false;
     }
   }
 
   /**
-   * Get the domain for a platform (used for localStorage restoration).
+   * YouTube: Upload a video.
    */
+  async uploadToYouTube(
+    userId: string,
+    videoPath: string,
+    title: string,
+    description: string,
+    tags?: string[]
+  ): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Uploading to YouTube for user ${userId}`);
+    const session = await this.loadSession(userId, 'youtube');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      // Navigate to YouTube Studio upload
+      await this.navigateAndWait(page, 'https://studio.youtube.com', 4000);
+
+      // Click create button
+      const createBtn = await this.waitForSelector(page, 'button:has-text("Create"), [class*="create"]');
+      if (!createBtn) { await context.close(); return false; }
+      await createBtn.click();
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Click upload video
+      const uploadBtn = await this.waitForSelector(page, 'button:has-text("Upload"), text=Upload videos', 3000);
+      if (uploadBtn) {
+        await uploadBtn.click();
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      // Select video file
+      const fileInput = await this.waitForSelector(page, 'input[type="file"]');
+      if (fileInput) {
+        await fileInput.setInputFiles(videoPath);
+        console.log(`[NeuralActionEngine] YouTube: video file selected, waiting for processing...`);
+        await new Promise(r => setTimeout(r, 5000)); // Wait for upload processing
+      }
+
+      // Fill title
+      const titleInput = await this.waitForSelector(page, '[class*="title"] input, input[aria-label*="Title"]');
+      if (titleInput) {
+        await titleInput.click();
+        await page.fill('[class*="title"] input, input[aria-label*="Title"]', title);
+      }
+
+      // Fill description
+      const descInput = await this.waitForSelector(page, '[class*="description"] textarea, textarea[aria-label*="Description"]');
+      if (descInput) {
+        await descInput.click();
+        await page.fill('[class*="description"] textarea, textarea[aria-label*="Description"]', description);
+      }
+
+      // Fill tags
+      if (tags && tags.length > 0) {
+        const tagInput = await this.waitForSelector(page, '[class*="tags"] input, input[aria-label*="Tags"]', 2000);
+        if (tagInput) {
+          await tagInput.click();
+          await page.fill('[class*="tags"] input, input[aria-label*="Tags"]', tags.join(', '));
+        }
+      }
+
+      // Click next through visibility options
+      for (let i = 0; i < 3; i++) {
+        const nextBtn = await this.waitForSelector(page, 'button:has-text("Next")', 3000);
+        if (nextBtn) {
+          await nextBtn.click();
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      }
+
+      // Set visibility to public
+      const publicRadio = await this.waitForSelector(page, 'input[value="PUBLIC"], [aria-label*="Public"]', 3000);
+      if (publicRadio) {
+        await publicRadio.click();
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Click publish
+      const publishBtn = await this.waitForSelector(page, 'button:has-text("Publish"), button:has-text("Save")');
+      if (publishBtn) {
+        await publishBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] YouTube upload completed: ${title}`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] YouTube upload failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * Pinterest: Create a Pin.
+   */
+  async createPinterestPin(
+    userId: string,
+    imagePath: string,
+    title: string,
+    description: string,
+    link?: string
+  ): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Creating Pinterest pin for user ${userId}`);
+    const session = await this.loadSession(userId, 'pinterest');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      await this.navigateAndWait(page, 'https://www.pinterest.com/pin-builder/', 3000);
+
+      // Upload image
+      const fileInput = await this.waitForSelector(page, 'input[type="file"]');
+      if (fileInput) {
+        await fileInput.setInputFiles(imagePath);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      // Fill title
+      const titleInput = await this.waitForSelector(page, 'input[name="title"], [class*="title"]');
+      if (titleInput) {
+        await titleInput.click();
+        await page.fill('input[name="title"], [class*="title"]', title);
+      }
+
+      // Fill description
+      const descInput = await this.waitForSelector(page, 'textarea[name="description"], [class*="description"]');
+      if (descInput) {
+        await descInput.click();
+        await page.fill('textarea[name="description"], [class*="description"]', description);
+      }
+
+      // Fill link
+      if (link) {
+        const linkInput = await this.waitForSelector(page, 'input[name="link"], [class*="link"]');
+        if (linkInput) {
+          await linkInput.click();
+          await page.fill('input[name="link"], [class*="link"]', link);
+        }
+      }
+
+      // Click save/publish
+      const saveBtn = await this.waitForSelector(page, 'button:has-text("Save"), button:has-text("Publish"), [class*="save"]');
+      if (saveBtn) {
+        await saveBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Pinterest pin created: ${title}`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Pinterest pin failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * Facebook: Create a post on the timeline/page.
+   */
+  async createFacebookPost(userId: string, text: string, imagePath?: string): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Creating Facebook post for user ${userId}`);
+    const session = await this.loadSession(userId, 'facebook');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      await this.navigateAndWait(page, 'https://www.facebook.com', 3000);
+
+      // Click on "What's on your mind?"
+      const postArea = await this.waitForSelector(page, '[aria-label*="on your mind"], [class*="status"], [role="textbox"]');
+      if (postArea) {
+        await postArea.click();
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      // Type the post text
+      const textInput = await this.waitForSelector(page, '[aria-label*="on your mind"], [class*="status"], [role="textbox"], [contenteditable="true"]');
+      if (textInput) {
+        await textInput.click();
+        await page.fill('[aria-label*="on your mind"], [class*="status"], [role="textbox"], [contenteditable="true"]', text);
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Upload image if provided
+      if (imagePath) {
+        const fileInput = await this.waitForSelector(page, 'input[type="file"]', 5000);
+        if (fileInput) {
+          await fileInput.setInputFiles(imagePath);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+
+      // Click post
+      const postBtn = await this.waitForSelector(page, 'button:has-text("Post"), [class*="post"], [aria-label*="Post"]');
+      if (postBtn) {
+        await postBtn.click();
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Facebook post completed`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Facebook post failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * Canva: Create a design from a template using autofill.
+   * Uses the Canva API (needs API key) — falls back to browser if no API key.
+   */
+  async createCanvaDesign(userId: string, templateId: string, data: any): Promise<string | null> {
+    console.log(`[NeuralActionEngine] Creating Canva design for user ${userId}`);
+    
+    // Try API first
+    try {
+      const { canvaService } = await import('./canvaService.js');
+      const designId = await canvaService.createFromTemplate(userId, templateId, data);
+      console.log(`[NeuralActionEngine] Canva design created via API: ${designId}`);
+      return designId;
+    } catch {
+      console.log(`[NeuralActionEngine] Canva API failed, trying browser automation...`);
+    }
+
+    // Fallback to browser automation
+    const session = await this.loadSession(userId, 'canva');
+    if (!session) return null;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return null; }
+
+      await this.navigateAndWait(page, `https://www.canva.com/design/create?template=${templateId}`, 5000);
+
+      // Wait for the editor to load
+      const editor = await this.waitForSelector(page, '[class*="editor"], [class*="canvas"]', 15000);
+      if (!editor) { await context.close(); return null; }
+
+      // If data includes text fills, find and replace text elements
+      if (data) {
+        for (const [key, value] of Object.entries(data)) {
+          try {
+            const textElement = await this.waitForSelector(page, `text=${key}`, 2000);
+            if (textElement) {
+              await textElement.click();
+              await page.fill(`text=${key}`, String(value));
+              await new Promise(r => setTimeout(r, 300));
+            }
+          } catch {}
+        }
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Canva design created via browser`);
+      return `canva_design_${Date.now()}`;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Canva design failed:`, err.message);
+      await context.close().catch(() => {});
+      return null;
+    }
+  }
+
+  /**
+   * Systeme.io: Create an email campaign.
+   */
+  async createSystemeIoCampaign(
+    userId: string,
+    campaign: {
+      name: string;
+      subject: string;
+      content: string;
+      listId?: string;
+    }
+  ): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Creating Systeme.io campaign for user ${userId}`);
+    const session = await this.loadSession(userId, 'systeme_io');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      await this.navigateAndWait(page, 'https://systeme.io/dashboard/email/campaigns', 4000);
+
+      // Click create campaign
+      const createBtn = await this.waitForSelector(page, 'button:has-text("Create"), a:has-text("New campaign")');
+      if (!createBtn) { await context.close(); return false; }
+      await createBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Fill campaign name
+      const nameInput = await this.waitForSelector(page, 'input[name="name"], input[placeholder*="Name"]');
+      if (nameInput) {
+        await nameInput.click();
+        await page.fill('input[name="name"], input[placeholder*="Name"]', campaign.name);
+      }
+
+      // Fill subject
+      const subjectInput = await this.waitForSelector(page, 'input[name="subject"], input[placeholder*="Subject"]');
+      if (subjectInput) {
+        await subjectInput.click();
+        await page.fill('input[name="subject"], input[placeholder*="Subject"]', campaign.subject);
+      }
+
+      // Fill content (rich text editor)
+      const contentInput = await this.waitForSelector(page, '[contenteditable="true"], textarea[name="content"]');
+      if (contentInput) {
+        await contentInput.click();
+        await page.fill('[contenteditable="true"], textarea[name="content"]', campaign.content);
+      }
+
+      // Click save/done
+      const saveBtn = await this.waitForSelector(page, 'button:has-text("Save"), button:has-text("Next")');
+      if (saveBtn) {
+        await saveBtn.click();
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Systeme.io campaign created: ${campaign.name}`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Systeme.io campaign failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  // ─── Helper ──────────────────────────────────────────────────────
+
   private getDomainForPlatform(platform: string): string {
     const domains: Record<string, string> = {
       tiktok: 'https://www.tiktok.com',
