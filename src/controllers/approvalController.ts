@@ -1,12 +1,32 @@
 import { Request, Response } from 'express';
 import { approvalService } from '../services/approvalService.js';
 import { db, schema } from '../db/index.js';
-import { eq, sql } from 'drizzle-orm';
-const { scheduledPosts, users } = schema;
+import { eq, sql, and } from 'drizzle-orm';
+const { scheduledPosts, users, approvals } = schema;
 
 export const getPendingApprovals = async (req: Request, res: Response) => {
-  // Logic to fetch pending approvals for a user
-  res.json({ status: 'success', approvals: [] });
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    // Fetch pending approvals for this user
+    const pendingItems = await db.select()
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.userId, userId),
+          eq(approvals.status, 'pending')
+        )
+      )
+      .orderBy(approvals.createdAt)
+      .limit(50);
+
+    res.json({ status: 'success', approvals: pendingItems });
+  } catch (error: any) {
+    console.error('Error fetching pending approvals:', error);
+    res.status(500).json({ status: 'error', error: error.message });
+  }
 };
 
 export const respondToApproval = async (req: Request, res: Response) => {
