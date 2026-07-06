@@ -873,6 +873,38 @@ export class NeuralActionEngine {
   }
 
   /**
+   * Post a video to TikTok with optional native music library support.
+   * 
+   * Uses TikTok's own "Add Sound" feature — no copyright issues, proper attribution.
+   * 
+   * @param userId - The user's ID
+   * @param videoPath - Absolute path to the video file
+   * @param caption - Video caption text
+   * @param song - Optional song to add from TikTok's native music library
+   * @param hashtags - Optional array of hashtags (without #)
+   * @returns true if posting succeeded
+   */
+  async postToTikTok(
+    userId: string,
+    videoPath: string,
+    caption: string,
+    song?: { searchTerm: string; startTime?: number; duration?: number },
+    hashtags?: string[]
+  ): Promise<boolean> {
+    const fullCaption = hashtags && hashtags.length > 0
+      ? `${caption}\n\n${hashtags.map(h => `#${h}`).join(' ')}`
+      : caption;
+
+    // Convert song param to music format expected by postToTikTokWithMusic
+    const music = song ? { mood: song.searchTerm, searchTerm: song.searchTerm } : null;
+
+    // Note: startTime and duration adjustments happen on TikTok's UI after music selection
+    // The postToTikTokWithMusic method handles the Add Sound → search → select flow
+
+    return this.postToTikTokWithMusic(userId, videoPath, fullCaption, music, song?.startTime, song?.duration);
+  }
+
+  /**
    * Post to TikTok with optional background music selected from TikTok's own library.
    * 
    * Flow:
@@ -887,7 +919,9 @@ export class NeuralActionEngine {
     userId: string,
     videoPath: string,
     caption: string,
-    music?: { mood: string; searchTerm: string } | null
+    music?: { mood: string; searchTerm: string } | null,
+    startTime?: number,
+    duration?: number
   ): Promise<boolean> {
     console.log(`[NeuralActionEngine] Posting to TikTok for user ${userId}${music ? ` with ${music.mood} music` : ''}`);
     
@@ -945,6 +979,34 @@ export class NeuralActionEngine {
             await firstResult.click();
             console.log(`[NeuralActionEngine] Selected music: ${music.searchTerm}`);
             await new Promise(r => setTimeout(r, 2000));
+          }
+
+          // Adjust start time if specified (TikTok shows a trim slider after selection)
+          if (startTime !== undefined) {
+            try {
+              const startTimeInput = await this.waitForSelector(page, 'input[aria-label*="start"], input[aria-label*="Start"], [class*="start-time"] input', 3000);
+              if (startTimeInput) {
+                await startTimeInput.click();
+                await startTimeInput.fill(String(startTime));
+                await new Promise(r => setTimeout(r, 500));
+              }
+            } catch {
+              console.log(`[NeuralActionEngine] Could not adjust start time, using default`);
+            }
+          }
+
+          // Adjust duration if specified
+          if (duration !== undefined) {
+            try {
+              const durationInput = await this.waitForSelector(page, 'input[aria-label*="duration"], input[aria-label*="Duration"], [class*="duration"] input', 3000);
+              if (durationInput) {
+                await durationInput.click();
+                await durationInput.fill(String(duration));
+                await new Promise(r => setTimeout(r, 500));
+              }
+            } catch {
+              console.log(`[NeuralActionEngine] Could not adjust duration, using default`);
+            }
           }
         } catch (musicErr: any) {
           console.warn(`[NeuralActionEngine] Music selection failed (non-fatal): ${musicErr.message}`);
