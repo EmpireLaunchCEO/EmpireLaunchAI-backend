@@ -29,6 +29,33 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
   }
 };
 
+export const createApproval = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { type, description, payload } = req.body;
+    if (!type || !description) {
+      return res.status(400).json({ error: 'Missing required fields: type, description' });
+    }
+
+    const approval = await approvalService.createRequest(
+      userId,
+      type,
+      description,
+      payload || {}
+    );
+
+    console.log(`Approval created: ${type} for user ${userId}`);
+    res.status(201).json({ status: 'success', approval });
+  } catch (error: any) {
+    console.error('Error creating approval:', error);
+    res.status(500).json({ status: 'error', error: error.message });
+  }
+};
+
 export const respondToApproval = async (req: Request, res: Response) => {
   try {
     const { requestId, status } = req.body;

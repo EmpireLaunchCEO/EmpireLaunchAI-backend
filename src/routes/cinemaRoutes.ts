@@ -37,4 +37,9 @@ router.get('/status/:assetId', (req, res) =>
   cinemaController.getAssetStatus(req, res)
 );
 
+// Get user's creations (for Operations Base display)
+router.get('/creations', (req, res) =>
+  cinemaController.getCreations(req, res)
+);
+
 export default router;

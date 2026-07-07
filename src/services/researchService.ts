@@ -19,7 +19,7 @@ export class ResearchService {
     return [
       { 
         platform: 'Etsy', 
-        content: 'Minimalist digital planners are seeing a 40% increase in searches.', 
+        content: 'Market research indicates strong demand in your niche.', 
         timestamp: new Date().toISOString(),
         roiPotential: 85,
         platformIcon: 'etsy-icon',

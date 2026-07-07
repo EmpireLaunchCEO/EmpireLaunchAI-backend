@@ -445,3 +445,20 @@ export const auditStatements = pgTable('audit_statements', {
   milestoneHit: integer('milestone_hit').default(0).notNull(), // Last $1k milestone
   generatedAt: timestamp('generated_at').defaultNow().notNull(),
 });
+
+/**
+ * Cinema/Creations — records of AI-generated video, photo, and design assets.
+ * Wired to Empire Studio for Operations Base display.
+ */
+export const creations = pgTable('creations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  type: text('type').notNull(), // 'facial_dna', 'raw_video', 'enhanced_video', 'neural_twin', 'design'
+  title: text('title').default('Untitled'),
+  status: text('status').default('processing').notNull(), // 'processing', 'completed', 'failed'
+  fileUrl: text('file_url'),
+  thumbnailUrl: text('thumbnail_url'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
