@@ -4,6 +4,9 @@ import multer from 'multer';
 import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { usageService } from '../services/usageService.js';
+import { productionDirector } from '../services/productionDirector.js';
+import { renderingEngine } from '../services/renderingEngine.js';
+import { approvalService } from '../services/approvalService.js';
 import { db, schema } from '../db/index.js';
 import { eq, desc } from 'drizzle-orm';
 const { creations } = schema;
@@ -163,6 +166,64 @@ export class CinemaController {
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/cinema/generate-video
+   * Full text-to-video pipeline: Gemini → DALL-E/Sharp/FFmpeg → stored + queued for review
+   */
+  async generateVideo(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).user?.id;
+      const { idea, niche } = req.body;
+      if (!idea) {
+        res.status(400).json({ error: 'idea is required' });
+        return;
+      }
+
+      // Step 1: Gemini generates production script
+      const script = await productionDirector.direct({
+        campaignId: uuidv4(),
+        userId,
+        niche: niche || 'Custom Video',
+        angle: idea,
+        archetype: 'creator'
+      });
+
+      // Step 2: Render the video (DALL-E → Sharp → FFmpeg)
+      const renderResult = await renderingEngine.render({
+        scenes: script.scenes,
+        pacing: script.pacing
+      });
+
+      if (!renderResult.success || !renderResult.videoUrl) {
+        res.status(500).json({ error: 'Video rendering failed' });
+        return;
+      }
+
+      // Step 3: Save to creations table
+      const creationId = uuidv4();
+      await db.insert(creations).values({
+        id: creationId,
+        userId,
+        type: 'ai_video',
+        title: script.title || idea.slice(0, 60),
+        status: 'completed',
+        fileUrl: renderResult.videoUrl,
+        metadata: { idea, scenes: script.scenes.length, pacing: script.pacing }
+      });
+
+      // Step 4: Create approval record so it shows in Operations queue
+      await approvalService.createRequest(
+        userId, 'video', idea,
+        { creationId, videoUrl: renderResult.videoUrl, sceneCount: script.scenes.length }
+      );
+
+      res.status(201).json({ success: true, creationId, videoUrl: renderResult.videoUrl });
+    } catch (error: any) {
+      console.error('Error generating video:', error);
+      res.status(500).json({ status: 'error', error: error.message });
     }
   }
 

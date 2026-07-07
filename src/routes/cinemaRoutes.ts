@@ -27,6 +27,11 @@ router.post('/create-twin', (req, res) =>
   cinemaController.createNeuralTwin(req, res)
 );
 
+// Generate video from text idea (Gemini → DALL-E/Sharp/FFmpeg pipeline)
+router.post('/generate-video', (req, res) =>
+  cinemaController.generateVideo(req, res)
+);
+
 // Get daily usage remaining
 router.get('/usage', (req, res) =>
   cinemaController.getUsage(req, res)
