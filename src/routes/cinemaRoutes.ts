@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { cinemaController, upload } from '../controllers/cinemaController.js';
+import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
 
@@ -28,7 +29,7 @@ router.post('/create-twin', (req, res) =>
 );
 
 // Generate video from text idea (Gemini → DALL-E/Sharp/FFmpeg pipeline)
-router.post('/generate-video', (req, res) =>
+router.post('/generate-video', mobileAuth, (req, res) =>
   cinemaController.generateVideo(req, res)
 );
 
