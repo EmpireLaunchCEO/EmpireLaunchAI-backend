@@ -1,25 +1,49 @@
-import { resolveStudioReasoner, getModelConfig } from '../utils/resolveModel.js';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { getModelConfig } from '../utils/resolveModel.js';
 import { stylePreviewService } from './stylePreviewService.js';
 import { getMasterBriefing } from './strategicDirective.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
 export class ReasoningEngine {
-  private reasoner: BaseChatModel | null = null;
 
-  private async getReasoner(): Promise<BaseChatModel> {
-    if (!this.reasoner) {
-      this.reasoner = await resolveStudioReasoner();
+  private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      throw new Error('GOOGLE_API_KEY not configured');
     }
-    return this.reasoner;
+
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
+        ],
+        generationConfig: {
+          temperature: 0.5,
+          maxOutputTokens: 1024
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      throw new Error(`Gemini API error: ${response.status} ${errorBody}`);
+    }
+
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new Error('Gemini returned empty response');
+    }
+    return text;
   }
 
   async reasonDesign(userId: string, goal: string, niche?: string): Promise<string> {
     const config = await getModelConfig(userId);
-    const model = await this.getReasoner();
-    
+
     const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
     const archetype = (goalRow as any)?.archetype || 'creator';
 
@@ -30,17 +54,15 @@ export class ReasoningEngine {
       archetype
     });
 
-    const response = await model.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(`You are acting as the Design Reasoner. Create a multi-step execution plan for this specific goal: ${goal}`)
-    ]);
-
-    return response.content as string;
+    try {
+      return await this.callGeminiDirect(systemPrompt, `You are acting as the Design Reasoner. Create a multi-step execution plan for this specific goal: ${goal}`);
+    } catch (err) {
+      console.error('[ReasoningEngine] reasonDesign Gemini call failed:', (err as Error).message);
+      return 'Unable to generate design reasoning at this time.';
+    }
   }
 
   async synthesizeDNA(userId: string, niche: string, dnaStrands: any[]): Promise<any> {
-    const model = await this.getReasoner();
-    
     const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
     const archetype = (goalRow as any)?.archetype || 'creator';
 
@@ -49,15 +71,12 @@ export class ReasoningEngine {
       goal: `Synthesize DNA for niche: ${niche}`,
       archetype
     }) + `\n\nYou are the DNA Synthesis Engine. Take the provided DNA strands and synthesize a NEW style manifest.`;
-    
-    const response = await model.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(JSON.stringify(dnaStrands))
-    ]);
+
     try {
-      return JSON.parse(response.content as string);
+      const text = await this.callGeminiDirect(systemPrompt, JSON.stringify(dnaStrands));
+      return JSON.parse(text);
     } catch {
-      return response.content;
+      return dnaStrands;
     }
   }
 
@@ -77,18 +96,13 @@ export class ReasoningEngine {
       archetype
     }) + `\n\nYou are the Empire Studio Conversational Consultant. Identify niche with [NICHE: name] if you discover a specific one.`;
 
-    let response;
+    let content: string;
     try {
-      const model = await this.getReasoner();
-      response = await model.invoke([
-        new SystemMessage(systemPrompt),
-        new HumanMessage(message)
-      ]);
+      content = await this.callGeminiDirect(systemPrompt, message);
     } catch (err) {
       console.error('[ReasoningEngine] Gemini call failed:', (err as Error).message);
       return { message: "I'm here to help! Tell me more about what you're looking to create — what niche, visual style, or type of content are you thinking about?" };
     }
-    const content = response.content as string;
     let nicheMatch = content.match(/\[NICHE:\s*([^\]]+)\]/);
     let finalMessage = content.replace(/\[NICHE:\s*[^\]]+\]/, '').trim();
     let stylePreviews: any[] | undefined;
