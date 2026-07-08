@@ -83,21 +83,40 @@ export class ReasoningEngine {
   async consult(userId: string, message: string, niche?: string): Promise<{ message: string; stylePreviews?: any[] }> {
     // Fetch user's archetype from active goal — gracefully handle missing/invalid userId
     let archetype = 'creator';
+    let businessName = '';
+    let businessNiche = '';
     try {
       const [goal] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
       archetype = (goal as any)?.archetype || 'creator';
     } catch (err) {
       console.warn('[ReasoningEngine] Could not fetch archetype, defaulting to creator:', (err as Error).message);
     }
+    try {
+      const [settings] = await db.select({ businessNiche: schema.userSettings.businessNiche, businessAngle: schema.userSettings.businessAngle }).from(schema.userSettings).where(eq(schema.userSettings.userId, userId)).limit(1);
+      if (settings) {
+        businessNiche = (settings as any)?.businessNiche || '';
+        businessName = (settings as any)?.businessAngle || '';
+      }
+    } catch (err) {
+      console.warn('[ReasoningEngine] Could not fetch user settings:', (err as Error).message);
+    }
 
     const systemPrompt = `You are a sharp, no-fluff creative director for short-form video. You know what performs on TikTok, YouTube Shorts, and Instagram Reels — hooks, pacing, colors, trending transitions.
 
+USER'S BUSINESS:${businessName ? `\n- Business name/purpose: ${businessName}` : ''}${businessNiche ? `\n- Their niche: ${businessNiche}` : ''}${niche ? `\n- Current topic: ${niche}` : ''}
+
+YOUR PROCESS:
+- When the user gives you an idea or niche, FIRST think about what is currently trending, best-selling, and top-performing in that space.
+- Reference real hook patterns, video formats, and engagement strategies that work for that specific niche.
+- Then propose a complete, ready-to-go video concept built on that market research.
+
 RULES:
 - Keep EVERY response VERY SHORT — 2-3 sentences max.
-- Propose a complete, ready-to-go video concept based on market trends.
+- Propose a complete concept with a clear hook, visual style, and pacing.
 - Ask ONE question at a time — never list multiple questions.
 - If the user confirms with "yes", "ready", "go ahead", or "generate", end with "[GENERATE]" in your response.
-- If the user changes direction, adapt and follow what they want.
+- If the user changes direction, research what works for their new direction and adapt — always follow what they want.
+- If the user says "no" or "different", immediately pivot to a new concept based on what else is trending in their niche.
 - Identify niche with [NICHE: name] if you discover a specific one.
 - Be direct, strategic, and concise. No paragraphs. No fluff.`;
 
