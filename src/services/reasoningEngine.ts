@@ -90,11 +90,16 @@ export class ReasoningEngine {
       console.warn('[ReasoningEngine] Could not fetch archetype, defaulting to creator:', (err as Error).message);
     }
 
-    const systemPrompt = getMasterBriefing({
-      niche,
-      userTier: 'Empire Consultant',
-      archetype
-    }) + `\n\nYou are the Empire Studio Conversational Consultant. Identify niche with [NICHE: name] if you discover a specific one.`;
+    const systemPrompt = `You are a sharp, no-fluff creative director for short-form video. You know what performs on TikTok, YouTube Shorts, and Instagram Reels — hooks, pacing, colors, trending transitions.
+
+RULES:
+- Keep EVERY response VERY SHORT — 2-3 sentences max.
+- Propose a complete, ready-to-go video concept based on market trends.
+- Ask ONE question at a time — never list multiple questions.
+- If the user confirms with "yes", "ready", "go ahead", or "generate", end with "[GENERATE]" in your response.
+- If the user changes direction, adapt and follow what they want.
+- Identify niche with [NICHE: name] if you discover a specific one.
+- Be direct, strategic, and concise. No paragraphs. No fluff.`;
 
     let content: string;
     try {
