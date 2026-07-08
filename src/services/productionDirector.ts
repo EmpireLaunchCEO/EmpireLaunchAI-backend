@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db/index.js';
 const { productionScripts } = schema;
 import { eq } from 'drizzle-orm';
-import { resolveStudioReasoner } from '../utils/resolveModel.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -75,8 +74,13 @@ export class ProductionDirector {
     const styleDna = params.styleDna || { colors: ['#2D4F1E', '#E4D5B7'], pacing: 'fast' };
     const archetype = params.archetype || 'creator';
 
-    // Use Gemini via the existing STUDIO_INTEL configuration (gemini-1.5-flash)
-    const model = await resolveStudioReasoner();
+    // Use Gemini 2.5 Pro via direct REST API (bypasses LangChain which doesn't support gemini-2.5 models)
+    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GOOGLE_API_KEY not configured — cannot generate script');
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
     const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video.
     
@@ -138,14 +142,34 @@ Return JSON with:
   "pacing": "fast|moderate|slow"
 }`;
 
-    const response = await model.invoke([
-      { role: 'system', content: systemPrompt },
-      { role: 'human', content: userPrompt },
-    ]);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096
+        }
+      })
+    });
 
-    const content = typeof response.content === 'string'
-      ? response.content
-      : JSON.stringify(response.content);
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      console.error('[ProductionDirector] Gemini API error:', response.status, errorBody);
+      // Fall back to template script
+      return this.createFallbackScript(params.niche, params.angle);
+    }
+
+    const data = await response.json();
+    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!content) {
+      console.error('[ProductionDirector] Gemini returned empty response');
+      return this.createFallbackScript(params.niche, params.angle);
+    }
 
     // Parse Gemini's JSON response
     const script = this.parseScript(content, params);
