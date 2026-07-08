@@ -4,8 +4,8 @@ import { eq } from 'drizzle-orm';
 /**
  * Tier definitions — maps user tiers to model names and capability flags.
  * 
- * EMPIRE_MASTER = gemini-1.5-pro (highest intelligence, full automation)
- * STANDARD_USER = gemini-1.5-flash (cost-optimized, co-pilot mode)
+ * EMPIRE_MASTER = gemini-2.5-pro (highest intelligence, full automation)
+ * STANDARD_USER = gemini-2.5-flash (cost-optimized, co-pilot mode)
  */
 export interface TierConfig {
   modelName: string;           // Gemini model identifier
@@ -19,7 +19,7 @@ export interface TierConfig {
 
 const TIER_CONFIGS: Record<string, TierConfig> = {
   EMPIRE_MASTER: {
-    modelName: 'gemini-1.5-pro',
+    modelName: 'gemini-2.5-pro',
     temperature: 0.3,
     maxConcurrency: 10,
     autoApproveListings: true,
@@ -28,7 +28,7 @@ const TIER_CONFIGS: Record<string, TierConfig> = {
     maxBusinessSlots: 5,
   },
   STANDARD_USER: {
-    modelName: 'gemini-1.5-flash',
+    modelName: 'gemini-2.5-flash',
     temperature: 0.5,
     maxConcurrency: 2,
     autoApproveListings: false,
@@ -83,12 +83,12 @@ export class TierService {
 
   /**
    * Build a model constructor options object based on the user's tier.
-   * Default: gemini-1.5-flash, temperature 0.5
-   * EMPIRE_MASTER: gemini-1.5-pro, temperature 0.3
+   * Default: gemini-2.5-flash, temperature 0.5
+   * EMPIRE_MASTER: gemini-2.5-pro, temperature 0.3
    */
   buildModelConfig(userId: string): { modelName: string; temperature: number; apiKey?: string } {
     return {
-      modelName: 'gemini-1.5-flash',   // Safe default
+      modelName: 'gemini-2.5-flash',   // Safe default
       temperature: 0.5,
       apiKey: process.env.GOOGLE_API_KEY,
     };

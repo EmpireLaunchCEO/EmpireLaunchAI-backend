@@ -360,7 +360,7 @@ export class EmpireStudioService {
   }> {
     // Get tier config to determine reasoning depth
     const modelConfig = await getModelConfig(userId);
-    const isDeepReasoning = modelConfig.modelName === 'gemini-1.5-pro';
+    const isDeepReasoning = modelConfig.modelName === 'gemini-2.5-pro';
     const archetype = params.archetype || 'creator';
 
     webSocketService.notifyUser(userId, 'ai-log', {
