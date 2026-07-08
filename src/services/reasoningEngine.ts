@@ -62,11 +62,14 @@ export class ReasoningEngine {
   }
 
   async consult(userId: string, message: string, niche?: string): Promise<{ message: string; stylePreviews?: any[] }> {
-    const model = await this.getReasoner();
-    
-    // Fetch user's archetype from active goal
-    const [goal] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
-    const archetype = (goal as any)?.archetype || 'creator';
+    // Fetch user's archetype from active goal — gracefully handle missing/invalid userId
+    let archetype = 'creator';
+    try {
+      const [goal] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
+      archetype = (goal as any)?.archetype || 'creator';
+    } catch (err) {
+      console.warn('[ReasoningEngine] Could not fetch archetype, defaulting to creator:', (err as Error).message);
+    }
 
     const systemPrompt = getMasterBriefing({
       niche,
@@ -74,10 +77,17 @@ export class ReasoningEngine {
       archetype
     }) + `\n\nYou are the Empire Studio Conversational Consultant. Identify niche with [NICHE: name] if you discover a specific one.`;
 
-    const response = await model.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(message)
-    ]);
+    let response;
+    try {
+      const model = await this.getReasoner();
+      response = await model.invoke([
+        new SystemMessage(systemPrompt),
+        new HumanMessage(message)
+      ]);
+    } catch (err) {
+      console.error('[ReasoningEngine] Gemini call failed:', (err as Error).message);
+      return { message: "I'm here to help! Tell me more about what you're looking to create — what niche, visual style, or type of content are you thinking about?" };
+    }
     const content = response.content as string;
     let nicheMatch = content.match(/\[NICHE:\s*([^\]]+)\]/);
     let finalMessage = content.replace(/\[NICHE:\s*[^\]]+\]/, '').trim();
