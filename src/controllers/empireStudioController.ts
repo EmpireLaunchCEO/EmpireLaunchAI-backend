@@ -6,6 +6,8 @@ import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { reasoningEngine } from '../services/reasoningEngine.js';
 import { v4 as uuidv4 } from 'uuid';
+import { db, schema } from '../db/index.js';
+import { eq } from 'drizzle-orm';
 
 export class EmpireStudioController {
   /**
@@ -104,16 +106,56 @@ export class EmpireStudioController {
     }
 
     try {
+      const campaignIdValue = campaignId || uuidv4();
       const result = await creationEngine.generateMasterAsset({
         userId,
-        campaignId: campaignId || uuidv4(),
+        campaignId: campaignIdValue,
         niche,
         productName: angle,
         platforms: platforms || ['tiktok'],
         archetype: archetype || 'creator',
       });
 
-      res.json(result);
+      // Save to masterAssets table so Operations Base can find it
+      const assetId = uuidv4();
+      try {
+        await db.insert(schema.masterAssets).values({
+          id: assetId,
+          userId,
+          campaignId: campaignIdValue,
+          assetType: 'video',
+          status: 'completed',
+          masterVideoUrl: result.masterAssetUrl || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } catch (dbErr) {
+        console.warn('[EmpireStudioController] Failed to save masterAsset (table may not exist yet):', (dbErr as Error).message);
+      }
+
+      // Create approval for Neural Dispatch Center
+      try {
+        const approvalId = uuidv4();
+        await db.insert(schema.approvals).values({
+          id: approvalId,
+          userId,
+          type: 'content',
+          payload: {
+            assetId,
+            title: title || angle,
+            videoUrl: result.masterAssetUrl,
+            niche,
+            platforms,
+          },
+          status: 'pending',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } catch (dbErr) {
+        console.warn('[EmpireStudioController] Failed to create approval:', (dbErr as Error).message);
+      }
+
+      res.json({ ...result, assetId });
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       console.error('[EmpireStudioController] create failed:', error);
