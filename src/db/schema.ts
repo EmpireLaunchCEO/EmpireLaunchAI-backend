@@ -451,14 +451,30 @@ export const auditStatements = pgTable('audit_statements', {
  * Wired to Empire Studio for Operations Base display.
  */
 export const creations = pgTable('creations', {
+      id: uuid('id').primaryKey().defaultRandom(),
+      userId: uuid('user_id').references(() => users.id).notNull(),
+      type: text('type').notNull(), // 'facial_dna', 'raw_video', 'enhanced_video', 'neural_twin', 'design'
+      title: text('title').default('Untitled'),
+      status: text('status').default('processing').notNull(), // 'processing', 'completed', 'failed'
+      fileUrl: text('file_url'),
+      thumbnailUrl: text('thumbnail_url'),
+      metadata: jsonb('metadata'),
+      createdAt: timestamp('created_at').defaultNow().notNull(),
+      updatedAt: timestamp('updated_at').defaultNow().notNull(),
+    });
+
+export const masterAssets = pgTable('master_assets', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  type: text('type').notNull(), // 'facial_dna', 'raw_video', 'enhanced_video', 'neural_twin', 'design'
-  title: text('title').default('Untitled'),
-  status: text('status').default('processing').notNull(), // 'processing', 'completed', 'failed'
-  fileUrl: text('file_url'),
-  thumbnailUrl: text('thumbnail_url'),
-  metadata: jsonb('metadata'),
+  campaignId: uuid('campaign_id'),
+  styleDna: jsonb('style_dna'),
+  styleDnaSource: text('style_dna_source'),
+  styleDnaStrandIds: jsonb('style_dna_strand_ids'),
+  assetType: text('asset_type').notNull(),
+  status: text('status').default('completed').notNull(),
+  masterVideoUrl: text('master_video_url'),
+  masterImageUrl: text('master_image_url'),
+  masterPdfUrl: text('master_pdf_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
