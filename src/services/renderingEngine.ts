@@ -98,11 +98,10 @@ export class RenderingEngine {
    */
   private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
     const response = await this.openai.images.generate({
-      model: 'dall-e-3',
+      model: 'dall-e-2',
       prompt,
       n: 1,
-      size: '1792x1024',
-      quality: 'standard',
+      size: '1024x1024',
     });
 
     const imageUrl = response.data?.[0]?.url;
@@ -242,7 +241,7 @@ export class RenderingEngine {
                1024 - bgHeight - 30;
 
     return `
-      <svg width="1792" height="1024">
+      <svg width="1024" height="1024">
         <style>
           .bg { fill: rgba(0,0,0,0.3); }
           .text { 
@@ -257,8 +256,8 @@ export class RenderingEngine {
             filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.4));
           }
         </style>
-        <rect class="bg" x="50" y="${bgY}" width="1692" height="${bgHeight}" rx="12"/>
-        <text class="text shadow" x="896" y="${yPos}">${this.escapeXml(overlay.text)}</text>
+        <rect class="bg" x="50" y="${bgY}" width="924" height="${bgHeight}" rx="12"/>
+        <text class="text shadow" x="512" y="${yPos}">${this.escapeXml(overlay.text)}</text>
       </svg>
     `;
   }
