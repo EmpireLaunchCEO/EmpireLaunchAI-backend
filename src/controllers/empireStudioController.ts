@@ -1,25 +1,53 @@
 import { Request, Response } from 'express';
 import { empireStudioService, StyleDNA } from '../services/empireStudioService.js';
+import { creationEngine } from '../services/creationEngine.js';
 import { visualProxyService } from '../services/visualProxyService.js';
 import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { reasoningEngine } from '../services/reasoningEngine.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export class EmpireStudioController {
   /**
    * POST /api/studio/chat
    * Conversational consultant for design goals.
+   * If the response contains [GENERATE], triggers the creation pipeline.
    */
   async chat(req: Request, res: Response) {
     const userId = (req as any).userId;
-    const { message } = req.body;
+    const { message, niche } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
     }
 
     try {
-      const result = await reasoningEngine.consult(userId, message);
+      const result = await reasoningEngine.consult(userId, message, niche);
+
+      // Check if the consultant wants to generate
+      if (result.message.includes('[GENERATE]')) {
+        try {
+          const creationResult = await creationEngine.generateMasterAsset({
+            userId,
+            campaignId: uuidv4(),
+            niche: niche || 'Custom Video',
+            productName: message,
+            platforms: ['tiktok'],
+            archetype: 'creator',
+          });
+          res.json({
+            message: result.message.replace('[GENERATE]', '').trim(),
+            generated: true,
+            assetUrl: creationResult.masterAssetUrl,
+            creationResult,
+          });
+          return;
+        } catch (genError) {
+          console.error('[EmpireStudioController] chat-triggered generation failed:', genError);
+          // Fall through — return the consultant message without generation
+        }
+      }
+
       res.json(result);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
@@ -56,7 +84,7 @@ export class EmpireStudioController {
 
   /**
    * POST /api/studio/create
-   * Create a master asset and distribute to selected platforms.
+   * Create a master asset using DALL-E + FFmpeg native pipeline.
    */
   async create(req: Request, res: Response) {
     const userId = (req as any).userId;
@@ -64,49 +92,25 @@ export class EmpireStudioController {
       campaignId,
       niche,
       angle,
-      styleDna,
       platforms,
       title,
-      description,
-      price,
-      scheduleInMinutes,
+      archetype,
     } = req.body;
 
-    if (!niche || !angle || !styleDna || !platforms || !Array.isArray(platforms) || platforms.length === 0) {
+    if (!niche || !angle) {
       return res.status(400).json({
-        error: 'Missing required fields: niche, angle, styleDna, platforms (non-empty array)',
+        error: 'Missing required fields: niche, angle',
       });
-    }
-
-    // Validate StyleDNA
-    if (!styleDna.colors || !styleDna.fonts || !styleDna.hooks || !styleDna.keywords || !styleDna.tone) {
-      return res.status(400).json({
-        error: 'styleDna must include: colors, fonts, hooks, keywords, tone',
-      });
-    }
-
-    // Validate platforms
-    const validPlatforms = ['tiktok', 'instagram', 'youtube', 'facebook', 'etsy', 'fiverr', 'shopify'];
-    for (const p of platforms) {
-      if (!validPlatforms.includes(p)) {
-        return res.status(400).json({
-          error: `Invalid platform: ${p}. Valid options: ${validPlatforms.join(', ')}`,
-        });
-      }
     }
 
     try {
-      const result = await empireStudioService.createAndDistribute({
+      const result = await creationEngine.generateMasterAsset({
         userId,
-        campaignId,
+        campaignId: campaignId || uuidv4(),
         niche,
-        angle,
-        styleDna: styleDna as StyleDNA,
-        platforms,
-        title,
-        description,
-        price,
-        scheduleInMinutes,
+        productName: angle,
+        platforms: platforms || ['tiktok'],
+        archetype: archetype || 'creator',
       });
 
       res.json(result);
