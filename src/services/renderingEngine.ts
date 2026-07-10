@@ -108,11 +108,15 @@ export class RenderingEngine {
       body: JSON.stringify({
         model: 'gpt-image-1-mini',
         messages: [
-          { role: 'user', content: prompt }
+          { 
+            role: 'user', 
+            content: [
+              { type: 'text', text: prompt }
+            ]
+          }
         ],
         n: 1,
-        size: '1024x1024',
-        response_format: 'b64_json'
+        size: '1024x1024'
       }),
       signal: AbortSignal.timeout(30000) // 30 second timeout for image gen
     });
