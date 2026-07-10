@@ -74,13 +74,14 @@ export class ProductionDirector {
     const styleDna = params.styleDna || { colors: ['#2D4F1E', '#E4D5B7'], pacing: 'fast' };
     const archetype = params.archetype || 'creator';
 
-    // Use Gemini 2.5 Pro via direct REST API (bypasses LangChain which doesn't support gemini-2.5 models)
-    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+    // Use OpenAI GPT-4o-mini via direct REST API
+    const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      throw new Error('GOOGLE_API_KEY not configured — cannot generate script');
+      console.warn('[ProductionDirector] OPENAI_API_KEY not configured — using fallback script');
+      return this.createFallbackScript(params.niche, params.angle);
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const url = `https://api.openai.com/v1/chat/completions`;
 
     const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video.
     
@@ -144,16 +145,20 @@ Return JSON with:
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
       body: JSON.stringify({
-        contents: [
-          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
         ],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 4096
-        }
-      })
+        temperature: 0.2,
+        max_tokens: 4096
+      }),
+      signal: AbortSignal.timeout(15000) // 15 second timeout
     });
 
     if (!response.ok) {
@@ -164,10 +169,10 @@ Return JSON with:
     }
 
     const data = await response.json();
-    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const content = data?.choices?.[0]?.message?.content;
 
     if (!content) {
-      console.error('[ProductionDirector] Gemini returned empty response');
+      console.error('[ProductionDirector] OpenAI returned empty response');
       return this.createFallbackScript(params.niche, params.angle);
     }
 

@@ -87,97 +87,63 @@ export class RenderingEngine {
   }
 
   /**
-   * Phase 1: Generate a single scene image using Sharp gradients.
-   * Uses the scene's color hints from the prompt to create branded backgrounds.
-   * No external API needed — 100% free.
+   * Phase 1: Generate a single scene image using OpenAI gpt-image-1-mini.
+   * Uses the scene's image prompt to create a photorealistic background.
    */
   private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
-    // Extract color hints from the prompt or use defaults
-    const colors = this.extractColorsFromPrompt(prompt);
-    
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
-    // Create a beautiful gradient background using Sharp
-    const width = 1024;
-    const height = 1024;
+    // Call OpenAI gpt-image-1-mini via chat completions API
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not configured — cannot generate scene images');
+    }
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-image-1-mini',
+        messages: [
+          { role: 'user', content: prompt }
+        ],
+        n: 1,
+        size: '1024x1024',
+        response_format: 'b64_json'
+      }),
+      signal: AbortSignal.timeout(30000) // 30 second timeout for image gen
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      console.error(`[RenderingEngine] gpt-image-1-mini error (${response.status}):`, errorBody);
+      // Fallback: generate a solid color placeholder
+      const fallbackSvg = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#2C3E50"/></svg>`;
+      await sharp(Buffer.from(fallbackSvg)).png().toFile(outputPath);
+      return outputPath;
+    }
+
+    const data = await response.json();
+    const b64Json = data?.choices?.[0]?.message?.content;
     
-    // Generate SVG gradient
-    const gradientSvg = `
-      <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:${colors[0]};stop-opacity:1" />
-            <stop offset="50%" style="stop-color:${colors[1]};stop-opacity:1" />
-            <stop offset="100%" style="stop-color:${colors[2]};stop-opacity:1" />
-          </linearGradient>
-          <radialGradient id="glow" cx="50%" cy="50%" r="60%">
-            <stop offset="0%" style="stop-color:${colors[0]};stop-opacity:0.3" />
-            <stop offset="100%" style="stop-color:${colors[0]};stop-opacity:0" />
-          </radialGradient>
-        </defs>
-        <rect width="${width}" height="${height}" fill="url(#bg)" />
-        <rect width="${width}" height="${height}" fill="url(#glow)" />
-        ${this.generateDecorativeCircles(colors)}
-      </svg>
-    `;
-    
-    const svgBuffer = Buffer.from(gradientSvg);
-    await sharp(svgBuffer).png().toFile(outputPath);
-    
+    if (!b64Json) {
+      console.warn('[RenderingEngine] No image data in response, using fallback');
+      const fallbackSvg = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#2C3E50"/></svg>`;
+      await sharp(Buffer.from(fallbackSvg)).png().toFile(outputPath);
+      return outputPath;
+    }
+
+    // Decode base64 and save as PNG
+    // The response may be plain base64 or a data URL
+    const base64Data = b64Json.replace(/^data:image\/png;base64,/, '');
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    await sharp(imageBuffer).png().toFile(outputPath);
+
+    console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-1-mini`);
     return outputPath;
-  }
-  
-  /**
-   * Extract likely color hex codes from a DALL-E prompt.
-   * Falls back to branded defaults.
-   */
-  private extractColorsFromPrompt(prompt: string): string[] {
-    const hexRegex = /#[0-9a-fA-F]{6}/g;
-    const matches = prompt.match(hexRegex);
-    if (matches && matches.length >= 3) {
-      return matches.slice(0, 3);
-    }
-    
-    // Color keywords in prompt
-    const lower = prompt.toLowerCase();
-    if (lower.includes('pastel') || lower.includes('soft') || lower.includes('gentle')) {
-      return ['#F8E8E0', '#E8D5C4', '#D4C4B0'];
-    }
-    if (lower.includes('dark') || lower.includes('moody') || lower.includes('dramatic')) {
-      return ['#1A1A2E', '#16213E', '#0F3460'];
-    }
-    if (lower.includes('vibrant') || lower.includes('bright') || lower.includes('bold')) {
-      return ['#FF6B6B', '#4ECDC4', '#45B7D1'];
-    }
-    if (lower.includes('nature') || lower.includes('earth') || lower.includes('organic')) {
-      return ['#2D4F1E', '#8B7355', '#E4D5B7'];
-    }
-    if (lower.includes('candle') || lower.includes('warm') || lower.includes('cozy')) {
-      return ['#F5D6C6', '#E8C4A0', '#D4A574'];
-    }
-    if (lower.includes('minimal') || lower.includes('clean') || lower.includes('modern')) {
-      return ['#F5F5F0', '#E0E0D8', '#C0C0B8'];
-    }
-    
-    // Default elegant gradient
-    return ['#2C3E50', '#3498DB', '#2980B9'];
-  }
-  
-  /**
-   * Generate decorative circles for visual interest.
-   */
-  private generateDecorativeCircles(colors: string[]): string {
-    const circles = [
-      { cx: 100, cy: 100, r: 80, opacity: 0.15 },
-      { cx: 924, cy: 200, r: 120, opacity: 0.1 },
-      { cx: 512, cy: 824, r: 100, opacity: 0.12 },
-      { cx: 200, cy: 700, r: 60, opacity: 0.08 },
-    ];
-    
-    return circles.map((c, i) => {
-      const color = colors[i % colors.length];
-      return `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" fill="${color}" opacity="${c.opacity}" />`;
-    }).join('\n        ');
   }
 
   /**
