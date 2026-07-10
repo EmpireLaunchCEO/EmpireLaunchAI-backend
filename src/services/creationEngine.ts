@@ -92,9 +92,13 @@ export class CreationEngine {
       .where(eq(campaigns.id, campaignId));
 
     // 6. Populate Multi-Platform Distribution Queue
-    await this.queueMultiPlatformDistribution(userId, campaignId, masterAssetUrl, platforms, productName);
-
-    webSocketService.notifyUser(userId, 'ai-log', { message: `✅ [STUDIO] Native pipeline complete. Distribution queued.` });
+    try {
+      await this.queueMultiPlatformDistribution(userId, campaignId, masterAssetUrl, platforms, productName);
+      webSocketService.notifyUser(userId, 'ai-log', { message: `✅ [STUDIO] Native pipeline complete. Distribution queued.` });
+    } catch (distErr) {
+      console.warn('[CreationEngine] Distribution queue failed (non-fatal):', (distErr as Error).message);
+      webSocketService.notifyUser(userId, 'ai-log', { message: `⚠️ [STUDIO] Pipeline complete but distribution queue skipped: ${(distErr as Error).message}` });
+    }
     
     return { masterAssetUrl, styleDna, scenes: prodScriptData.scenes };
   }
