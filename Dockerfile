@@ -1,12 +1,12 @@
 # Minimal Dockerfile for Railway
-ARG CACHE_BREAKER=v6-fix-${RAILWAY_GIT_COMMIT_SHA:-jul10-2026}
+ARG CACHE_BREAKER=v7-npmci-${RAILWAY_GIT_COMMIT_SHA:-jul10-2026}
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y ffmpeg libvips42 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg libvips42 python3 build-essential && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --legacy-peer-deps 2>&1
+RUN npm ci 2>&1 || npm install --legacy-peer-deps 2>&1
 COPY . .
 RUN npm run build 2>&1
 
