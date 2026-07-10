@@ -157,10 +157,11 @@ export class EmpireStudioController {
         await db.insert(schema.approvals).values({
           id: approvalId,
           userId,
-          type: 'content',
+          type: 'video',
           payload: {
             assetId,
             title: title || angle,
+            description: `AI-generated ${niche} video: ${title || angle}`,
             videoUrl: result.masterAssetUrl,
             niche,
             platforms,
