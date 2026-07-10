@@ -98,7 +98,7 @@ export class RenderingEngine {
    */
   private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
     const response = await this.openai.images.generate({
-      model: 'dall-e-2',
+      model: 'gpt-image-1-mini',
       prompt,
       n: 1,
       size: '1024x1024',
