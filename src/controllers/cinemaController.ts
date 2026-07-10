@@ -4,6 +4,9 @@ import multer from 'multer';
 import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { usageService } from '../services/usageService.js';
+import { creationEngine } from '../services/creationEngine.js';
+import { db, schema } from '../db/index.js';
+import { eq } from 'drizzle-orm';
 
 // ─── Multer Configuration ───────────────────────────────────────────────────
 
@@ -216,6 +219,68 @@ export class CinemaController {
       status: 'completed',
       message: 'Neural Twin ready',
     });
+  }
+
+  /**
+   * POST /api/cinema/generate-video
+   * Generate a video from a text idea using the creation pipeline.
+   */
+  async generateVideo(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const { niche, angle, platforms } = req.body;
+      if (!niche || !angle) {
+        res.status(400).json({ error: 'niche and angle are required' });
+        return;
+      }
+      
+      // Delegate to the creation engine pipeline
+      const result = await creationEngine.generateMasterAsset({
+        userId,
+        campaignId: uuidv4(),
+        niche,
+        productName: angle,
+        platforms: platforms || ['tiktok'],
+        archetype: 'creator',
+      });
+      
+      res.json({
+        message: 'Video generated successfully',
+        status: 'completed',
+        videoUrl: result.masterAssetUrl,
+        assetId: uuidv4(),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/cinema/creations
+   * Get user's video creations for Operations Base display.
+   */
+  async getCreations(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      
+      const creations = await db.select()
+        .from(schema.creations)
+        .where(eq(schema.creations.userId, userId))
+        .orderBy(schema.creations.createdAt)
+        .limit(50);
+      
+      res.json(creations);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   }
 }
 
