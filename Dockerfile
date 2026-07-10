@@ -1,9 +1,8 @@
 # Single-stage Dockerfile for Railway - explicitly bypasses nixpacks auto-detection
-# Dynamic cache bust: RAILWAY_GIT_COMMIT_SHA changes on every git push, busting Docker layer cache
-ARG CACHE_BREAKER=v4-cache-fix-${RAILWAY_GIT_COMMIT_SHA:-jul10-2026}
+ARG CACHE_BREAKER=v5-cache-purge-${RAILWAY_GIT_COMMIT_SHA:-jul10-2026}
 FROM node:20-slim
 
-# Install system deps (keep these cached)
+# Install system deps
 RUN apt-get update && apt-get install -y \
     libvips42 ffmpeg python3 build-essential \
     libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
@@ -13,13 +12,15 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy deps and install (cache-busted via CACHE_BREAKER arg above)
+# Copy deps
 COPY package*.json ./
 
-# Clean npm cache first, then install - prevents wheelhouse cache corruption
-RUN npm cache clean --force 2>/dev/null || true && \
-    npm install --legacy-peer-deps --no-optional 2>&1 && \
-    npx playwright install chromium --with-deps 2>&1 || echo "playwright install skipped"
+# Clean ALL npm caches and install fresh — prevents wheelhouse corruption
+RUN npm cache clean --force 2>/dev/null; rm -rf /root/.npm/_cacache 2>/dev/null; \
+    npm install --legacy-peer-deps 2>&1
+
+# Install Playwright browser
+RUN npx playwright install chromium --with-deps 2>&1 || true
 
 # Copy source and build
 COPY . .
