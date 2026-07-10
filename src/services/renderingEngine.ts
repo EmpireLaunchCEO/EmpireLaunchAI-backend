@@ -1,4 +1,3 @@
-import OpenAI from 'openai';
 import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
@@ -28,19 +27,14 @@ export interface RenderResult {
  * Rendering Engine — takes a Production Script and renders it into a video.
  * Pipeline: DALL-E 3 → Sharp (text overlays) → FFmpeg (video composition)
  *
- * No external subscriptions required:
- * - DALL-E 3: Pay-per-use image generation (~$0.04/image)
- * - Sharp: FREE open-source image compositing
+ * 100% FREE, no external API calls:
+ * - Sharp: FREE open-source image processing
  * - FFmpeg: FREE open-source video encoding
  */
 export class RenderingEngine {
-  private openai: OpenAI;
   private tempDir: string;
 
   constructor() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
     this.tempDir = path.join(process.cwd(), 'temp', 'renders');
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
@@ -93,28 +87,97 @@ export class RenderingEngine {
   }
 
   /**
-   * Phase 1: Generate a single scene image via DALL-E 3.
-   * Prompt comes from Gemini — no text, no logos, no products.
+   * Phase 1: Generate a single scene image using Sharp gradients.
+   * Uses the scene's color hints from the prompt to create branded backgrounds.
+   * No external API needed — 100% free.
    */
   private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
-    const response = await this.openai.images.generate({
-      model: 'gpt-image-1-mini',
-      prompt,
-      n: 1,
-      size: '1024x1024',
-    });
-
-    const imageUrl = response.data?.[0]?.url;
-    if (!imageUrl) throw new Error('DALL-E returned no image URL');
-
-    // Download the image
-    const imageResponse = await fetch(imageUrl);
-    const buffer = Buffer.from(await imageResponse.arrayBuffer());
-
+    // Extract color hints from the prompt or use defaults
+    const colors = this.extractColorsFromPrompt(prompt);
+    
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
-    fs.writeFileSync(outputPath, buffer);
-
+    
+    // Create a beautiful gradient background using Sharp
+    const width = 1024;
+    const height = 1024;
+    
+    // Generate SVG gradient
+    const gradientSvg = `
+      <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:${colors[0]};stop-opacity:1" />
+            <stop offset="50%" style="stop-color:${colors[1]};stop-opacity:1" />
+            <stop offset="100%" style="stop-color:${colors[2]};stop-opacity:1" />
+          </linearGradient>
+          <radialGradient id="glow" cx="50%" cy="50%" r="60%">
+            <stop offset="0%" style="stop-color:${colors[0]};stop-opacity:0.3" />
+            <stop offset="100%" style="stop-color:${colors[0]};stop-opacity:0" />
+          </radialGradient>
+        </defs>
+        <rect width="${width}" height="${height}" fill="url(#bg)" />
+        <rect width="${width}" height="${height}" fill="url(#glow)" />
+        ${this.generateDecorativeCircles(colors)}
+      </svg>
+    `;
+    
+    const svgBuffer = Buffer.from(gradientSvg);
+    await sharp(svgBuffer).png().toFile(outputPath);
+    
     return outputPath;
+  }
+  
+  /**
+   * Extract likely color hex codes from a DALL-E prompt.
+   * Falls back to branded defaults.
+   */
+  private extractColorsFromPrompt(prompt: string): string[] {
+    const hexRegex = /#[0-9a-fA-F]{6}/g;
+    const matches = prompt.match(hexRegex);
+    if (matches && matches.length >= 3) {
+      return matches.slice(0, 3);
+    }
+    
+    // Color keywords in prompt
+    const lower = prompt.toLowerCase();
+    if (lower.includes('pastel') || lower.includes('soft') || lower.includes('gentle')) {
+      return ['#F8E8E0', '#E8D5C4', '#D4C4B0'];
+    }
+    if (lower.includes('dark') || lower.includes('moody') || lower.includes('dramatic')) {
+      return ['#1A1A2E', '#16213E', '#0F3460'];
+    }
+    if (lower.includes('vibrant') || lower.includes('bright') || lower.includes('bold')) {
+      return ['#FF6B6B', '#4ECDC4', '#45B7D1'];
+    }
+    if (lower.includes('nature') || lower.includes('earth') || lower.includes('organic')) {
+      return ['#2D4F1E', '#8B7355', '#E4D5B7'];
+    }
+    if (lower.includes('candle') || lower.includes('warm') || lower.includes('cozy')) {
+      return ['#F5D6C6', '#E8C4A0', '#D4A574'];
+    }
+    if (lower.includes('minimal') || lower.includes('clean') || lower.includes('modern')) {
+      return ['#F5F5F0', '#E0E0D8', '#C0C0B8'];
+    }
+    
+    // Default elegant gradient
+    return ['#2C3E50', '#3498DB', '#2980B9'];
+  }
+  
+  /**
+   * Generate decorative circles for visual interest.
+   */
+  private generateDecorativeCircles(colors: string[]): string {
+    const circles = [
+      { cx: 100, cy: 100, r: 80, opacity: 0.15 },
+      { cx: 924, cy: 200, r: 120, opacity: 0.1 },
+      { cx: 512, cy: 824, r: 100, opacity: 0.12 },
+      { cx: 200, cy: 700, r: 60, opacity: 0.08 },
+    ];
+    
+    return circles.map((c, i) => {
+      const color = colors[i % colors.length];
+      return `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" fill="${color}" opacity="${c.opacity}" />`;
+    }).join('\n        ');
   }
 
   /**
