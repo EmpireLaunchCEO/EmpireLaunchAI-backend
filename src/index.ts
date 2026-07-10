@@ -110,6 +110,8 @@ app.use(globalRateLimiter);
 
 // Serve static assets
 app.use('/assets', express.static(path.join(process.cwd(), 'public/assets')));
+// Serve rendered video files
+app.use('/renders', express.static(path.join(process.cwd(), 'temp', 'renders')));
 
 app.use('/api/agent', agentRoutes);
 app.use('/api/auth', authRoutes);
