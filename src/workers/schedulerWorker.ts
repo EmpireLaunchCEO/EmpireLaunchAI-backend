@@ -87,15 +87,15 @@ export class SchedulerWorker {
       }
     });
 
-    // Weekly Canva Public Template DNA Harvest — every Sunday at midnight
-    // Keeps the Global DNA Pool fresh with trending public template styles
-    cron.schedule('0 0 * * 0', async () => {
-      console.log('[SchedulerWorker] Running weekly Canva public template DNA harvest...');
+    // Continuous Canva DNA Harvest — every 30 minutes
+    // Extracts all possible DNA codes (Brand Kits, Designs, templates) from the linked Canva account
+    cron.schedule('*/30 * * * *', async () => {
+      console.log('[SchedulerWorker] Running Canva DNA harvest cycle...');
       try {
         await canvaDnaService.performDeepExtraction('system');
-        console.log('[SchedulerWorker] Weekly Canva DNA harvest completed successfully');
+        console.log('[SchedulerWorker] Canva DNA harvest cycle completed successfully');
       } catch (error) {
-        console.error('[SchedulerWorker] Error in weekly Canva DNA harvest:', error);
+        console.error('[SchedulerWorker] Error in Canva DNA harvest:', error);
       }
     });
   }

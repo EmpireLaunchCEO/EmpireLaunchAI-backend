@@ -5,6 +5,7 @@ import { visualProxyService } from '../services/visualProxyService.js';
 import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { reasoningEngine } from '../services/reasoningEngine.js';
+import { usageService } from '../services/usageService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
@@ -172,6 +173,19 @@ export class EmpireStudioController {
         });
       } catch (dbErr) {
         console.warn('[EmpireStudioController] Failed to create approval:', (dbErr as Error).message);
+      }
+
+      // Track usage for the client (14 videos/month limit)
+      try {
+        await usageService.logUsage(userId, 'neural_twin', {
+          assetId,
+          title: title || angle,
+          niche,
+          source: 'studio_create',
+          videoUrl: result.masterAssetUrl,
+        });
+      } catch (usageErr) {
+        console.warn('[EmpireStudioController] Failed to track usage:', (usageErr as Error).message);
       }
 
       res.json({ ...result, assetId });
