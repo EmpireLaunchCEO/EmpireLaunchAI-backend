@@ -107,6 +107,24 @@ export class EmpireStudioController {
 
     try {
       const campaignIdValue = campaignId || uuidv4();
+
+      // Ensure campaign exists in DB before the pipeline tries to update it
+      try {
+        await db.insert(schema.campaigns).values({
+          id: campaignIdValue,
+          userId,
+          name: title || angle || 'Studio Creation',
+          tone: 'professional',
+          frequency: 'weekly',
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } catch (campErr) {
+        // Campaign may already exist — that's fine
+        console.log('[EmpireStudioController] Campaign insert skipped (may already exist):', (campErr as Error).message);
+      }
+
       const result = await creationEngine.generateMasterAsset({
         userId,
         campaignId: campaignIdValue,
