@@ -463,6 +463,17 @@ export const creations = pgTable('creations', {
       updatedAt: timestamp('updated_at').defaultNow().notNull(),
     });
 
+export const businessSetups = pgTable('business_setups', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  niche: text('niche').notNull(),
+  platform: text('platform').notNull(),
+  steps: jsonb('steps').notNull(),
+  progress: integer('progress').default(0).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const masterAssets = pgTable('master_assets', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
