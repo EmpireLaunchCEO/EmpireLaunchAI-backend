@@ -6,7 +6,7 @@ const { scheduledPosts, users, approvals } = schema;
 
 export const getPendingApprovals = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -31,7 +31,7 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
 
 export const createApproval = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
