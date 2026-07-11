@@ -56,6 +56,29 @@ export const createApproval = async (req: Request, res: Response) => {
   }
 };
 
+export const clearApprovals = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const result = await db.delete(approvals)
+      .where(
+        and(
+          eq(approvals.userId, userId),
+          eq(approvals.status, 'pending')
+        )
+      );
+
+    console.log(`Cleared pending approvals for user ${userId}`);
+    res.json({ status: 'success', message: 'Pending approvals cleared' });
+  } catch (error: any) {
+    console.error('Error clearing approvals:', error);
+    res.status(500).json({ status: 'error', error: error.message });
+  }
+};
+
 export const respondToApproval = async (req: Request, res: Response) => {
   try {
     const { requestId, status } = req.body;
