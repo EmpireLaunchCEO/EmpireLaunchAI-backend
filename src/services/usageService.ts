@@ -8,7 +8,7 @@ export class UsageService {
   /**
    * Tracks a new usage event.
    */
-  async logUsage(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'customize_video', metadata?: any) {
+  async logUsage(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'customize_video' | 'edits', metadata?: any) {
     try {
       await db.insert(usageLogs).values({
         id: uuidv4(),
@@ -27,7 +27,7 @@ export class UsageService {
    * For neural_twin and customize_video: 168-hour window from user's signup date.
    * The app owner (Staci) has unlimited usage on everything.
    */
-  async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video'): Promise<number | 'unlimited'> {
+  async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
     // Owner override — unlimited on everything
     if (await this.isOwner(userId)) {
       return 'unlimited';
@@ -96,7 +96,7 @@ export class UsageService {
   /**
    * Enforces the daily/monthly/weekly limit. Throws if limit reached.
    */
-  async enforceLimit(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video') {
+  async enforceLimit(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits') {
     const remaining = await this.getDailyRemaining(userId, type);
     if (remaining !== 'unlimited' && remaining <= 0) {
       let period = 'day';
