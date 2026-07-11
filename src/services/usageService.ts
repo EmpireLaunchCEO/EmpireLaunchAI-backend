@@ -25,8 +25,14 @@ export class UsageService {
   /**
    * Gets the remaining count for a specific usage type today/month/week.
    * For neural_twin and customize_video: 168-hour window from user's signup date.
+   * The app owner (Staci) has unlimited usage on everything.
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video'): Promise<number | 'unlimited'> {
+    // Owner override — unlimited on everything
+    if (await this.isOwner(userId)) {
+      return 'unlimited';
+    }
+
     // Unlimited check
     if (type === 'faceless' || type === 'enhanced_video') {
       return 'unlimited';
@@ -106,6 +112,29 @@ export class UsageService {
 
       throw new Error(`Usage limit reached. You can generate up to ${limit} ${type.replace(/_/g, ' ')}s per ${period}.`);
     }
+  }
+
+  /**
+   * Check if a user is the app owner (unlimited usage).
+   */
+  private ownerCache = new Set<string>();
+  private async isOwner(userId: string): Promise<boolean> {
+    if (this.ownerCache.has(userId)) return true;
+    try {
+      const [user] = await db.select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      // Owner emails that get unlimited access
+      const ownerEmails = ['staci@empirelaunch.ai', 'staci.peabody@gmail.com'];
+      if (user?.email && ownerEmails.includes(user.email.toLowerCase())) {
+        this.ownerCache.add(userId);
+        return true;
+      }
+    } catch {
+      // Silently fail — default to limited
+    }
+    return false;
   }
 }
 

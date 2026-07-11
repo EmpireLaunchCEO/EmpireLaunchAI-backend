@@ -126,6 +126,9 @@ export class EmpireStudioController {
         console.log('[EmpireStudioController] Campaign insert skipped (may already exist):', (campErr as Error).message);
       }
 
+      // Enforce usage limit before creating (owner has unlimited)
+      await usageService.enforceLimit(userId, 'neural_twin');
+
       const result = await creationEngine.generateMasterAsset({
         userId,
         campaignId: campaignIdValue,
