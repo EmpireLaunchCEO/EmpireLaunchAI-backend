@@ -34,7 +34,7 @@ export class UsageService {
     }
 
     // Unlimited check
-    if (type === 'faceless' || type === 'enhanced_video') {
+    if (type === 'faceless' || type === 'enhanced_video' || type === 'edits') {
       return 'unlimited';
     }
 
