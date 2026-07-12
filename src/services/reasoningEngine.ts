@@ -8,7 +8,7 @@ export class ReasoningEngine {
 
   private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
     // Try Gemini first
-    const geminiKey = process.env.GOOGLE_API_KEY;
+    const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
     if (geminiKey) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;

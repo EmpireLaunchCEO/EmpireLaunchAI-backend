@@ -79,7 +79,7 @@ const planNode = async (state: typeof OrchestratorState.State) => {
   console.log(`[Orchestrator/Plan] Starting dynamic planning phase. User goal detected. Available capabilities: ${AVAILABLE_CAPABILITIES.length}. User ID: ${state.userId}`);
   webSocketService.notifyUser(state.userId, 'ai-log', { message: `[PLANNER] Analyzing goal "${(state.messages[state.messages.length-1]?.content as string)?.substring(0,60) || state.context.goal}" — running LLM-based capability selection...` });
   
-  if (!process.env.GOOGLE_API_KEY) {
+  if (!(process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY)) {
     console.warn("[Orchestrator/Plan] GOOGLE_API_KEY missing, using static fallback plan.");
     webSocketService.notifyUser(state.userId, 'ai-log', { message: "[PLANNER] Gemini API key not configured. Using safe static plan (no AI capability matching)." });
     return {
@@ -152,9 +152,10 @@ const criticNode = async (state: typeof OrchestratorState.State) => {
   console.log(`[Orchestrator/Critic] Evaluating ${state.plan.length}-step plan (iteration ${state.iterations + 1}) for logical consistency, ordering, and completeness...`);
   webSocketService.notifyUser(state.userId, 'ai-log', { message: `[CRITIC] Plan steps: ${state.plan.join(' → ')}. Checking execution ordering for logical validity...` });
   
-  if (!process.env.GOOGLE_API_KEY || state.iterations > 3) {
-    console.log(`[Orchestrator/Critic] Bypassing. Reason: ${!process.env.GOOGLE_API_KEY ? 'No API Key' : 'Max iterations (3) reached'}. Plan has ${state.plan.length} steps.`);
-    webSocketService.notifyUser(state.userId, 'ai-log', { message: `[CRITIC] Bypassed (${!process.env.GOOGLE_API_KEY ? 'No AI' : 'Reached limit'}). Proceeding to execute ${state.plan.length} steps.` });
+  if (!(process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY) || state.iterations > 3) {
+    const hasAI = !!(process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY);
+    console.log(`[Orchestrator/Critic] Bypassing. Reason: ${!hasAI ? 'No AI' : 'Max iterations (3) reached'}. Plan has ${state.plan.length} steps.`);
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: `[CRITIC] Bypassed (${!hasAI ? 'No AI' : 'Reached limit'}). Proceeding to execute ${state.plan.length} steps.` });
     return { nextStep: "execute" };
   }
 

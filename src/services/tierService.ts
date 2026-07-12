@@ -90,7 +90,7 @@ export class TierService {
     return {
       modelName: 'gemini-2.5-flash',   // Safe default
       temperature: 0.5,
-      apiKey: process.env.GOOGLE_API_KEY,
+      apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY,
     };
   }
 }

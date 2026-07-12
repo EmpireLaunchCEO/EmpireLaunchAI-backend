@@ -46,7 +46,7 @@ export async function resolveModelForUser(userId?: string): Promise<BaseChatMode
     return new ChatGoogleGenerativeAI({
       model: config.modelName,
       temperature: config.temperature,
-      apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
+      apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
     });
   }
 
@@ -62,7 +62,7 @@ export async function resolveStudioReasoner(): Promise<BaseChatModel> {
   return new ChatGoogleGenerativeAI({
     model: config.modelName,
     temperature: config.temperature,
-    apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
+    apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
   });
 }
 
@@ -70,7 +70,7 @@ export function getDefaultModel(): BaseChatModel {
   return new ChatGoogleGenerativeAI({
     model: 'gemini-2.5-flash',
     temperature: 0.5,
-    apiKey: process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
+    apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
   });
 }
 

@@ -157,7 +157,7 @@ export class InfrastructureService {
    * Fetches Google Cloud / Vertex AI usage.
    */
   async getGoogleBalance(): Promise<InfrastructureBalance> {
-    const apiKey = process.env.GOOGLE_API_KEY;
+    const apiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
     if (!apiKey) {
       // Free-tier Google Studio/Gemini API credits
       return { platform: 'Google Studio', balance: 5.00, currency: 'USD', status: 'active' };
