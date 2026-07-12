@@ -108,8 +108,10 @@ export class EmpireStudioController {
 
     try {
       const campaignIdValue = campaignId || uuidv4();
+      const assetId = uuidv4();
+      const approvalId = uuidv4();
 
-      // Ensure campaign exists in DB before the pipeline tries to update it
+      // Create campaign
       try {
         await db.insert(schema.campaigns).values({
           id: campaignIdValue,
@@ -122,42 +124,14 @@ export class EmpireStudioController {
           updatedAt: new Date(),
         });
       } catch (campErr) {
-        // Campaign may already exist — that's fine
         console.log('[EmpireStudioController] Campaign insert skipped (may already exist):', (campErr as Error).message);
       }
 
-      // Enforce usage limit before creating (owner has unlimited)
+      // Enforce usage limit
       await usageService.enforceLimit(userId, 'neural_twin');
 
-      const result = await creationEngine.generateMasterAsset({
-        userId,
-        campaignId: campaignIdValue,
-        niche,
-        productName: angle,
-        platforms: platforms || ['tiktok'],
-        archetype: archetype || 'creator',
-      });
-
-      // Save to masterAssets table so Operations Base can find it
-      const assetId = uuidv4();
+      // Create the approval immediately so it shows up in Operations
       try {
-        await db.insert(schema.masterAssets).values({
-          id: assetId,
-          userId,
-          campaignId: campaignIdValue,
-          assetType: 'video',
-          status: 'completed',
-          masterVideoUrl: result.masterAssetUrl || null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      } catch (dbErr) {
-        console.warn('[EmpireStudioController] Failed to save masterAsset (table may not exist yet):', (dbErr as Error).message);
-      }
-
-      // Create approval for Neural Dispatch Center
-      try {
-        const approvalId = uuidv4();
         await db.insert(schema.approvals).values({
           id: approvalId,
           userId,
@@ -166,9 +140,9 @@ export class EmpireStudioController {
             assetId,
             title: title || angle,
             description: `AI-generated ${niche} video: ${title || angle}`,
-            videoUrl: result.masterAssetUrl,
             niche,
             platforms,
+            status: 'generating',
           },
           status: 'pending',
           createdAt: new Date(),
@@ -178,24 +152,90 @@ export class EmpireStudioController {
         console.warn('[EmpireStudioController] Failed to create approval:', (dbErr as Error).message);
       }
 
-      // Track usage for the client (14 videos/month limit)
+      // Track usage
       try {
         await usageService.logUsage(userId, 'neural_twin', {
           assetId,
           title: title || angle,
           niche,
           source: 'studio_create',
-          videoUrl: result.masterAssetUrl,
         });
       } catch (usageErr) {
         console.warn('[EmpireStudioController] Failed to track usage:', (usageErr as Error).message);
       }
 
-      res.json({ ...result, assetId });
+      // Return immediately — pipeline runs in background
+      res.json({ status: 'processing', assetId, message: 'Video generation started' });
+
+      // Run pipeline in background (don't await — let it complete asynchronously)
+      creationEngine.generateMasterAsset({
+        userId,
+        campaignId: campaignIdValue,
+        niche,
+        productName: angle,
+        platforms: platforms || ['tiktok'],
+        archetype: archetype || 'creator',
+      }).then(async (result) => {
+        // Update the approval with the video URL
+        if (result.masterAssetUrl) {
+          await db.update(schema.approvals)
+            .set({
+              payload: {
+                assetId,
+                title: title || angle,
+                description: `AI-generated ${niche} video: ${title || angle}`,
+                videoUrl: result.masterAssetUrl,
+                niche,
+                platforms,
+                status: 'completed',
+              },
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.approvals.id, approvalId));
+        }
+
+        // Save to masterAssets
+        try {
+          await db.insert(schema.masterAssets).values({
+            id: assetId,
+            userId,
+            campaignId: campaignIdValue,
+            assetType: 'video',
+            status: 'completed',
+            masterVideoUrl: result.masterAssetUrl || null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        } catch (dbErr) {
+          console.warn('[EmpireStudioController] Failed to save masterAsset:', (dbErr as Error).message);
+        }
+      }).catch(async (error) => {
+        console.error('[EmpireStudioController] Background pipeline failed:', error);
+        // Mark approval as failed
+        try {
+          await db.update(schema.approvals)
+            .set({
+              payload: {
+                assetId,
+                title: title || angle,
+                description: `AI-generated ${niche} video: ${title || angle}`,
+                niche,
+                platforms,
+                status: 'failed',
+                error: (error as Error).message,
+              },
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.approvals.id, approvalId));
+        } catch (updateErr) {
+          console.error('[EmpireStudioController] Failed to update failed approval:', updateErr);
+        }
+      });
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       console.error('[EmpireStudioController] create failed:', error);
-      res.status(500).json({ error: msg });
+      // Try to return error, but response may already be sent
+      try { res.status(500).json({ error: msg }); } catch {}
     }
   }
 
