@@ -110,6 +110,7 @@ export class EmpireStudioController {
       const campaignIdValue = campaignId || uuidv4();
       const assetId = uuidv4();
       const approvalId = uuidv4();
+      const safePlatforms = platforms || ['tiktok'];
 
       // Create campaign
       try {
@@ -141,7 +142,7 @@ export class EmpireStudioController {
             title: title || angle,
             description: `AI-generated ${niche} video: ${title || angle}`,
             niche,
-            platforms,
+            platforms: safePlatforms,
             status: 'generating',
           },
           status: 'pending',
@@ -173,7 +174,7 @@ export class EmpireStudioController {
         campaignId: campaignIdValue,
         niche,
         productName: angle,
-        platforms: platforms || ['tiktok'],
+        platforms: safePlatforms,
         archetype: archetype || 'creator',
       }).then(async (result) => {
         // Update the approval with the video URL
@@ -186,7 +187,7 @@ export class EmpireStudioController {
                 description: `AI-generated ${niche} video: ${title || angle}`,
                 videoUrl: result.masterAssetUrl,
                 niche,
-                platforms,
+                platforms: safePlatforms,
                 status: 'completed',
               },
               updatedAt: new Date(),
@@ -220,7 +221,7 @@ export class EmpireStudioController {
                 title: title || angle,
                 description: `AI-generated ${niche} video: ${title || angle}`,
                 niche,
-                platforms,
+                platforms: safePlatforms,
                 status: 'failed',
                 error: (error as Error).message,
               },
