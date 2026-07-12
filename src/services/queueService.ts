@@ -140,7 +140,7 @@ export const startAIWorker = () => {
     },
     {
       connection: redisConnection,
-      concurrency: 5, // Process up to 5 AI tasks concurrently per worker node
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY_AI_TASKS || '50', 10),
     }
   );
 

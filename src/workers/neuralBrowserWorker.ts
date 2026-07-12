@@ -85,7 +85,7 @@ export const startNeuralBrowserWorker = () => {
     },
     {
       connection: redisConnection,
-      concurrency: 2, // Limit concurrency to save memory
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY_NEURAL_BROWSER || '20', 10),
     }
   );
 

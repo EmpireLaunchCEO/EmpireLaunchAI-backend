@@ -25,7 +25,7 @@ export const onboardingWorker = new Worker(
   },
   {
     connection: redisConnection,
-    concurrency: 10, // Adjust based on memory and browser capacity
+    concurrency: parseInt(process.env.WORKER_CONCURRENCY_ONBOARDING || '100', 10),
   }
 );
 

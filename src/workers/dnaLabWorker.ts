@@ -63,7 +63,7 @@ export const startDnaLabWorker = () => {
     },
     {
       connection: redisConnection,
-      concurrency: 1, // High memory usage, keep concurrency low
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY_DNA_LAB || '10', 10),
     }
   );
 

@@ -110,7 +110,7 @@ export const startDistributionWorker = () => {
     },
     {
       connection: redisConnection,
-      concurrency: 5,
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY_DISTRIBUTION || '50', 10),
     }
   );
 
