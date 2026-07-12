@@ -199,10 +199,14 @@ export const triggerInstantPayout = async (req: Request, res: Response) => {
 export const createPlatformCheckout = async (req: Request, res: Response) => {
   try {
     const userId = req.headers['x-user-id'] as string;
-    const { returnUrl } = req.body;
+    const { returnUrl, currency, amountInCents } = req.body;
     if (!userId) return res.status(401).json({ error: 'Auth required' });
 
-    const session = await stripeService.createPlatformCheckoutSession(userId, returnUrl);
+    const validCurrencies = ['usd', 'eur', 'gbp', 'jpy', 'cny', 'krw', 'cad', 'aud', 'brl', 'mxn', 'inr'];
+    const checkoutCurrency = currency && validCurrencies.includes(currency) ? currency : 'usd';
+    const checkoutAmount = typeof amountInCents === 'number' && amountInCents > 0 ? amountInCents : 4000;
+
+    const session = await stripeService.createPlatformCheckoutSession(userId, returnUrl, checkoutCurrency, checkoutAmount);
     res.json({ url: session.url });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
