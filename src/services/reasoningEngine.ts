@@ -7,36 +7,65 @@ import { eq } from 'drizzle-orm';
 export class ReasoningEngine {
 
   private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      throw new Error('GOOGLE_API_KEY not configured');
+    // Try Gemini first
+    const geminiKey = process.env.GOOGLE_API_KEY;
+    if (geminiKey) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
+            ],
+            generationConfig: { temperature: 0.5, maxOutputTokens: 1024 }
+          })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) return text;
+        }
+        console.warn('[ReasoningEngine] Gemini failed, trying OpenAI fallback:', response.status);
+      } catch (err) {
+        console.warn('[ReasoningEngine] Gemini error, trying OpenAI fallback:', (err as Error).message);
+      }
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    // Fallback to OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      throw new Error('Neither GOOGLE_API_KEY nor OPENAI_API_KEY configured');
+    }
 
-    const response = await fetch(url, {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiKey}`
+      },
       body: JSON.stringify({
-        contents: [
-          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
         ],
-        generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 1024
-        }
+        temperature: 0.5,
+        max_tokens: 1024
       })
     });
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      throw new Error(`Gemini API error: ${response.status} ${errorBody}`);
+      throw new Error(`OpenAI API error: ${response.status} ${errorBody}`);
     }
 
     const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = data?.choices?.[0]?.message?.content;
     if (!text) {
-      throw new Error('Gemini returned empty response');
+      throw new Error('OpenAI returned empty response');
     }
     return text;
   }
