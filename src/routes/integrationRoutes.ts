@@ -5,8 +5,55 @@ import { mobileAuth } from '../middleware/mobileAuth.js';
 import { integrationService } from '../services/integrationService.js';
 import { vaultService } from '../services/vaultService.js';
 import { universalGatewayService } from '../services/universalGatewayService.js';
+import { handleExtractionService } from '../services/handleExtractionService.js';
 
 const router = Router();
+
+/**
+ * GET /api/integrations/handles
+ * Returns platform handles (@usernames, shop names) for all connected platforms.
+ */
+router.get('/handles', mobileAuth, async (req: any, res) => {
+  const userId = req.userId;
+  try {
+    const handles = await handleExtractionService.getStoredHandles(userId);
+    res.json({ status: 'success', handles });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/integrations/handles/refresh
+ * Attempts to refresh/extract handles for all connected platforms via Playwright.
+ */
+router.post('/handles/refresh', mobileAuth, async (req: any, res) => {
+  const userId = req.userId;
+  try {
+    const userIntegrations = await db.select()
+      .from(schema.integrations)
+      .where(and(
+        eq(schema.integrations.userId, userId),
+        eq(schema.integrations.isActive, true)
+      ));
+
+    const results: Record<string, string | null> = {};
+    for (const integration of userIntegrations) {
+      const platform = integration.platform;
+      const handle = await handleExtractionService.extractHandle(userId, platform);
+      if (handle) {
+        await handleExtractionService.updateStoredHandle(userId, platform, handle);
+        results[platform] = handle;
+      } else {
+        results[platform] = integration.platformAccountHandle || null;
+      }
+    }
+
+    res.json({ status: 'success', handles: results });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 /**
  * GET /api/integrations/status

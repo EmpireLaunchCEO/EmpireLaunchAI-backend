@@ -6,6 +6,7 @@ import { vaultService } from './vaultService.js';
 import { neuralBrowserService } from './neuralBrowserService.js';
 import { universalGatewayService } from './universalGatewayService.js';
 import { neuralActionEngine } from './neuralActionEngine.js';
+import { handleExtractionService } from './handleExtractionService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
@@ -680,6 +681,14 @@ export class OnboardingOrchestrator {
             const handle = await this.extractText(selector);
             if (handle && handle.trim()) accountHandle = handle.trim().split('\n')[0];
           } catch {}
+        }
+
+        // Also try using the HandleExtractionService for a more targeted extraction
+        if (this.page) {
+          const robustHandle = await handleExtractionService.extractHandle(userId, platform, this.page);
+          if (robustHandle) {
+            accountHandle = robustHandle;
+          }
         }
       } catch (e) {
         console.warn(`[OnboardingOrchestrator] Failed to extract handle for ${platform}:`, e);
