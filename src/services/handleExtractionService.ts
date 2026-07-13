@@ -1,6 +1,7 @@
 import { chromium, Browser, Page } from 'playwright';
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
+import { reasoningEngine } from './reasoningEngine.js';
 
 const { integrations } = schema;
 
@@ -273,6 +274,58 @@ export class HandleExtractionService {
       console.log(`[HandleExtraction] Updated handle for ${platform}: ${handle}`);
     } catch (err) {
       console.error(`[HandleExtraction] Failed to update handle for ${platform}:`, (err as Error).message);
+    }
+  }
+
+  /**
+   * AI-powered handle extraction using Gemini.
+   * Works for ANY platform — no per-platform selectors needed.
+   * Gemini analyzes the page content and intelligently finds the @username or account handle.
+   */
+  async extractHandleViaAI(platform: string, page: Page): Promise<string | null> {
+    try {
+      // Get the current page URL and text content
+      const url = page.url();
+      const pageText = await page.textContent('body').catch(() => '');
+      
+      // Get key page elements for context (title, headings, etc.)
+      const pageTitle = await page.title().catch(() => '');
+      
+      // Take a snippet of visible text (limited to avoid token limits)
+      const visibleText = (pageText || '')
+        .replace(/\\s+/g, ' ')
+        .replace(/<[^>]*>/g, '')
+        .substring(0, 3000)
+        .trim();
+
+      const prompt = `You are looking at a profile/dashboard page for the platform "${platform}".
+Current page URL: ${url}
+Page title: ${pageTitle}
+
+Visible page content:
+${visibleText}
+
+Based on this page, what is the @username, account handle, shop name, or display name of the logged-in user?
+Return ONLY the handle/name itself — nothing else. No explanation, no formatting.
+If it starts with @, include the @. If not, just return the name as-is.
+If you cannot find a handle, return "UNKNOWN".`;
+
+      const response = await reasoningEngine.reason(prompt, {
+        temperature: 0.1,
+        maxTokens: 100,
+      });
+
+      if (!response || response === 'UNKNOWN') {
+        console.log(`[HandleExtraction] AI could not determine handle for ${platform}`);
+        return null;
+      }
+
+      const cleanHandle = response.trim().replace(/^["']|["']$/g, '');
+      console.log(`[HandleExtraction] AI extracted handle for ${platform}: ${cleanHandle}`);
+      return cleanHandle;
+    } catch (err) {
+      console.error(`[HandleExtraction] AI extraction failed for ${platform}:`, (err as Error).message);
+      return null;
     }
   }
 }

@@ -664,12 +664,23 @@ export class OnboardingOrchestrator {
           await this.page.goto('https://www.tiktok.com/@me', { waitUntil: 'domcontentloaded', timeout: 15000 });
           await new Promise(r => setTimeout(r, 3000));
         } catch (e) {
-          console.log(`[OnboardingOrchestrator] TikTok: profile navigation failed, trying extraction from current page`);
+          console.log(`[OnboardingOrchestrator] TikTok: profile navigation failed, trying from current page`);
         }
       }
       
       try {
-        const selectors: Record<string, string> = {
+        // PRIMARY: AI-powered handle extraction using Gemini (works for ALL platforms)
+        if (this.page) {
+          const aiHandle = await handleExtractionService.extractHandleViaAI(platform, this.page);
+          if (aiHandle) {
+            accountHandle = aiHandle;
+            console.log(`[OnboardingOrchestrator] AI extracted handle for ${platform}: ${aiHandle}`);
+          }
+        }
+
+        // FALLBACK 1: Platform-specific DOM selectors
+        if (!accountHandle || accountHandle.includes('Account')) {
+          const selectors: Record<string, string> = {
           behance: '.Profile-name, .Project-owner-name',
           figma: '[class*="profile_page--name"], [class*="top_nav--userName"]',
           kittl: '.user-name, .profile-name',
@@ -694,8 +705,9 @@ export class OnboardingOrchestrator {
             if (handle && handle.trim()) accountHandle = handle.trim().split('\n')[0];
           } catch {}
         }
+        } // end FALLBACK 1
 
-        // Also try using the HandleExtractionService for a more targeted extraction
+        // FALLBACK 2: Also try using the HandleExtractionService for a more targeted extraction
         if (this.page) {
           const robustHandle = await handleExtractionService.extractHandle(userId, platform, this.page);
           if (robustHandle) {
