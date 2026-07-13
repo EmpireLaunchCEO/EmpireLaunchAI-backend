@@ -538,7 +538,7 @@ export class OnboardingOrchestrator {
     }
   }
 
-  private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string }) {
+  private async executeGenericBrowserLogin(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string; handle?: string }) {
     const urls: Record<string, string> = {
       fiverr: 'https://www.fiverr.com/login',
       youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
