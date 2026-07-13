@@ -38,6 +38,7 @@ import mobileRoutes from './routes/mobileRoutes.js';
 import auditRoutes from './routes/auditRoutes.js';
 import cinemaRoutes from './routes/cinemaRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
+import actionRoutes from './routes/actionRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -146,6 +147,7 @@ app.use('/api/mobile', mobileRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/cinema', cinemaRoutes);
 app.use('/api/setup', setupRoutes);
+app.use('/api/actions', actionRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v3' });

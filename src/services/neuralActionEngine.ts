@@ -1177,6 +1177,212 @@ export class NeuralActionEngine {
     };
     return domains[platform] || `https://www.${platform}.com`;
   }
+
+  /**
+   * GoDaddy: Set up DNS records via Playwright.
+   * Used when the user linked via Neural Handshake (no API key).
+   * Navigates GoDaddy's DNS Manager to add/update DNS records.
+   *
+   * @param userId - The user's ID
+   * @param domain - The domain to manage (e.g. example.com)
+   * @param records - DNS records to set (type, name, value, ttl)
+   * @returns true if DNS setup succeeded
+   */
+  async setupGoDaddyDns(
+    userId: string,
+    domain: string,
+    records: Array<{ type: string; name: string; value: string; ttl?: number }>
+  ): Promise<boolean> {
+    console.log(`[NeuralActionEngine] Setting up GoDaddy DNS for ${domain}`);
+    const session = await this.loadSession(userId, 'godaddy');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      // Navigate to GoDaddy Domain Manager
+      await this.navigateAndWait(page, 'https://account.godaddy.com/products?domain=manage', 4000);
+
+      // Find the domain in the list and click Manage DNS
+      try {
+        const domainLink = await this.waitForSelector(page, `a:has-text("${domain}"), span:has-text("${domain}"), [class*="domain"]:has-text("${domain}")`, 8000);
+        if (domainLink) {
+          await domainLink.click();
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      } catch {
+        // Try going directly to DNS manager URL
+        await this.navigateAndWait(page, `https://dns.godaddy.com/manage/${domain}`, 4000);
+      }
+
+      // Look for "Add Record" or "DNS Management" button
+      try {
+        const dnsBtn = await this.waitForSelector(page, 'button:has-text("DNS"), a:has-text("DNS"), [class*="dns"], button:has-text("Manage")', 8000);
+        if (dnsBtn) {
+          await dnsBtn.click();
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      } catch {
+        console.log('[NeuralActionEngine] GoDaddy: DNS button not found, trying direct URL');
+      }
+
+      // Try direct URL if we're not on DNS page
+      const currentUrl = page.url();
+      if (!currentUrl.includes('dns') && !currentUrl.includes('records')) {
+        await this.navigateAndWait(page, `https://dns.godaddy.com/manage/${domain}`, 4000);
+      }
+
+      // Add each DNS record
+      for (const record of records) {
+        try {
+          // Click "Add" or "Add Record" button
+          const addBtn = await this.waitForSelector(page, 'button:has-text("Add"), button:has-text("Add Record"), [class*="add-record"]', 5000);
+          if (addBtn) {
+            await addBtn.click();
+            await new Promise(r => setTimeout(r, 1000));
+          }
+
+          // Select record type
+          const typeDropdown = await this.waitForSelector(page, 'select[name*="type"], select[aria-label*="Type"], [class*="record-type"] select', 3000);
+          if (typeDropdown) {
+            await typeDropdown.selectOption(record.type);
+            await new Promise(r => setTimeout(r, 500));
+          }
+
+          // Fill record name
+          const nameInput = await this.waitForSelector(page, 'input[name*="name"], input[aria-label*="Name"], [class*="record-name"] input', 3000);
+          if (nameInput) {
+            await nameInput.fill(record.name);
+          }
+
+          // Fill record value/points-to
+          const valueInput = await this.waitForSelector(page, 'input[name*="value"], input[name*="points"], input[aria-label*="Value"], [class*="record-value"] input, input[aria-label*="Points"]', 3000);
+          if (valueInput) {
+            await valueInput.fill(record.value);
+          }
+
+          // Fill TTL if specified
+          if (record.ttl) {
+            const ttlInput = await this.waitForSelector(page, 'input[name*="ttl"], input[aria-label*="TTL"]', 2000);
+            if (ttlInput) {
+              await ttlInput.fill(String(record.ttl));
+            }
+          }
+
+          // Click Save/Apply
+          const saveBtn = await this.waitForSelector(page, 'button:has-text("Save"), button:has-text("Add"), button:has-text("Apply")', 3000);
+          if (saveBtn) {
+            await saveBtn.click();
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        } catch (recErr: any) {
+          console.warn(`[NeuralActionEngine] Failed to add DNS record ${record.type} ${record.name}: ${recErr.message}`);
+        }
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] GoDaddy DNS setup completed for ${domain}`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] GoDaddy DNS setup failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * General-purpose pipeline dispatcher.
+   * Routes action names to the appropriate pipeline method.
+   * Used by the generic POST /api/actions/:action endpoint.
+   */
+  async executePipeline(
+    userId: string,
+    action: string,
+    params: Record<string, any>
+  ): Promise<any> {
+    console.log(`[NeuralActionEngine] Executing pipeline: ${action} for user ${userId}`);
+
+    switch (action) {
+      case 'post-tiktok':
+        return this.postToTikTok(
+          userId,
+          params.videoPath,
+          params.caption || '',
+          params.music ? { searchTerm: params.music, startTime: 0, duration: 15 } : undefined,
+          params.hashtags
+        );
+
+      case 'post-instagram-reel':
+        return this.postToInstagramReel(
+          userId,
+          params.videoPath,
+          params.caption || '',
+          params.coverImagePath,
+          params.music ? { searchTerm: params.music } : null,
+          params.hashtags
+        );
+
+      case 'post-instagram':
+        return this.postToInstagram(
+          userId,
+          params.imagePath,
+          params.caption || ''
+        );
+
+      case 'create-etsy-listing':
+        return this.createEtsyListing(userId, {
+          title: params.title,
+          description: params.description,
+          price: params.price,
+          images: params.images || [],
+          category: params.category,
+          tags: params.tags,
+        });
+
+      case 'create-shopify-product':
+        return this.createShopifyProduct(userId, {
+          title: params.title,
+          description: params.description,
+          price: params.price,
+          images: params.images,
+          vendor: params.vendor,
+          productType: params.productType,
+          tags: params.tags,
+        });
+
+      case 'create-facebook-post':
+        return this.createFacebookPost(userId, params.text, params.imagePath);
+
+      case 'create-pinterest-pin':
+        return this.createPinterestPin(
+          userId,
+          params.imagePath,
+          params.title,
+          params.description,
+          params.link
+        );
+
+      case 'upload-youtube':
+        return this.uploadToYouTube(
+          userId,
+          params.videoPath,
+          params.title,
+          params.description,
+          params.tags
+        );
+
+      case 'setup-godaddy-dns':
+        return this.setupGoDaddyDns(
+          userId,
+          params.domain,
+          params.records || []
+        );
+
+      default:
+        throw new Error(`Unknown action: ${action}. Available: post-tiktok, post-instagram-reel, post-instagram, create-etsy-listing, create-shopify-product, create-facebook-post, create-pinterest-pin, upload-youtube, setup-godaddy-dns`);
+    }
+  }
 }
 
 export const neuralActionEngine = new NeuralActionEngine();
