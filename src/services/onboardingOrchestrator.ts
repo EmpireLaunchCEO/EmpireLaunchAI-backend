@@ -579,7 +579,11 @@ export class OnboardingOrchestrator {
           const logoutPg = await logoutPage.newPage();
           await logoutPg.goto('https://www.tiktok.com/logout', { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
           await new Promise(r => setTimeout(r, 2000));
-          // Also clear cookies on the main context
+          // Clear all possible storage
+          await logoutPg.evaluate(() => {
+            try { localStorage.clear(); } catch(e) {}
+            try { sessionStorage.clear(); } catch(e) {}
+          }).catch(() => {});
           await logoutPg.context().clearCookies();
           await logoutPage.close();
           console.log(`[OnboardingOrchestrator] TikTok: logout complete, proceeding to login`);
@@ -589,6 +593,19 @@ export class OnboardingOrchestrator {
       }
 
       await this.openPage(url);
+      
+      // Extra wipe for TikTok: clear any storage that might have auto-restored
+      if (platform === 'tiktok' && this.page) {
+        try {
+          await this.page.evaluate(() => {
+            try { localStorage.clear(); } catch(e) {}
+            try { sessionStorage.clear(); } catch(e) {}
+          }).catch(() => {});
+          const loginUrl = this.page.url();
+          console.log(`[OnboardingOrchestrator] TikTok: after navigation URL = ${loginUrl}`);
+        } catch {}
+      }
+      
       const snapshot = await this.getPageSnapshot();
 
       if (snapshot.includes('Log in') || snapshot.includes('Sign in') || snapshot.includes('Email')) {
