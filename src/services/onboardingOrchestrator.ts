@@ -656,6 +656,18 @@ export class OnboardingOrchestrator {
         .where(eq(onboardingSessions.id, sessionId));
 
       let accountHandle = `${platform.charAt(0).toUpperCase()}${platform.slice(1)} Account`;
+      
+      // For TikTok, navigate to the profile page to extract the username
+      if (platform === 'tiktok' && this.page) {
+        try {
+          console.log(`[OnboardingOrchestrator] TikTok: navigating to profile page for handle extraction`);
+          await this.page.goto('https://www.tiktok.com/@me', { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await new Promise(r => setTimeout(r, 3000));
+        } catch (e) {
+          console.log(`[OnboardingOrchestrator] TikTok: profile navigation failed, trying extraction from current page`);
+        }
+      }
+      
       try {
         const selectors: Record<string, string> = {
           behance: '.Profile-name, .Project-owner-name',

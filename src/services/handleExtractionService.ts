@@ -198,10 +198,32 @@ export class HandleExtractionService {
         return cleaned;
       }
     } catch {
-      // Fallback: try getting the page title or URL-based handle
+      // Fallback: try extracting the handle from the URL itself
+      // TikTok profile URL: https://www.tiktok.com/@username
+      // Other platforms often have similar patterns
       try {
         const url = page.url();
-        console.log(`[HandleExtraction] Selector not found, using URL: ${url}`);
+        const urlObj = new URL(url);
+        const pathParts = urlObj.pathname.split('/').filter(Boolean);
+        // Look for @username in the path
+        for (const part of pathParts) {
+          if (part.startsWith('@')) {
+            const handle = part.substring(1); // Remove @
+            if (handle && handle.length > 0) {
+              console.log(`[HandleExtraction] Extracted handle from URL: @${handle}`);
+              return `@${handle}`;
+            }
+          }
+        }
+        // Also try the last path segment as a fallback (many platforms use /username)
+        if (pathParts.length > 0) {
+          const lastSegment = pathParts[pathParts.length - 1];
+          if (lastSegment && lastSegment.length > 0 && !lastSegment.includes('.') && !lastSegment.includes('?')) {
+            console.log(`[HandleExtraction] Using last path segment as handle: ${lastSegment}`);
+            return `@${lastSegment}`;
+          }
+        }
+        console.log(`[HandleExtraction] Selector not found, URL: ${url}`);
       } catch {}
     }
     return null;
