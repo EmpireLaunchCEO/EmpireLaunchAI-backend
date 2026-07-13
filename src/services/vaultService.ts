@@ -115,9 +115,21 @@ export class VaultService {
     if (secret.encryptedDek) {
       return decryptWithEnvelope(secret.encryptedValue, secret.encryptedDek, secret.iv, secret.tag);
     } else {
-      const encryptedText = `\${secret.iv}:\${secret.tag}:\${secret.encryptedValue}`;
+      const encryptedText = `${secret.iv}:${secret.tag}:${secret.encryptedValue}`;
       return decrypt(encryptedText);
     }
+  }
+
+  /**
+   * Delete a secret from the vault.
+   */
+  async deleteSecret(userId: string, platform: string, secretType: string): Promise<void> {
+    await db.delete(ownershipVault)
+      .where(and(
+        eq(ownershipVault.userId, userId),
+        eq(ownershipVault.platform, platform.toUpperCase()),
+        eq(ownershipVault.secretType, secretType.toUpperCase())
+      ));
   }
 }
 

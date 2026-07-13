@@ -142,6 +142,16 @@ export class IntegrationService {
     } catch (err) {
       console.warn(`[IntegrationService] Failed to update user settings after disconnecting ${platform}:`, err);
     }
+
+    // Clear saved Playwright session from vault to prevent stale sessions
+    try {
+      const { vaultService } = await import('./vaultService.js');
+      await vaultService.deleteSecret(userId, platform, 'NEURAL_SESSION').catch(() => {});
+      await vaultService.deleteSecret(userId, platform, 'SESSION_TOKEN').catch(() => {});
+      console.log(`[IntegrationService] Cleared vault sessions for ${platform}`);
+    } catch (err) {
+      console.warn(`[IntegrationService] Failed to clear vault sessions for ${platform}:`, err);
+    }
   }
 }
 
