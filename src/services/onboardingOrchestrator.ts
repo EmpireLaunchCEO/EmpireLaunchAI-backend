@@ -88,6 +88,7 @@ export class OnboardingOrchestrator {
       storageState: undefined,
     });
     this.page = await context.newPage();
+    await this.page.context().clearCookies();
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     return this.page;
   }
@@ -569,6 +570,23 @@ export class OnboardingOrchestrator {
       const url = urls[platform] || `https://${platform}.com/login`;
       const waitUrl = waitUrls[platform];
       if (!url) throw new Error(`No URL configured for: ${platform}`);
+
+      // For TikTok, force logout first to clear any remembered account
+      if (platform === 'tiktok') {
+        try {
+          console.log(`[OnboardingOrchestrator] TikTok: force-logging out to ensure fresh login`);
+          const logoutPage = await this.browser!.newContext();
+          const logoutPg = await logoutPage.newPage();
+          await logoutPg.goto('https://www.tiktok.com/logout', { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+          // Also clear cookies on the main context
+          await logoutPg.context().clearCookies();
+          await logoutPage.close();
+          console.log(`[OnboardingOrchestrator] TikTok: logout complete, proceeding to login`);
+        } catch (e) {
+          console.log(`[OnboardingOrchestrator] TikTok: logout navigation non-critical (${(e as any)?.message})`);
+        }
+      }
 
       await this.openPage(url);
       const snapshot = await this.getPageSnapshot();
