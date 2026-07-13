@@ -326,16 +326,19 @@ If you cannot find a handle, return "UNKNOWN".`;
       const cleanHandle = response.trim().replace(/^["']|["']$/g, '');
       
       // Validate: reject handles that are obviously UI text, not usernames
-      const invalidWords = ['heart', 'like', 'follow', 'share', 'message', 'account', 'profile', 'settings', 'home', 'search', 'inbox', 'notification', 'upload', 'create', 'discover', 'trending', 'live', 'shop', 'cart'];
+      const invalidWords = ['heart', 'like', 'follow', 'share', 'message', 'account', 'profile', 'settings', 'home', 'search', 'inbox', 'notification', 'upload', 'create', 'discover', 'trending', 'live', 'shop', 'cart', 'subscri', 'subscribe', 'comment', 'mention', 'report', 'block', 'remove', 'delete', 'edit', 'save', 'insta', 'k', 'm'];
       const lowerHandle = cleanHandle.toLowerCase();
-      if (invalidWords.some(w => lowerHandle === w || lowerHandle.includes(` ${w} `) || lowerHandle.startsWith(`${w} `) || lowerHandle.endsWith(` ${w}`))) {
-        console.log(`[HandleExtraction] AI returned invalid handle (UI text): ${cleanHandle}`);
+      if (invalidWords.some(w => lowerHandle.includes(w))) {
+        console.log(`[HandleExtraction] AI returned invalid handle (contains UI word): ${cleanHandle}`);
         return null;
       }
       
-      // Reject if it looks like random text (too long, has spaces, etc.)
-      if (cleanHandle.length > 50 || (cleanHandle.includes(' ') && cleanHandle.split(' ').length > 3)) {
-        console.log(`[HandleExtraction] AI returned invalid handle (too long/random): ${cleanHandle}`);
+      // Reject if has emoji, too long, or too many words
+      const charCount = cleanHandle.length;
+      const wordCount = cleanHandle.split(/[\s,;:!?]+/).filter(Boolean).length;
+      const hasEmoji = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u.test(cleanHandle);
+      if (charCount > 35 || wordCount > 3 || hasEmoji || cleanHandle.includes('❤️') || /\d{2,}[A-Z]/.test(cleanHandle)) {
+        console.log(`[HandleExtraction] AI returned invalid handle (too long/emoji/random): ${cleanHandle}`);
         return null;
       }
 
