@@ -118,6 +118,31 @@ export class IntegrationService {
     const decrypted = decrypt(results[0].credentials);
     return JSON.parse(decrypted);
   }
+
+  async removeIntegration(userId: string, platform: string) {
+    // Delete the integration record
+    await db.delete(integrations)
+      .where(and(
+        eq(integrations.userId, userId),
+        eq(integrations.platform, platform)
+      ));
+
+    // Remove platform from user settings
+    try {
+      const [settings] = await db.select().from(schema.userSettings).where(eq(schema.userSettings.userId, userId)).limit(1);
+      if (settings) {
+        const connected = (settings.connectedPlatforms as string[] || []).filter(p => p !== platform);
+        await db.update(schema.userSettings)
+          .set({ 
+            connectedPlatforms: connected,
+            updatedAt: new Date() 
+          })
+          .where(eq(schema.userSettings.userId, userId));
+      }
+    } catch (err) {
+      console.warn(`[IntegrationService] Failed to update user settings after disconnecting ${platform}:`, err);
+    }
+  }
 }
 
 export const integrationService = new IntegrationService();

@@ -152,8 +152,29 @@ router.post('/manual', mobileAuth, async (req: any, res) => {
     // Save to integrations table
     const id = await integrationService.saveIntegration(userId, platform, credentials, undefined, handle);
     
-    res.json({ status: 'success', id, message: `\${platform} linked successfully` });
+    res.json({ status: 'success', id, message: `${platform} linked successfully` });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/integrations/:platform
+ * Disconnect a platform by removing its integration record.
+ */
+router.delete('/:platform', mobileAuth, async (req: any, res) => {
+  const userId = req.userId;
+  const { platform } = req.params;
+
+  if (!platform) {
+    return res.status(400).json({ error: 'Platform is required' });
+  }
+
+  try {
+    await integrationService.removeIntegration(userId, platform);
+    res.json({ status: 'success', message: `${platform} disconnected successfully` });
+  } catch (error: any) {
+    console.error(`[IntegrationRoute] Failed to disconnect ${platform}:`, error.message);
     res.status(500).json({ error: error.message });
   }
 });
