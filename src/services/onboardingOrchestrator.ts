@@ -80,11 +80,11 @@ export class OnboardingOrchestrator {
 
   /**
    * Create a new page and navigate to a URL.
+   * Uses a temporary user data directory for TikTok to avoid browser fingerprinting.
    */
   private async openPage(url: string): Promise<Page> {
     await this.initBrowser();
     const context = await this.browser!.newContext({
-      // Remove any stored permissions/data from previous sessions
       storageState: undefined,
     });
     this.page = await context.newPage();
@@ -624,6 +624,18 @@ export class OnboardingOrchestrator {
             const visibleClues = (bodyText || '').substring(0, 500);
             console.log(`[OnboardingOrchestrator] TikTok URL: ${currentUrl}`);
             console.log(`[OnboardingOrchestrator] TikTok visible text: ${visibleClues.replace(/\n+/g, ' | ')}`);
+            
+            // CRITICAL: Check for "Continue as" or "Not you" prompt and click "Not you" to force fresh login
+            try {
+              const notYouBtn = await this.page!.waitForSelector('text=/Not you|Not you/i, a:has-text("Not you"), button:has-text("Not you"), div:has-text("Not you")', { timeout: 3000 });
+              if (notYouBtn) {
+                console.log(`[OnboardingOrchestrator] TikTok: found 'Not you?' button — clicking to switch account`);
+                await notYouBtn.click();
+                await new Promise(r => setTimeout(r, 2000));
+              }
+            } catch {
+              console.log(`[OnboardingOrchestrator] TikTok: no 'Not you?' prompt found`);
+            }
             
             // Try clicking the toggle with multiple possible selectors
             let toggled = false;
