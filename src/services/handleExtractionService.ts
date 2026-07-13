@@ -305,7 +305,10 @@ Page title: ${pageTitle}
 Visible page content:
 ${visibleText}
 
-Based on this page, what is the @username, account handle, shop name, or display name of the logged-in user?
+Based on this page, what is the @username or account handle of the LOGGED-IN user?
+The handle is typically shown at the top of the profile page, in the URL, or in the navigation bar.
+It should look like a username — short, alphanumeric, may contain underscores or dots.
+
 Return ONLY the handle/name itself — nothing else. No explanation, no formatting.
 If it starts with @, include the @. If not, just return the name as-is.
 If you cannot find a handle, return "UNKNOWN".`;
@@ -321,6 +324,21 @@ If you cannot find a handle, return "UNKNOWN".`;
       }
 
       const cleanHandle = response.trim().replace(/^["']|["']$/g, '');
+      
+      // Validate: reject handles that are obviously UI text, not usernames
+      const invalidWords = ['heart', 'like', 'follow', 'share', 'message', 'account', 'profile', 'settings', 'home', 'search', 'inbox', 'notification', 'upload', 'create', 'discover', 'trending', 'live', 'shop', 'cart'];
+      const lowerHandle = cleanHandle.toLowerCase();
+      if (invalidWords.some(w => lowerHandle === w || lowerHandle.includes(` ${w} `) || lowerHandle.startsWith(`${w} `) || lowerHandle.endsWith(` ${w}`))) {
+        console.log(`[HandleExtraction] AI returned invalid handle (UI text): ${cleanHandle}`);
+        return null;
+      }
+      
+      // Reject if it looks like random text (too long, has spaces, etc.)
+      if (cleanHandle.length > 50 || (cleanHandle.includes(' ') && cleanHandle.split(' ').length > 3)) {
+        console.log(`[HandleExtraction] AI returned invalid handle (too long/random): ${cleanHandle}`);
+        return null;
+      }
+
       console.log(`[HandleExtraction] AI extracted handle for ${platform}: ${cleanHandle}`);
       return cleanHandle;
     } catch (err) {
