@@ -473,6 +473,123 @@ export class NeuralActionEngine {
   }
 
   /**
+   * Instagram: Post a Reel (video) to feed.
+   * Handles the Instagram Reels upload flow via browser automation.
+   */
+  async postToInstagramReel(
+    userId: string,
+    videoPath: string,
+    caption: string,
+    coverImagePath?: string,
+    music?: { searchTerm?: string } | null,
+    hashtags?: string[]
+  ): Promise<boolean> {
+    const fullCaption = hashtags && hashtags.length > 0
+      ? `${caption}\n\n${hashtags.map(h => `#${h}`).join(' ')}`
+      : caption;
+
+    console.log(`[NeuralActionEngine] Posting Instagram Reel for user ${userId}`);
+    const session = await this.loadSession(userId, 'instagram');
+    if (!session) return false;
+    const { context, page } = session;
+
+    try {
+      if (!(await this.verifySession(page))) { await context.close(); return false; }
+
+      // Navigate to Instagram
+      await this.navigateAndWait(page, 'https://www.instagram.com', 3000);
+
+      // Click create (+) button
+      const createBtn = await this.waitForSelector(page, 'svg[aria-label="New post"], [class*="create"], a[href*="create"]');
+      if (!createBtn) { await context.close(); return false; }
+      await createBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Select "Reel" from the creation menu (Reels is usually the second option)
+      try {
+        const reelOption = await this.waitForSelector(page, 'button:has-text("Reel"), a:has-text("Reel"), span:has-text("Reel")', 3000);
+        if (reelOption) {
+          await reelOption.click();
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      } catch {
+        // If Reel option isn't found, the default post type might already be Reel
+        console.log('[NeuralActionEngine] Instagram: no explicit Reel option found, using default upload');
+      }
+
+      // Upload video file
+      const fileInput = await this.waitForSelector(page, 'input[type="file"]');
+      if (!fileInput) { await context.close(); return false; }
+      await fileInput.setInputFiles(videoPath);
+      await new Promise(r => setTimeout(r, 5000)); // Wait for video processing
+
+      // Click next/forward (may need multiple next clicks for Reels flow)
+      for (let i = 0; i < 3; i++) {
+        try {
+          const nextBtn = await this.waitForSelector(page, 'button:has-text("Next"), button:has-text("Forward"), div[role="button"]:has-text("Next")', 3000);
+          if (nextBtn) {
+            await nextBtn.click();
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+
+      // Add music from Instagram's native library if requested
+      if (music?.searchTerm) {
+        try {
+          const addMusicBtn = await this.waitForSelector(page, 'button:has-text("Add music"), [aria-label*="Music"], div:has-text("Add music")', 5000);
+          if (addMusicBtn) {
+            await addMusicBtn.click();
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          const searchInput = await this.waitForSelector(page, 'input[placeholder*="search"], input[placeholder*="Search"], input[type="search"]', 5000);
+          if (searchInput) {
+            await searchInput.fill(music.searchTerm);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          // Select first result
+          const firstResult = await this.waitForSelector(page, 'div[class*="music"], div[role="button"]:has(img), [class*="audio"]', 5000);
+          if (firstResult) {
+            await firstResult.click();
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        } catch {
+          console.log('[NeuralActionEngine] Instagram music selection failed (non-fatal)');
+        }
+      }
+
+      // Fill caption
+      const captionInput = await this.waitForSelector(page, '[class*="caption"], [aria-label*="caption"], [contenteditable="true"]', 5000);
+      if (captionInput) {
+        await captionInput.click();
+        await page.fill('[class*="caption"], [aria-label*="caption"], [contenteditable="true"]', fullCaption);
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Click share/post
+      const shareBtn = await this.waitForSelector(page, 'button:has-text("Share"), button:has-text("Post"), button:has-text("Upload")', 10000);
+      if (shareBtn) {
+        await shareBtn.click();
+        await new Promise(r => setTimeout(r, 5000));
+      }
+
+      await context.close();
+      console.log(`[NeuralActionEngine] Instagram Reel posted successfully`);
+      return true;
+    } catch (err: any) {
+      console.error(`[NeuralActionEngine] Instagram Reel failed:`, err.message);
+      await context.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
    * Instagram: Post a photo to feed.
    */
   async postToInstagram(userId: string, imagePath: string, caption: string): Promise<boolean> {

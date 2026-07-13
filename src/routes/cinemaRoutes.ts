@@ -48,4 +48,14 @@ router.get('/creations', (req, res) =>
   cinemaController.getCreations(req, res)
 );
 
+// Post video to TikTok via Neural Action Engine
+router.post('/post-tiktok', mobileAuth, upload.single('video'), (req, res) =>
+  cinemaController.postToTikTok(req, res)
+);
+
+// Post video to Instagram Reels via Neural Action Engine
+router.post('/post-instagram-reel', mobileAuth, upload.single('video'), (req, res) =>
+  cinemaController.postToInstagramReel(req, res)
+);
+
 export default router;

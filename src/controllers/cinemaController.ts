@@ -5,6 +5,7 @@ import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { usageService } from '../services/usageService.js';
 import { creationEngine } from '../services/creationEngine.js';
+import { neuralActionEngine } from '../services/neuralActionEngine.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
@@ -278,6 +279,71 @@ export class CinemaController {
         .limit(50);
       
       res.json(creations);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/cinema/post-tiktok
+   * Post a video to TikTok via Neural Action Engine.
+   */
+  async postToTikTok(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).userId || (req as any).user?.id;
+      if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+      const file = (req as any).file;
+      if (!file) { res.status(400).json({ error: 'No video file provided' }); return; }
+
+      const { caption, hashtags, music } = req.body;
+
+      const result = await neuralActionEngine.postToTikTok(
+        userId,
+        file.path,
+        caption || 'Check this out!',
+        music ? { searchTerm: music, startTime: 0, duration: 15 } : undefined,
+        hashtags ? hashtags.split(',').map((h: string) => h.trim()) : undefined
+      );
+
+      if (result) {
+        res.json({ status: 'success', message: 'Video posted to TikTok' });
+      } else {
+        res.status(500).json({ error: 'Failed to post to TikTok' });
+      }
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/cinema/post-instagram-reel
+   * Post a video to Instagram Reels via Neural Action Engine.
+   */
+  async postToInstagramReel(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).userId || (req as any).user?.id;
+      if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+      const file = (req as any).file;
+      if (!file) { res.status(400).json({ error: 'No video file provided' }); return; }
+
+      const { caption, hashtags, music } = req.body;
+
+      const result = await neuralActionEngine.postToInstagramReel(
+        userId,
+        file.path,
+        caption || 'Check this out!',
+        undefined,
+        music ? { searchTerm: music } : null,
+        hashtags ? hashtags.split(',').map((h: string) => h.trim()) : undefined
+      );
+
+      if (result) {
+        res.json({ status: 'success', message: 'Reel posted to Instagram' });
+      } else {
+        res.status(500).json({ error: 'Failed to post to Instagram' });
+      }
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
