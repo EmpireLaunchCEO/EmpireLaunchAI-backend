@@ -109,6 +109,68 @@ export class ReasoningEngine {
     }
   }
 
+  /**
+   * Simple reason method — takes a prompt and returns a text response.
+   * Used by handle extraction and other lightweight AI tasks.
+   */
+  async reason(prompt: string, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
+    try {
+      const temp = options?.temperature ?? 0.5;
+      const maxTokens = options?.maxTokens ?? 1024;
+
+      // Try Gemini first
+      const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+      if (geminiKey) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
+            })
+          });
+          if (response.ok) {
+            const data = await response.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) return text;
+          }
+        } catch (err) {
+          console.warn('[ReasoningEngine] Gemini reason failed:', (err as Error).message);
+        }
+      }
+
+      // Fallback to OpenAI
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (openaiKey) {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${openaiKey}`
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: temp,
+            max_tokens: maxTokens
+          })
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const text = data?.choices?.[0]?.message?.content;
+          if (text) return text;
+        }
+      }
+
+      return 'UNKNOWN';
+    } catch (err) {
+      console.error('[ReasoningEngine] reason failed:', (err as Error).message);
+      return 'UNKNOWN';
+    }
+  }
+
   async consult(userId: string, message: string, niche?: string): Promise<{ message: string; stylePreviews?: any[] }> {
     // Fetch user's archetype from active goal — gracefully handle missing/invalid userId
     let archetype = 'creator';
