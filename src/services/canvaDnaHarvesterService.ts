@@ -433,6 +433,26 @@ export class CanvaDnaHarvesterService {
     };
   }
 
+  // ─── Helper: Category detection from text ──────────────────────
+
+  private categoryFromText(text: string): string {
+    const lower = text.toLowerCase();
+    for (const cat of this.CATEGORIES) {
+      const catLower = cat.toLowerCase();
+      if (lower.includes(catLower)) return cat;
+    }
+    // Check for common aliases
+    if (lower.includes('instagram') || lower.includes('facebook') || lower.includes('tiktok')) return 'Social Media';
+    if (lower.includes('youtube') || lower.includes('tutorial')) return 'Video';
+    if (lower.includes('invitation') || lower.includes('save the date')) return 'Cards';
+    if (lower.includes('menu') || lower.includes('restaurant')) return 'Flyers';
+    if (lower.includes('slides') || lower.includes('slide deck')) return 'Presentations';
+    if (lower.includes('book') || lower.includes('cover')) return 'Posters';
+    if (lower.includes('email')) return 'Newsletters';
+    if (lower.includes('schedule') || lower.includes('weekly')) return 'Planners';
+    return this.CATEGORIES[0]; // Default: first category
+  }
+
   // ─── Helper: Color extraction from text ─────────────────────────
 
   private extractColorKeywords(text: string): string[] | null {
@@ -455,7 +475,7 @@ export class CanvaDnaHarvesterService {
 
     if (detected.length === 0) {
       // Return category-appropriate default palette
-      return this.getDefaultPaletteForCategory(this.getCategoryIndex(categoryFromText(text)));
+      return this.getDefaultPaletteForCategory(this.getCategoryIndex(this.categoryFromText(text)));
     }
 
     return detected;
