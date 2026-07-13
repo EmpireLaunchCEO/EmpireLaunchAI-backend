@@ -26,7 +26,7 @@ export interface OnboardingAction {
 
 export class OnboardingOrchestrator {
   
-  async startOnboarding(userId: string, platform: string, credentials?: { email?: string; password?: string }) {
+  async startOnboarding(userId: string, platform: string, credentials?: { email?: string; password?: string; handle?: string }) {
     const sessionId = uuidv4();
     
     // Create session in DB
@@ -36,6 +36,7 @@ export class OnboardingOrchestrator {
       platform,
       status: 'in_progress',
       currentState: 'START',
+      metadata: credentials?.handle ? { userProvidedHandle: credentials.handle } : null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -193,7 +194,7 @@ export class OnboardingOrchestrator {
   }
 
   // Moved to onboardingWorker.ts for async execution
-  public async processOnboarding(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string }) {
+  public async processOnboarding(sessionId: string, userId: string, platform: string, credentials?: { email?: string; password?: string; handle?: string }) {
     console.log(`[OnboardingOrchestrator] Processing onboarding for ${platform} (Session: ${sessionId})`);
     
     try {
@@ -657,6 +658,13 @@ export class OnboardingOrchestrator {
 
       let accountHandle = `${platform.charAt(0).toUpperCase()}${platform.slice(1)} Account`;
       
+      // PRIORITY 0: User-provided handle (from the linking form)
+      if (credentials?.handle && credentials.handle.trim()) {
+        const userHandle = credentials.handle.trim();
+        accountHandle = userHandle.startsWith('@') ? userHandle : `@${userHandle}`;
+        console.log(`[OnboardingOrchestrator] Using user-provided handle for ${platform}: ${accountHandle}`);
+      } else {
+      
       // For TikTok, navigate to the profile page to extract the username
       if (platform === 'tiktok' && this.page) {
         try {
@@ -717,6 +725,7 @@ export class OnboardingOrchestrator {
       } catch (e) {
         console.warn(`[OnboardingOrchestrator] Failed to extract handle for ${platform}:`, e);
       }
+      } // end else (user did not provide handle)
 
       const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
       await vaultService.storeSecretWithEnvelope(userId, platform, 'SESSION_TOKEN', mockToken);
