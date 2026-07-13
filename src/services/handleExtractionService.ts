@@ -13,7 +13,6 @@ const HANDLE_SELECTORS: Record<string, { url: string; selector: string; transfor
     url: 'https://www.tiktok.com/@me',
     selector: '[data-e2e*="user-name"], [class*="share-title"], h1[data-e2e*="user"], [class*="ShareTitle"]',
     transform: (t: string) => t.startsWith('@') ? t : `@${t}`,
-    fallbackUrlExtract: true,
   },
   instagram: {
     url: 'https://www.instagram.com/accounts/edit/',
