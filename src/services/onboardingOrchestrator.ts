@@ -658,12 +658,10 @@ export class OnboardingOrchestrator {
 
       let accountHandle = `${platform.charAt(0).toUpperCase()}${platform.slice(1)} Account`;
       
-      // PRIORITY 0: User-provided handle (from the linking form)
-      if (credentials?.handle && credentials.handle.trim()) {
-        const userHandle = credentials.handle.trim();
-        accountHandle = userHandle.startsWith('@') ? userHandle : `@${userHandle}`;
-        console.log(`[OnboardingOrchestrator] Using user-provided handle for ${platform}: ${accountHandle}`);
-      } else {
+      // Store user-provided handle for mismatch verification
+      const userProvidedHandle = credentials?.handle?.trim() 
+        ? (credentials.handle.trim().startsWith('@') ? credentials.handle.trim() : `@${credentials.handle.trim()}`)
+        : null;
       
       // For TikTok, navigate to the profile page to extract the username
       if (platform === 'tiktok' && this.page) {
@@ -725,7 +723,29 @@ export class OnboardingOrchestrator {
       } catch (e) {
         console.warn(`[OnboardingOrchestrator] Failed to extract handle for ${platform}:`, e);
       }
-      } // end else (user did not provide handle)
+      
+      // MISMATCH VERIFICATION: Check user-provided handle against the real extracted handle
+      if (userProvidedHandle && accountHandle && !accountHandle.includes('Account')) {
+        const normalizedExtracted = accountHandle.trim().toLowerCase().replace(/^@/, '');
+        const normalizedProvided = userProvidedHandle.trim().toLowerCase().replace(/^@/, '');
+        
+        if (normalizedExtracted !== normalizedProvided) {
+          const msg = `[OnboardingOrchestrator] ❌ HANDLE MISMATCH for ${platform}: you said "${userProvidedHandle}" but the logged-in account is "${accountHandle}"`;
+          console.error(msg);
+          await db.update(onboardingSessions)
+            .set({ status: 'failed', currentState: 'HANDLE_MISMATCH', updatedAt: new Date() })
+            .where(eq(onboardingSessions.id, sessionId));
+          await this.closeBrowser();
+          throw new Error(`Handle mismatch for ${platform}: you entered "${userProvidedHandle}" but logged into "${accountHandle}". Please check your credentials.`);
+        } else {
+          console.log(`[OnboardingOrchestrator] ✅ Handle verified for ${platform}: ${userProvidedHandle} matches logged-in account`);
+        }
+      }
+      
+      // Use user-provided handle as display name if given (after verification passed)
+      if (userProvidedHandle) {
+        accountHandle = userProvidedHandle;
+      }
 
       const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
       await vaultService.storeSecretWithEnvelope(userId, platform, 'SESSION_TOKEN', mockToken);
