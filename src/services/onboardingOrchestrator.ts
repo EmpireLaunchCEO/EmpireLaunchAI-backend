@@ -83,7 +83,10 @@ export class OnboardingOrchestrator {
    */
   private async openPage(url: string): Promise<Page> {
     await this.initBrowser();
-    const context = await this.browser!.newContext();
+    const context = await this.browser!.newContext({
+      // Remove any stored permissions/data from previous sessions
+      storageState: undefined,
+    });
     this.page = await context.newPage();
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     return this.page;
