@@ -13,6 +13,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { chromium as playwrightChromium, Browser, Page } from 'playwright';
 import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import * as http from 'http';
+import * as net from 'net';
 
 // Apply stealth plugin to mask Playwright automation fingerprints
 stealthChromium.use(StealthPlugin());
@@ -86,45 +88,129 @@ export class OnboardingOrchestrator {
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
     
-    const args = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--incognito',
-      '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-      '--disable-autofill',
-      '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled',
-    ];
-    
     const launchOptions: any = {
       headless: true,
-      args,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--incognito',
+        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+        '--disable-autofill',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+      ]
     };
     
     if (proxyConfig) {
-      // Use --proxy-server Chrome arg — the most reliable way to set a proxy in Chromium
-      // Strip protocol for the Chrome arg, it just wants host:port
-      const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
-      args.push(`--proxy-server=${cleanServer}`);
-      
-      // Set auth via env var that Chromium's proxy resolver reads
-      if (proxyConfig.username && proxyConfig.password) {
-        const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
-        process.env.HTTP_PROXY = authUrl;
-        process.env.HTTPS_PROXY = authUrl;
-      }
-      
-      console.log(`[OnboardingOrchestrator] Browser using --proxy-server=${cleanServer}`);
+      // Start a local HTTP proxy server that routes through BrightData
+      // This avoids Playwright's own proxy handling which can be flaky
+      const localPort = await this.startLocalProxy(proxyConfig);
+      // Point Chrome at the local proxy (no auth needed)
+      launchOptions.args.push(`--proxy-server=http://127.0.0.1:${localPort}`);
+      console.log(`[OnboardingOrchestrator] Browser using local proxy -> BrightData: ${proxyConfig.server}`);
     }
     
     this.browser = await stealthChromium.launch(launchOptions);
-    
-    // Clear proxy env vars immediately
-    if (proxyConfig) {
-      delete process.env.HTTP_PROXY;
-      delete process.env.HTTPS_PROXY;
-    }
     console.log('[OnboardingOrchestrator] Browser launched successfully');
+  }
+
+  /**
+   * Start a local HTTP proxy server that forwards all traffic through BrightData.
+   * This avoids Playwright's built-in proxy handling which can have compatibility issues.
+   */
+  private localProxyServer: http.Server | null = null;
+  
+  private startLocalProxy(bdConfig: { server: string; username: string; password: string }): Promise<number> {
+    return new Promise((resolve, reject) => {
+      // Parse BrightData proxy host and port
+      const cleanServer = bdConfig.server.replace(/^https?:\/\//, '');
+      const [bdHost, bdPort] = cleanServer.split(':');
+      const bdAuth = Buffer.from(`${bdConfig.username}:${bdConfig.password}`).toString('base64');
+      
+      const server = http.createServer((req, res) => {
+        // Forward HTTP requests through BrightData proxy
+        const options = {
+          host: bdHost,
+          port: parseInt(bdPort || '33335'),
+          method: req.method,
+          path: req.url,
+          headers: {
+            ...req.headers,
+            'Proxy-Authorization': `Basic ${bdAuth}`,
+            host: req.headers.host || '',
+          },
+        };
+        
+        const proxyReq = http.request(options, (proxyRes) => {
+          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+          proxyRes.pipe(res);
+        });
+        
+        proxyReq.on('error', (err) => {
+          console.error(`[LocalProxy] HTTP error: ${err.message}`);
+          res.writeHead(502);
+          res.end('Proxy error');
+        });
+        
+        req.pipe(proxyReq);
+      });
+      
+      // Handle CONNECT (HTTPS) tunneling
+      server.on('connect', (req, clientSocket, head) => {
+        const [targetHost, targetPort] = (req.url || '').split(':');
+        
+        // Connect to BrightData proxy
+        const bdSocket = new net.Socket();
+        bdSocket.connect(parseInt(bdPort || '33335'), bdHost, () => {
+          // Send CONNECT to BrightData with auth
+          bdSocket.write(
+            `CONNECT ${req.url} HTTP/1.1\r\n` +
+            `Host: ${req.url}\r\n` +
+            `Proxy-Authorization: Basic ${bdAuth}\r\n\r\n`
+          );
+        });
+        
+        bdSocket.on('data', (data) => {
+          const response = data.toString();
+          if (response.includes('200')) {
+            // Tunnel established - relay data between client and BrightData
+            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+            bdSocket.removeAllListeners('data');
+            clientSocket.pipe(bdSocket);
+            bdSocket.pipe(clientSocket);
+          } else {
+            console.error(`[LocalProxy] CONNECT failed: ${response.substring(0, 100)}`);
+            clientSocket.end();
+            bdSocket.end();
+          }
+        });
+        
+        bdSocket.on('error', (err) => {
+          console.error(`[LocalProxy] CONNECT socket error: ${err.message}`);
+          clientSocket.end();
+        });
+        
+        clientSocket.on('error', () => {
+          bdSocket.end();
+        });
+      });
+      
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        if (addr && typeof addr === 'object') {
+          this.localProxyServer = server;
+          console.log(`[LocalProxy] Started on port ${addr.port}`);
+          resolve(addr.port);
+        } else {
+          reject(new Error('Failed to get local proxy port'));
+        }
+      });
+      
+      server.on('error', (err) => {
+        console.error(`[LocalProxy] Server error: ${err.message}`);
+        reject(err);
+      });
+    });
   }
 
   /**
