@@ -169,6 +169,133 @@ export class OnboardingOrchestrator {
   }
 
   /**
+   * Start TikTok QR code login — captures the QR code image for the user to scan.
+   */
+  async startTikTokQRLogin(userId: string): Promise<{ sessionId: string; qrCodeBase64: string } | null> {
+    const sessionId = uuidv4();
+    console.log(`[OnboardingOrchestrator] Starting TikTok QR login for user ${userId}`);
+
+    try {
+      await this.initBrowser();
+      const context = await this.browser!.newContext({
+        storageState: undefined,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+      });
+      this.page = await context.newPage();
+      await this.page.context().clearCookies();
+      
+      // Navigate to TikTok login page — QR code is the default view
+      await this.page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await new Promise(r => setTimeout(r, 3000));
+      
+      // Take a screenshot of the QR code area (typically the left side of the login page)
+      // May need to locate the QR code element specifically
+      let qrBase64 = '';
+      
+      // Try to find the QR code element directly
+      try {
+        const qrSelector = 'canvas, img[class*="qr"], [class*="qrcode"], [class*="QRCode"], div[class*="qr"]';
+        const qrElement = await this.page.waitForSelector(qrSelector, { timeout: 5000 });
+        if (qrElement) {
+          qrBase64 = await qrElement.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+        }
+      } catch {
+        // Fallback: take a screenshot of the entire login page
+        console.log('[OnboardingOrchestrator] TikTok QR: taking full page screenshot');
+        qrBase64 = await this.page.screenshot({ type: 'png', fullPage: true }).then(b => b.toString('base64'));
+      }
+      
+      // Create onboarding session in DB
+      await db.insert(onboardingSessions).values({
+        id: sessionId,
+        userId,
+        platform: 'tiktok',
+        status: 'awaiting_qr_scan',
+        currentState: 'TIKTOK_QR_LOGIN',
+        metadata: { qrMethod: true },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      
+      // Start monitoring the page for login completion in the background
+      this.monitorTikTokLogin(userId, sessionId, context).catch(err => {
+        console.error(`[OnboardingOrchestrator] TikTok QR monitor failed:`, err.message);
+      });
+
+      return { sessionId, qrCodeBase64: qrBase64 };
+    } catch (err: any) {
+      console.error(`[OnboardingOrchestrator] TikTok QR login setup failed:`, err.message);
+      await this.initBrowser().catch(() => {});
+      return null;
+    }
+  }
+
+  /**
+   * Monitor the TikTok page for QR login completion.
+   */
+  private async monitorTikTokLogin(userId: string, sessionId: string, context: any): Promise<void> {
+    try {
+      const page = this.page;
+      if (!page) return;
+      
+      // Poll for login completion — check URL changes or page content
+      for (let i = 0; i < 60; i++) { // 5 minutes max (5s intervals)
+        await new Promise(r => setTimeout(r, 5000));
+        
+        const currentUrl = page.url();
+        console.log(`[OnboardingOrchestrator] TikTok QR: monitoring URL = ${currentUrl}`);
+        
+        // If we've navigated away from login, login is complete
+        if (!currentUrl.includes('login')) {
+          console.log(`[OnboardingOrchestrator] ✅ TikTok QR login detected — URL changed to ${currentUrl}`);
+          
+          await new Promise(r => setTimeout(r, 2000));
+          
+          // Extract handle
+          let accountHandle = 'TikTok Account';
+          try {
+            await page.goto('https://www.tiktok.com/@me', { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await new Promise(r => setTimeout(r, 2000));
+            const aiHandle = await handleExtractionService.extractHandleViaAI('tiktok', page);
+            if (aiHandle) accountHandle = aiHandle;
+          } catch {}
+          
+          // Save integration
+          const mockToken = `gen_${uuidv4().replace(/-/g, '')}`;
+          await vaultService.storeSecretWithEnvelope(userId, 'tiktok', 'SESSION_TOKEN', mockToken);
+          await integrationService.saveIntegration(userId, 'tiktok', { sessionToken: mockToken }, undefined, accountHandle);
+          
+          // Persist session
+          try {
+            const { neuralActionEngine } = await import('./neuralActionEngine.js');
+            await neuralActionEngine.persistSession(userId, 'tiktok', page);
+          } catch {}
+          
+          await db.update(onboardingSessions)
+            .set({ status: 'completed', currentState: 'COMPLETED', updatedAt: new Date() })
+            .where(eq(onboardingSessions.id, sessionId));
+            
+          await context.close().catch(() => {});
+          return;
+        }
+      }
+      
+      // Timeout
+      await db.update(onboardingSessions)
+        .set({ status: 'failed', currentState: 'QR_TIMEOUT', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+      await context.close().catch(() => {});
+    } catch (err: any) {
+      console.error(`[OnboardingOrchestrator] TikTok QR monitor error:`, err.message);
+      await db.update(onboardingSessions)
+        .set({ status: 'failed', currentState: 'QR_ERROR', updatedAt: new Date() })
+        .where(eq(onboardingSessions.id, sessionId));
+      await context.close().catch(() => {});
+    }
+  }
+
+  /**
    * Close the browser session.
    */
   private async closeBrowser(): Promise<void> {

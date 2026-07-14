@@ -66,3 +66,27 @@ export const getOnboardingStatus = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+export const startTikTokQRLogin = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const result = await onboardingOrchestrator.startTikTokQRLogin(userId);
+    if (!result) {
+      return res.status(500).json({ error: 'Failed to start TikTok QR login' });
+    }
+
+    res.json({
+      status: 'success',
+      sessionId: result.sessionId,
+      qrCode: result.qrCodeBase64,
+      message: 'Scan the QR code with your TikTok app to log in',
+    });
+  } catch (error: any) {
+    console.error('Error starting TikTok QR login:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
