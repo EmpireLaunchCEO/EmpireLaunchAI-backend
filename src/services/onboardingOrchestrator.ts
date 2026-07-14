@@ -104,13 +104,23 @@ export class OnboardingOrchestrator {
     if (proxyConfig) {
       // Start a local HTTP proxy server that routes through BrightData
       // This avoids Playwright's own proxy handling which can be flaky
-      const localPort = await this.startLocalProxy(proxyConfig);
+      const localPort = await Promise.race([
+        this.startLocalProxy(proxyConfig),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Local proxy server startup timed out after 15s')), 15000)
+        ),
+      ]);
       // Point Chrome at the local proxy (no auth needed)
       launchOptions.args.push(`--proxy-server=http://127.0.0.1:${localPort}`);
       console.log(`[OnboardingOrchestrator] Browser using local proxy -> BrightData: ${proxyConfig.server}`);
     }
     
-    this.browser = await stealthChromium.launch(launchOptions);
+    this.browser = await Promise.race([
+      stealthChromium.launch(launchOptions),
+      new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error('Browser launch timed out after 30s')), 30000)
+      ),
+    ]);
     console.log('[OnboardingOrchestrator] Browser launched successfully');
   }
 
