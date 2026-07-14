@@ -316,15 +316,16 @@ export class OnboardingOrchestrator {
           (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[1] : '33335');
         const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
         const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
+        // Dedicated ISP IP — use fixed IP for consistency (set BRIGHTDATA_DEDICATED_IP env var to change)
+        const dedicatedIp = process.env.BRIGHTDATA_DEDICATED_IP || '185.96.133.239';
         
-        console.log(`[OnboardingOrchestrator] TikTok login using BrightData ISP proxy: ${proxyHost}:${proxyPort}`);
+        console.log(`[OnboardingOrchestrator] TikTok login using BrightData ISP proxy: ${proxyHost}:${proxyPort} (IP: ${dedicatedIp})`);
         
-        // Launch browser with BrightData proxy — following BrightData's exact Playwright example
-        // Session suffix keeps the same IP for the entire login session
-        const sessionId = uuidv4().substring(0, 8);
+        // Launch browser with BrightData proxy — using dedicated ISP IP for consistency
+        // Dedicated IPs build trust with TikTok since they see the same IP every time
         await this.initBrowser({
           server: `http://${proxyHost}:${proxyPort}`,
-          username: `${proxyUsername}-session-session_${sessionId}`,
+          username: `${proxyUsername}-ip-${dedicatedIp}`,
           password: proxyPassword,
         });
         
