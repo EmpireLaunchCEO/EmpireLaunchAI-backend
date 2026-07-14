@@ -74,19 +74,40 @@ export const startTikTokQRLogin = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    const result = await onboardingOrchestrator.startTikTokQRLogin(userId);
+    const result = await onboardingOrchestrator.startTikTokLogin(userId);
     if (!result) {
-      return res.status(500).json({ error: 'Failed to start TikTok QR login' });
+      return res.status(500).json({ error: 'Failed to start TikTok login' });
     }
 
     res.json({
       status: 'success',
       sessionId: result.sessionId,
-      qrCode: result.qrCodeBase64,
-      message: 'Scan the QR code with your TikTok app to log in',
+      screenshot: result.screenshotBase64,
+      message: 'Enter your TikTok credentials to log in',
     });
   } catch (error: any) {
-    console.error('Error starting TikTok QR login:', error);
+    console.error('Error starting TikTok login:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const submitTikTokCredentials = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId || req.body.userId;
+    const { sessionId, email, password } = req.body;
+
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+    if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+
+    const result = await onboardingOrchestrator.submitTikTokCredentials(userId, sessionId, email, password);
+
+    res.json({
+      status: result.success ? 'success' : 'error',
+      message: result.message,
+    });
+  } catch (error: any) {
+    console.error('Error submitting TikTok credentials:', error);
     res.status(500).json({ error: error.message });
   }
 };
