@@ -86,54 +86,45 @@ export class OnboardingOrchestrator {
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
     
+    const args = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--incognito',
+      '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+      '--disable-autofill',
+      '--no-default-browser-check',
+      '--disable-blink-features=AutomationControlled',
+    ];
+    
     const launchOptions: any = {
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--incognito',
-        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-        '--disable-autofill',
-        '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled',
-      ]
+      args,
     };
     
     if (proxyConfig) {
-      // Use standard Playwright chromium for proxy sessions (BrightData recommends this)
-      // Apply stealth evasions manually via addInitScript after creating the page
-      launchOptions.proxy = {
-        server: proxyConfig.server,
-        username: proxyConfig.username,
-        password: proxyConfig.password,
-      };
-      console.log(`[OnboardingOrchestrator] Browser using BrightData proxy: ${proxyConfig.server}`);
+      // Use --proxy-server Chrome arg — the most reliable way to set a proxy in Chromium
+      // Strip protocol for the Chrome arg, it just wants host:port
+      const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
+      args.push(`--proxy-server=${cleanServer}`);
+      
+      // Set auth via env var that Chromium's proxy resolver reads
+      if (proxyConfig.username && proxyConfig.password) {
+        const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
+        process.env.HTTP_PROXY = authUrl;
+        process.env.HTTPS_PROXY = authUrl;
+      }
+      
+      console.log(`[OnboardingOrchestrator] Browser using --proxy-server=${cleanServer}`);
     }
     
-    // For proxy-session browsers, use regular Playwright chromium (better proxy support)
-    // For non-proxy browsers, use stealthChromium (plugin-based stealth)
+    this.browser = await stealthChromium.launch(launchOptions);
+    
+    // Clear proxy env vars immediately
     if (proxyConfig) {
-      this.browser = await playwrightChromium.launch(launchOptions);
-    } else {
-      this.browser = await stealthChromium.launch(launchOptions);
+      delete process.env.HTTP_PROXY;
+      delete process.env.HTTPS_PROXY;
     }
     console.log('[OnboardingOrchestrator] Browser launched successfully');
-  }
-
-  /**
-   * Apply stealth evasions to a page (for proxy-session browsers that use regular Playwright).
-   */
-  private async applyStealthEvasion(page: Page): Promise<void> {
-    await page.addInitScript(() => {
-      // Remove webdriver flag
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      // Set plugins array with length > 0
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] as any });
-      // Set languages
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      // Override chrome.runtime
-      (window as any).chrome = { runtime: {} };
-    });
   }
 
   /**
@@ -250,8 +241,6 @@ export class OnboardingOrchestrator {
         });
         const page = await context.newPage();
         await page.context().clearCookies();
-        // Apply stealth evasions manually (since we're using regular Playwright for proxy)
-        await this.applyStealthEvasion(page);
 
         // Navigate to TikTok login page with a shorter timeout
         await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
