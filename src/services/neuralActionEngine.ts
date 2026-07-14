@@ -59,7 +59,11 @@ export class NeuralActionEngine {
     if (!this.browser) {
       this.browser = await stealthChromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+        ],
       });
     }
     return this.browser;

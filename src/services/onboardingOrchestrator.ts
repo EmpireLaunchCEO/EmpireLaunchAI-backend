@@ -90,6 +90,7 @@ export class OnboardingOrchestrator {
             '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
             '--disable-autofill',
             '--no-default-browser-check',
+            '--disable-blink-features=AutomationControlled',
           ]
         });
   }
