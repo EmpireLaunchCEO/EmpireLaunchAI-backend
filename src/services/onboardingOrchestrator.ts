@@ -110,8 +110,13 @@ export class OnboardingOrchestrator {
       console.log(`[OnboardingOrchestrator] Browser using BrightData proxy: ${proxyConfig.server}`);
     }
     
-    // Add timeout so launch doesn't hang forever
-    this.browser = await stealthChromium.launch(launchOptions);
+    // Add a 30-second timeout to the launch so it doesn't hang forever
+    this.browser = await Promise.race([
+      stealthChromium.launch(launchOptions),
+      new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error('Browser launch timed out after 30s')), 30000)
+      ),
+    ]);
     console.log('[OnboardingOrchestrator] Browser launched successfully');
   }
 
