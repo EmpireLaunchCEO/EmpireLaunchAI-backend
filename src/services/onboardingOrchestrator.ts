@@ -86,25 +86,38 @@ export class OnboardingOrchestrator {
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
     
-    const launchOptions: any = {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--incognito',
-        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-        '--disable-autofill',
-        '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled',
-      ]
-    };
+    const args = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--incognito',
+      '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+      '--disable-autofill',
+      '--no-default-browser-check',
+      '--disable-blink-features=AutomationControlled',
+    ];
     
     if (proxyConfig) {
-      launchOptions.proxy = proxyConfig;
-      console.log(`[OnboardingOrchestrator] Browser using proxy: ${proxyConfig.server}`);
+      // Use Chrome's --proxy-server arg for the proxy connection
+      // Chrome requires just the host:port without http:// prefix for --proxy-server
+      const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
+      args.push(`--proxy-server=${cleanServer}`);
+      // Set proxy auth via env vars that Chromium reads for authentication
+      const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
+      process.env.HTTP_PROXY = authUrl;
+      process.env.HTTPS_PROXY = authUrl;
+      console.log(`[OnboardingOrchestrator] Browser using proxy: ${cleanServer}`);
     }
     
-    this.browser = await stealthChromium.launch(launchOptions);
+    this.browser = await stealthChromium.launch({
+      headless: true,
+      args,
+    });
+    
+    // Clear proxy env vars so other platforms don't use them
+    if (proxyConfig) {
+      delete process.env.HTTP_PROXY;
+      delete process.env.HTTPS_PROXY;
+    }
   }
 
   /**
