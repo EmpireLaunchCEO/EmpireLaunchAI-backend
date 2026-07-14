@@ -10,7 +10,12 @@ import { handleExtractionService } from './handleExtractionService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { chromium, Browser, Page } from 'playwright';
+import { chromium as playwrightChromium, Browser, Page } from 'playwright';
+import { chromium as stealthChromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+// Apply stealth plugin to mask Playwright automation fingerprints
+stealthChromium.use(StealthPlugin());
 import { encryptWithEnvelope } from '../utils/encryption.js';
 import { onboardingQueue, aiTaskQueue, neuralBrowserQueue } from './queueService.js';
 import { webSocketService } from './websocketService.js';
@@ -76,7 +81,7 @@ export class OnboardingOrchestrator {
       this.browser = null;
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
-    this.browser = await chromium.launch({
+    this.browser = await stealthChromium.launch({
           headless: true,
           args: [
             '--no-sandbox',
