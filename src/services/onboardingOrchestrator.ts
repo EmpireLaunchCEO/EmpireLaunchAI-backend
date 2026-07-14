@@ -190,18 +190,55 @@ export class OnboardingOrchestrator {
       await new Promise(r => setTimeout(r, 3000));
       
       // Take a screenshot of the QR code area (typically the left side of the login page)
-      // May need to locate the QR code element specifically
       let qrBase64 = '';
       
-      // Try to find the QR code element directly
-      try {
-        const qrSelector = 'canvas, img[class*="qr"], [class*="qrcode"], [class*="QRCode"], div[class*="qr"]';
-        const qrElement = await this.page.waitForSelector(qrSelector, { timeout: 5000 });
-        if (qrElement) {
-          qrBase64 = await qrElement.screenshot({ type: 'png' }).then(b => b.toString('base64'));
-        }
-      } catch {
-        // Fallback: take a screenshot of the entire login page
+      // Try multiple approaches to capture the QR code
+      let qrCaptured = false;
+      
+      // Approach 1: Try to find the QR code element directly
+      const qrSelectors = [
+        'canvas', 
+        'img[class*="qr"]', 
+        '[class*="qrcode"]', 
+        '[class*="QRCode"]', 
+        'div[class*="qr"]',
+        'svg[class*="qr"]',
+        '[data-e2e*="qr"]',
+        'div[class*="login"] div[class*="left"]',
+        'div[class*="login"] div[class*="qr"]',
+      ];
+      
+      for (const selector of qrSelectors) {
+        try {
+          const el = await this.page.waitForSelector(selector, { timeout: 2000 });
+          if (el) {
+            qrBase64 = await el.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+            if (qrBase64.length > 1000) {
+              qrCaptured = true;
+              console.log(`[OnboardingOrchestrator] TikTok QR: captured via selector "${selector}"`);
+              break;
+            }
+          }
+        } catch {}
+      }
+      
+      // Approach 2: Take a cropped screenshot of the left side of the page
+      if (!qrCaptured) {
+        console.log('[OnboardingOrchestrator] TikTok QR: taking cropped screenshot of left panel');
+        try {
+          const pageHeight = await this.page.evaluate(() => document.body.scrollHeight);
+          const pageWidth = await this.page.evaluate(() => document.body.scrollWidth);
+          // QR code is typically in the left 50% of the page, top 80%
+          qrBase64 = await this.page.screenshot({ 
+            type: 'png',
+            clip: { x: 0, y: 0, width: Math.min(pageWidth / 2, 500), height: Math.min(pageHeight * 0.8, 600) }
+          }).then(b => b.toString('base64'));
+          if (qrBase64.length > 1000) qrCaptured = true;
+        } catch {}
+      }
+      
+      // Approach 3: Full page screenshot as last resort
+      if (!qrCaptured) {
         console.log('[OnboardingOrchestrator] TikTok QR: taking full page screenshot');
         qrBase64 = await this.page.screenshot({ type: 'png', fullPage: true }).then(b => b.toString('base64'));
       }
