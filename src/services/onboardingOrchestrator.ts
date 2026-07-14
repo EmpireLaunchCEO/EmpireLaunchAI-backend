@@ -183,26 +183,30 @@ export class OnboardingOrchestrator {
       console.log(`[OnboardingOrchestrator] Starting TikTok login for user ${userId}`);
 
       try {
-        await this.initBrowser();
-        
-        // Build proxy config from env vars (set on Railway)
-        const proxyConfig: any = {};
+        // Get proxy config from env vars (set on Railway for BrightData ISP proxy)
         const proxyServer = process.env.BRIGHTDATA_PROXY_SERVER || 'brd.superproxy.io:33335';
         const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
         const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
         
-        proxyConfig.server = `http://${proxyServer}`;
-        proxyConfig.username = proxyUsername;
-        proxyConfig.password = proxyPassword;
-        
         console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy: ${proxyServer}`);
+        
+        // Set proxy via env vars BEFORE browser launch — Playwright natively respects these.
+        // This means ONLY this TikTok browser session routes through BrightData.
+        const proxyUrl = `http://${proxyUsername}:${proxyPassword}@${proxyServer}`;
+        process.env.HTTPS_PROXY = proxyUrl;
+        process.env.HTTP_PROXY = proxyUrl;
+        
+        await this.initBrowser();
+        
+        // Clear proxy env vars immediately so other platforms don't route through BrightData
+        delete process.env.HTTPS_PROXY;
+        delete process.env.HTTP_PROXY;
         
         const context = await this.browser!.newContext({
           storageState: undefined,
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
           viewport: { width: 1920, height: 1080 },
           locale: 'en-US',
-          proxy: proxyConfig,
         });
         const page = await context.newPage();
         await page.context().clearCookies();
