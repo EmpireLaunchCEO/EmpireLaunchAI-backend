@@ -176,29 +176,73 @@ export class OnboardingOrchestrator {
      * returns a screenshot of whatever TikTok shows (email form, QR code, etc.).
      * The user types their credentials on the frontend, which are then submitted
      * via submitTikTokCredentials on the same open page.
+     * Uses BrightData ISP proxy to bypass TikTok's datacenter IP detection.
      */
-    async startTikTokLogin(userId: string): Promise<{ sessionId: string; screenshotBase64: string } | null> {
+    async startTikTokLogin(userId: string): Promise<{ sessionId: string; screenshotBase64: string; qrFound: boolean } | null> {
       const sessionId = uuidv4();
       console.log(`[OnboardingOrchestrator] Starting TikTok login for user ${userId}`);
 
       try {
         await this.initBrowser();
+        
+        // Build proxy config from env vars (set on Railway)
+        const proxyConfig: any = {};
+        const proxyServer = process.env.BRIGHTDATA_PROXY_SERVER || 'brd.superproxy.io:33335';
+        const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
+        const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
+        
+        proxyConfig.server = `http://${proxyServer}`;
+        proxyConfig.username = proxyUsername;
+        proxyConfig.password = proxyPassword;
+        
+        console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy: ${proxyServer}`);
+        
         const context = await this.browser!.newContext({
           storageState: undefined,
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
           viewport: { width: 1920, height: 1080 },
           locale: 'en-US',
+          proxy: proxyConfig,
         });
         const page = await context.newPage();
         await page.context().clearCookies();
 
         // Navigate to TikTok login page
         await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
 
-        // Take a full viewport screenshot so the user sees exactly what TikTok shows
-        console.log('[OnboardingOrchestrator] TikTok login: taking full viewport screenshot');
-        const screenshotBase64 = await page.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+        // Try to find the QR code element (should now show with ISP proxy)
+        let screenshotBase64 = '';
+        let qrFound = false;
+        
+        const qrSelectors = [
+          'canvas', 
+          'img[class*="qr"]', 
+          '[class*="qrcode"]', 
+          '[class*="QRCode"]', 
+          'div[class*="qr"]',
+          'svg[class*="qr"]',
+        ];
+        
+        for (const selector of qrSelectors) {
+          try {
+            const el = await page.waitForSelector(selector, { timeout: 1500 });
+            if (el) {
+              screenshotBase64 = await el.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+              if (screenshotBase64.length > 1000) {
+                qrFound = true;
+                console.log(`[OnboardingOrchestrator] TikTok QR code captured via "${selector}"`);
+                break;
+              }
+            }
+          } catch {}
+        }
+        
+        if (!qrFound) {
+          // QR not found — take full viewport screenshot for credentials fallback
+          console.log('[OnboardingOrchestrator] QR not found, taking full viewport screenshot');
+          screenshotBase64 = await page.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+        }
 
         // Store the page and context so submitTikTokCredentials can use them
         this.tiktokLoginSessions.set(sessionId, { context, page });
@@ -208,14 +252,14 @@ export class OnboardingOrchestrator {
           id: sessionId,
           userId,
           platform: 'tiktok',
-          status: 'awaiting_credentials',
-          currentState: 'TIKTOK_LOGIN',
-          metadata: { loginMethod: 'browser' },
+          status: qrFound ? 'awaiting_qr_scan' : 'awaiting_credentials',
+          currentState: qrFound ? 'TIKTOK_QR_LOGIN' : 'TIKTOK_LOGIN',
+          metadata: { loginMethod: 'browser', qrFound },
           createdAt: new Date(),
           updatedAt: new Date(),
         });
 
-        return { sessionId, screenshotBase64 };
+        return { sessionId, screenshotBase64, qrFound };
       } catch (err: any) {
         console.error(`[OnboardingOrchestrator] TikTok login setup failed:`, err.message);
         await this.initBrowser().catch(() => {});

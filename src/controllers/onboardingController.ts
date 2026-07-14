@@ -83,7 +83,8 @@ export const startTikTokQRLogin = async (req: Request, res: Response) => {
       status: 'success',
       sessionId: result.sessionId,
       screenshot: result.screenshotBase64,
-      message: 'Enter your TikTok credentials to log in',
+      qrFound: result.qrFound,
+      message: result.qrFound ? 'Scan the QR code with your TikTok app' : 'Enter your TikTok credentials to log in',
     });
   } catch (error: any) {
     console.error('Error starting TikTok login:', error);
