@@ -105,25 +105,21 @@ export class OnboardingOrchestrator {
     };
     
     if (proxyConfig) {
-      // Start a local HTTP proxy server that routes through BrightData
-      // This avoids Playwright's own proxy handling which can be flaky
-      const localPort = await Promise.race([
-        this.startLocalProxy(proxyConfig),
-        new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('Local proxy server startup timed out after 15s')), 15000)
-        ),
-      ]);
-      // Point Chrome at the local proxy (no auth needed)
-      launchOptions.args.push(`--proxy-server=http://127.0.0.1:${localPort}`);
-      console.log(`[OnboardingOrchestrator] Browser using local proxy -> BrightData: ${proxyConfig.server}`);
+      launchOptions.proxy = {
+        server: proxyConfig.server,
+        username: proxyConfig.username,
+        password: proxyConfig.password,
+      };
+      console.log(`[OnboardingOrchestrator] Browser using proxy: ${proxyConfig.server}`);
     }
     
-    this.browser = await Promise.race([
-      stealthChromium.launch(launchOptions),
-      new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Browser launch timed out after 30s')), 30000)
-      ),
-    ]);
+    // For proxy sessions, use regular Playwright chromium (better proxy support)
+    // For non-proxy sessions, use playwright-extra stealth
+    if (proxyConfig) {
+      this.browser = await playwrightChromium.launch(launchOptions);
+    } else {
+      this.browser = await stealthChromium.launch(launchOptions);
+    }
     console.log('[OnboardingOrchestrator] Browser launched successfully');
   }
 
@@ -351,6 +347,13 @@ export class OnboardingOrchestrator {
         });
         const page = await context.newPage();
         await page.context().clearCookies();
+        // Apply stealth evasions (using regular Playwright for proxy, so no stealth plugin)
+        await page.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] as any });
+          Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+          (window as any).chrome = { runtime: {} };
+        });
 
         // Navigate to TikTok login page with a shorter timeout
         await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
