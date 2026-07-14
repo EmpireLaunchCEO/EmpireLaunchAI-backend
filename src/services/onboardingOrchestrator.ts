@@ -67,15 +67,19 @@ export class OnboardingOrchestrator {
 
   /**
    * Initialize the browser for automation.
+   * Creates a fresh browser instance each time to avoid fingerprinting reuse.
    */
   private async initBrowser(): Promise<void> {
-    if (!this.browser) {
-      console.log('[OnboardingOrchestrator] Launching Playwright Chromium...');
-      this.browser = await chromium.launch({ 
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
+    // Close any existing browser instance to get a fresh fingerprint
+    if (this.browser) {
+      try { await this.browser.close(); } catch {}
+      this.browser = null;
     }
+    console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
+    this.browser = await chromium.launch({ 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
   }
 
   /**
