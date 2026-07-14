@@ -100,8 +100,8 @@ export class OnboardingOrchestrator {
     };
     
     if (proxyConfig) {
-      // BrightData proxy works with Playwright's standard proxy option
-      // The proxy handles IP rotation, Playwright Stealth handles browser fingerprints
+      // Use standard Playwright chromium for proxy sessions (BrightData recommends this)
+      // Apply stealth evasions manually via addInitScript after creating the page
       launchOptions.proxy = {
         server: proxyConfig.server,
         username: proxyConfig.username,
@@ -110,14 +110,30 @@ export class OnboardingOrchestrator {
       console.log(`[OnboardingOrchestrator] Browser using BrightData proxy: ${proxyConfig.server}`);
     }
     
-    // Add a 30-second timeout to the launch so it doesn't hang forever
-    this.browser = await Promise.race([
-      stealthChromium.launch(launchOptions),
-      new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Browser launch timed out after 30s')), 30000)
-      ),
-    ]);
+    // For proxy-session browsers, use regular Playwright chromium (better proxy support)
+    // For non-proxy browsers, use stealthChromium (plugin-based stealth)
+    if (proxyConfig) {
+      this.browser = await playwrightChromium.launch(launchOptions);
+    } else {
+      this.browser = await stealthChromium.launch(launchOptions);
+    }
     console.log('[OnboardingOrchestrator] Browser launched successfully');
+  }
+
+  /**
+   * Apply stealth evasions to a page (for proxy-session browsers that use regular Playwright).
+   */
+  private async applyStealthEvasion(page: Page): Promise<void> {
+    await page.addInitScript(() => {
+      // Remove webdriver flag
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      // Set plugins array with length > 0
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] as any });
+      // Set languages
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      // Override chrome.runtime
+      (window as any).chrome = { runtime: {} };
+    });
   }
 
   /**
@@ -234,6 +250,8 @@ export class OnboardingOrchestrator {
         });
         const page = await context.newPage();
         await page.context().clearCookies();
+        // Apply stealth evasions manually (since we're using regular Playwright for proxy)
+        await this.applyStealthEvasion(page);
 
         // Navigate to TikTok login page with a shorter timeout
         await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
