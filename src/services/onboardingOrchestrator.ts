@@ -91,35 +91,27 @@ export class OnboardingOrchestrator {
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
     
-    const args = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--incognito',
-      '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-      '--disable-autofill',
-      '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled',
-    ];
-    
     const launchOptions: any = {
       headless: true,
-      args,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--incognito',
+        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+        '--disable-autofill',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+      ]
     };
     
     if (proxyConfig) {
-      // Set --proxy-server Chrome arg directly (most reliable approach)
-      const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
-      args.push(`--proxy-server=${cleanServer}`);
-      
-      // Pass proxy auth via Chromium's process environment
-      // Chrome reads HTTP_PROXY env var for proxy authentication
-      const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
-      launchOptions.env = {
-        ...process.env,
-        HTTP_PROXY: authUrl,
-        HTTPS_PROXY: authUrl,
+      // Use Playwright's built-in proxy option — this handles proxy auth correctly
+      launchOptions.proxy = {
+        server: proxyConfig.server,
+        username: proxyConfig.username,
+        password: proxyConfig.password,
       };
-      console.log(`[OnboardingOrchestrator] Browser using proxy: ${cleanServer}`);
+      console.log(`[OnboardingOrchestrator] Browser using proxy: ${proxyConfig.server} (user: ${proxyConfig.username?.substring(0, 20)}...)`);
     }
     
     // For proxy sessions, use regular Playwright chromium (better proxy support)
