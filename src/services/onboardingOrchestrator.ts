@@ -169,104 +169,107 @@ export class OnboardingOrchestrator {
   }
 
   /**
-   * Start TikTok QR code login — captures the QR code image for the user to scan.
-   */
-  async startTikTokQRLogin(userId: string): Promise<{ sessionId: string; qrCodeBase64: string } | null> {
-    const sessionId = uuidv4();
-    console.log(`[OnboardingOrchestrator] Starting TikTok QR login for user ${userId}`);
+         * Start TikTok QR code login — captures the QR code image for the user to scan.
+         */
+        async startTikTokQRLogin(userId: string): Promise<{ sessionId: string; qrCodeBase64: string } | null> {
+          const sessionId = uuidv4();
+          console.log(`[OnboardingOrchestrator] Starting TikTok QR login for user ${userId}`);
 
-    try {
-      await this.initBrowser();
-      const context = await this.browser!.newContext({
-        storageState: undefined,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-      });
-      this.page = await context.newPage();
-      await this.page.context().clearCookies();
-      
-      // Navigate to TikTok login page — QR code is the default view
-      await this.page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await new Promise(r => setTimeout(r, 5000)); // Wait longer for QR code to render
-      
-      // Take a screenshot of the QR code area (typically the left side of the login page)
-      let qrBase64 = '';
-      
-      // Try multiple approaches to capture the QR code
-      let qrCaptured = false;
-      
-      // Approach 1: Try to find the QR code element directly
-      const qrSelectors = [
-        'canvas', 
-        'img[class*="qr"]', 
-        '[class*="qrcode"]', 
-        '[class*="QRCode"]', 
-        'div[class*="qr"]',
-        'svg[class*="qr"]',
-        '[data-e2e*="qr"]',
-        'div[class*="login"] div[class*="left"]',
-        'div[class*="login"] div[class*="qr"]',
-      ];
-      
-      for (const selector of qrSelectors) {
-        try {
-          const el = await this.page.waitForSelector(selector, { timeout: 2000 });
-          if (el) {
-            qrBase64 = await el.screenshot({ type: 'png' }).then(b => b.toString('base64'));
-            if (qrBase64.length > 1000) {
-              qrCaptured = true;
-              console.log(`[OnboardingOrchestrator] TikTok QR: captured via selector "${selector}"`);
-              break;
+          try {
+            await this.initBrowser();
+            const context = await this.browser!.newContext({
+              storageState: undefined,
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+              viewport: { width: 1920, height: 1080 },
+              locale: 'en-US',
+            });
+            this.page = await context.newPage();
+            await this.page.context().clearCookies();
+
+            // Navigate to TikTok login page
+            await this.page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Try to ensure the QR code tab is active
+            // TikTok login page has tabs: "Scan QR code" | "Phone / Email"
+            // We need to click "Scan QR code" if it's not already active
+            const qrTabSelectors = [
+              'div[class*="tab"][class*="active"]',
+              'div[class*="login"] div[class*="qr"]',
+              'div[class*="qrcode"]',
+              'span:has-text("QR")',
+              'div:has-text("Scan QR")',
+              'div:has-text("QR code")',
+            ];
+
+            // First, try clicking on a "QR code" or "QR" tab to make sure it's active
+            const nonActiveQrButtons = [
+              'div[class*="tab"]:not([class*="active"]) div:has-text("QR")',
+              'div[class*="tab"]:not([class*="active"]):has-text("QR")',
+              'button:has-text("QR")',
+              'span:has-text("QR code")',
+              'span:has-text("Scan QR")',
+            ];
+
+            for (const btn of nonActiveQrButtons) {
+              try {
+                const el = await this.page.waitForSelector(btn, { timeout: 1000 });
+                if (el) {
+                  await el.click();
+                  console.log(`[OnboardingOrchestrator] TikTok QR: clicked on "${btn}"`);
+                  await new Promise(r => setTimeout(r, 2000));
+                  break;
+                }
+              } catch {}
             }
-          }
-        } catch {}
-      }
-      
-      // Approach 2: Take a cropped screenshot of the left side of the page
-      if (!qrCaptured) {
-        console.log('[OnboardingOrchestrator] TikTok QR: taking cropped screenshot of left panel');
-        try {
-          const pageHeight = await this.page.evaluate(() => document.body.scrollHeight);
-          const pageWidth = await this.page.evaluate(() => document.body.scrollWidth);
-          // QR code is typically in the left 50% of the page, top 80%
-          qrBase64 = await this.page.screenshot({ 
-            type: 'png',
-            clip: { x: 0, y: 0, width: Math.min(pageWidth / 2, 500), height: Math.min(pageHeight * 0.8, 600) }
-          }).then(b => b.toString('base64'));
-          if (qrBase64.length > 1000) qrCaptured = true;
-        } catch {}
-      }
-      
-      // Approach 3: Full page screenshot as last resort
-      if (!qrCaptured) {
-        console.log('[OnboardingOrchestrator] TikTok QR: taking full page screenshot');
-        qrBase64 = await this.page.screenshot({ type: 'png', fullPage: true }).then(b => b.toString('base64'));
-      }
-      
-      // Create onboarding session in DB
-      await db.insert(onboardingSessions).values({
-        id: sessionId,
-        userId,
-        platform: 'tiktok',
-        status: 'awaiting_qr_scan',
-        currentState: 'TIKTOK_QR_LOGIN',
-        metadata: { qrMethod: true },
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      
-      // Start monitoring the page for login completion in the background
-      this.monitorTikTokLogin(userId, sessionId, context).catch(err => {
-        console.error(`[OnboardingOrchestrator] TikTok QR monitor failed:`, err.message);
-      });
 
-      return { sessionId, qrCodeBase64: qrBase64 };
-    } catch (err: any) {
-      console.error(`[OnboardingOrchestrator] TikTok QR login setup failed:`, err.message);
-      await this.initBrowser().catch(() => {});
-      return null;
-    }
-  }
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Take a full page screenshot — this is the most reliable approach
+            // We'll capture the whole viewport so the user can see exactly what TikTok shows
+            console.log('[OnboardingOrchestrator] TikTok QR: taking full viewport screenshot');
+            let qrBase64 = await this.page.screenshot({ type: 'png' }).then(b => b.toString('base64'));
+
+            // Also try to get a cropped QR area screenshot if possible
+            // TikTok typically shows the QR code in a centered panel
+            try {
+              const mainPanel = await this.page.waitForSelector('div[class*="login"]', { timeout: 2000 });
+              if (mainPanel) {
+                const cropped = await this.page.screenshot({
+                  type: 'png',
+                  clip: { x: 400, y: 150, width: 500, height: 500 }
+                }).then(b => b.toString('base64'));
+                if (cropped.length > 2000) {
+                  qrBase64 = cropped; // Use the cropped version if it has content
+                  console.log('[OnboardingOrchestrator] TikTok QR: using cropped login panel screenshot');
+                }
+              }
+            } catch {}
+
+            // Create onboarding session in DB
+            await db.insert(onboardingSessions).values({
+              id: sessionId,
+              userId,
+              platform: 'tiktok',
+              status: 'awaiting_qr_scan',
+              currentState: 'TIKTOK_QR_LOGIN',
+              metadata: { qrMethod: true },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+
+            // Start monitoring the page for login completion in the background
+            this.monitorTikTokLogin(userId, sessionId, context).catch(err => {
+              console.error(`[OnboardingOrchestrator] TikTok QR monitor failed:`, err.message);
+            });
+
+            return { sessionId, qrCodeBase64: qrBase64 };
+          } catch (err: any) {
+            console.error(`[OnboardingOrchestrator] TikTok QR login setup failed:`, err.message);
+            await this.initBrowser().catch(() => {});
+            return null;
+          }
+        }
 
   /**
    * Monitor the TikTok page for QR login completion.
