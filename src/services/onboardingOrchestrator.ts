@@ -36,6 +36,9 @@ export class OnboardingOrchestrator {
   // Store active TikTok login sessions (browser context + page) keyed by sessionId
   private tiktokLoginSessions: Map<string, { context: any; page: Page }> = new Map();
   
+  // Round-robin counter for rotating through dedicated ISP IPs
+  private ipRotationCounter: number = 0;
+  
   async startOnboarding(userId: string, platform: string, credentials?: { email?: string; password?: string; handle?: string }) {
     const sessionId = uuidv4();
     
@@ -316,10 +319,20 @@ export class OnboardingOrchestrator {
           (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[1] : '33335');
         const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
         const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
-        // Dedicated ISP IP — use fixed IP for consistency (set BRIGHTDATA_DEDICATED_IP env var to change)
-        const dedicatedIp = process.env.BRIGHTDATA_DEDICATED_IP || '185.96.133.239';
         
-        console.log(`[OnboardingOrchestrator] TikTok login using BrightData ISP proxy: ${proxyHost}:${proxyPort} (IP: ${dedicatedIp})`);
+        // Rotate through dedicated ISP IPs to avoid TikTok flagging a single IP
+        // Each IP handles ~5 signups before rotating (15 IPs total = ~75 signups per cycle)
+        const dedicatedIps = (process.env.BRIGHTDATA_DEDICATED_IPS || 
+          '185.96.133.239,185.96.133.245,185.96.133.249,185.96.133.25,185.96.133.252,' +
+          '185.96.133.27,185.96.133.30,185.96.133.73,185.96.133.74,185.96.133.78,' +
+          '185.96.133.79,185.96.133.80,185.96.133.81,185.96.133.82,185.96.133.83')
+          .split(',').map(s => s.trim()).filter(Boolean);
+        // Round-robin: each signup uses the next IP
+        const ipIndex = (this.ipRotationCounter || 0) % dedicatedIps.length;
+        this.ipRotationCounter = (this.ipRotationCounter || 0) + 1;
+        const dedicatedIp = dedicatedIps[ipIndex];
+        
+        console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy ${proxyHost}:${proxyPort} (IP ${ipIndex + 1}/${dedicatedIps.length}: ${dedicatedIp})`);
         
         // Launch browser with BrightData proxy — using dedicated ISP IP for consistency
         // Dedicated IPs build trust with TikTok since they see the same IP every time
