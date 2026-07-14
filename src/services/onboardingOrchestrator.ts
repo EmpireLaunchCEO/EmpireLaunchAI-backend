@@ -98,14 +98,17 @@ export class OnboardingOrchestrator {
     
     if (proxyConfig) {
       // Use Chrome's --proxy-server arg for the proxy connection
-      // Chrome requires just the host:port without http:// prefix for --proxy-server
+      // Strip protocol prefix if present, Chrome just wants host:port
       const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
       args.push(`--proxy-server=${cleanServer}`);
-      // Set proxy auth via env vars that Chromium reads for authentication
-      const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
-      process.env.HTTP_PROXY = authUrl;
-      process.env.HTTPS_PROXY = authUrl;
       console.log(`[OnboardingOrchestrator] Browser using proxy: ${cleanServer}`);
+      
+      // Try proxy auth via env vars — Chromium reads these for authentication
+      if (proxyConfig.username && proxyConfig.password) {
+        const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
+        process.env.HTTP_PROXY = authUrl;
+        process.env.HTTPS_PROXY = authUrl;
+      }
     }
     
     this.browser = await stealthChromium.launch({
