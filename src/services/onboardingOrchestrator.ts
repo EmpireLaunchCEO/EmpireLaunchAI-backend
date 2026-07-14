@@ -120,12 +120,12 @@ export class OnboardingOrchestrator {
    */
   private localProxyServer: http.Server | null = null;
   
-  private startLocalProxy(bdConfig: { server: string; username: string; password: string }): Promise<number> {
+  private startLocalProxy(bdConfig: { server: string; username?: string; password?: string }): Promise<number> {
     return new Promise((resolve, reject) => {
       // Parse BrightData proxy host and port
       const cleanServer = bdConfig.server.replace(/^https?:\/\//, '');
       const [bdHost, bdPort] = cleanServer.split(':');
-      const bdAuth = Buffer.from(`${bdConfig.username}:${bdConfig.password}`).toString('base64');
+      const bdAuth = Buffer.from(`${bdConfig.username || ''}:${bdConfig.password || ''}`).toString('base64');
       
       const server = http.createServer((req, res) => {
         // Forward HTTP requests through BrightData proxy
