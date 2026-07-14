@@ -187,7 +187,7 @@ export class OnboardingOrchestrator {
       
       // Navigate to TikTok login page — QR code is the default view
       await this.page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 5000)); // Wait longer for QR code to render
       
       // Take a screenshot of the QR code area (typically the left side of the login page)
       let qrBase64 = '';
