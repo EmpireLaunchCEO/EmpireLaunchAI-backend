@@ -76,26 +76,35 @@ export class OnboardingOrchestrator {
   /**
    * Initialize the browser for automation.
    * Creates a fresh browser instance each time to avoid fingerprinting reuse.
+   * Optionally accepts a proxy config (used for TikTok via BrightData ISP proxy).
    */
-  private async initBrowser(): Promise<void> {
+  private async initBrowser(proxyConfig?: { server: string; username?: string; password?: string }): Promise<void> {
     // Close any existing browser instance to get a fresh fingerprint
     if (this.browser) {
       try { await this.browser.close(); } catch {}
       this.browser = null;
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
-    this.browser = await stealthChromium.launch({
-          headless: true,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--incognito',
-            '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-            '--disable-autofill',
-            '--no-default-browser-check',
-            '--disable-blink-features=AutomationControlled',
-          ]
-        });
+    
+    const launchOptions: any = {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--incognito',
+        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+        '--disable-autofill',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+      ]
+    };
+    
+    if (proxyConfig) {
+      launchOptions.proxy = proxyConfig;
+      console.log(`[OnboardingOrchestrator] Browser using proxy: ${proxyConfig.server}`);
+    }
+    
+    this.browser = await stealthChromium.launch(launchOptions);
   }
 
   /**
@@ -190,17 +199,12 @@ export class OnboardingOrchestrator {
         
         console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy: ${proxyServer}`);
         
-        // Set proxy via env vars BEFORE browser launch — Playwright natively respects these.
-        // This means ONLY this TikTok browser session routes through BrightData.
-        const proxyUrl = `http://${proxyUsername}:${proxyPassword}@${proxyServer}`;
-        process.env.HTTPS_PROXY = proxyUrl;
-        process.env.HTTP_PROXY = proxyUrl;
-        
-        await this.initBrowser();
-        
-        // Clear proxy env vars immediately so other platforms don't route through BrightData
-        delete process.env.HTTPS_PROXY;
-        delete process.env.HTTP_PROXY;
+        // Launch browser with BrightData proxy — ONLY this TikTok session uses it
+        await this.initBrowser({
+          server: `http://${proxyServer}`,
+          username: proxyUsername,
+          password: proxyPassword,
+        });
         
         const context = await this.browser!.newContext({
           storageState: undefined,
