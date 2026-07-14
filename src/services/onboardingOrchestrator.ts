@@ -201,16 +201,22 @@ export class OnboardingOrchestrator {
 
       try {
         // Get proxy config from env vars (set on Railway for BrightData ISP proxy)
-        const proxyServer = process.env.BRIGHTDATA_PROXY_SERVER || 'brd.superproxy.io:33335';
+        // Supports both old format (BRIGHTDATA_PROXY_SERVER) and new format (HOST + PORT)
+        const proxyHost = process.env.BRIGHTDATA_PROXY_HOST || 
+          (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[0] : 'brd.superproxy.io');
+        const proxyPort = process.env.BRIGHTDATA_PROXY_PORT || 
+          (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[1] : '33335');
         const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
         const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
         
-        console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy: ${proxyServer}`);
+        console.log(`[OnboardingOrchestrator] TikTok login using BrightData ISP proxy: ${proxyHost}:${proxyPort}`);
         
-        // Launch browser with BrightData proxy — ONLY this TikTok session uses it
+        // Launch browser with BrightData proxy — following BrightData's exact Playwright example
+        // Session suffix keeps the same IP for the entire login session
+        const sessionId = uuidv4().substring(0, 8);
         await this.initBrowser({
-          server: `http://${proxyServer}`,
-          username: proxyUsername,
+          server: `http://${proxyHost}:${proxyPort}`,
+          username: `${proxyUsername}-session-session_${sessionId}`,
           password: proxyPassword,
         });
         
@@ -219,6 +225,7 @@ export class OnboardingOrchestrator {
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
           viewport: { width: 1920, height: 1080 },
           locale: 'en-US',
+          ignoreHTTPSErrors: true,
         });
         const page = await context.newPage();
         await page.context().clearCookies();
