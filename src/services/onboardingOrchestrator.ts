@@ -86,41 +86,33 @@ export class OnboardingOrchestrator {
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
     
-    const args = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--incognito',
-      '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
-      '--disable-autofill',
-      '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled',
-    ];
-    
-    if (proxyConfig) {
-      // Use Chrome's --proxy-server arg for the proxy connection
-      // Strip protocol prefix if present, Chrome just wants host:port
-      const cleanServer = proxyConfig.server.replace(/^https?:\/\//, '');
-      args.push(`--proxy-server=${cleanServer}`);
-      console.log(`[OnboardingOrchestrator] Browser using proxy: ${cleanServer}`);
-      
-      // Try proxy auth via env vars — Chromium reads these for authentication
-      if (proxyConfig.username && proxyConfig.password) {
-        const authUrl = `http://${proxyConfig.username}:${proxyConfig.password}@${cleanServer}`;
-        process.env.HTTP_PROXY = authUrl;
-        process.env.HTTPS_PROXY = authUrl;
-      }
-    }
-    
-    this.browser = await stealthChromium.launch({
+    const launchOptions: any = {
       headless: true,
-      args,
-    });
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--incognito',
+        '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+        '--disable-autofill',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+      ]
+    };
     
-    // Clear proxy env vars so other platforms don't use them
     if (proxyConfig) {
-      delete process.env.HTTP_PROXY;
-      delete process.env.HTTPS_PROXY;
+      // BrightData proxy works with Playwright's standard proxy option
+      // The proxy handles IP rotation, Playwright Stealth handles browser fingerprints
+      launchOptions.proxy = {
+        server: proxyConfig.server,
+        username: proxyConfig.username,
+        password: proxyConfig.password,
+      };
+      console.log(`[OnboardingOrchestrator] Browser using BrightData proxy: ${proxyConfig.server}`);
     }
+    
+    // Add timeout so launch doesn't hang forever
+    this.browser = await stealthChromium.launch(launchOptions);
+    console.log('[OnboardingOrchestrator] Browser launched successfully');
   }
 
   /**
@@ -231,8 +223,9 @@ export class OnboardingOrchestrator {
         const page = await context.newPage();
         await page.context().clearCookies();
 
-        // Navigate to TikTok login page
-        await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        // Navigate to TikTok login page with a shorter timeout
+        await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
+        console.log('[OnboardingOrchestrator] TikTok page loaded, waiting for QR/render...');
         await new Promise(r => setTimeout(r, 4000));
 
         // Try to find the QR code element (should now show with ISP proxy)
@@ -286,6 +279,9 @@ export class OnboardingOrchestrator {
         return { sessionId, screenshotBase64, qrFound };
       } catch (err: any) {
         console.error(`[OnboardingOrchestrator] TikTok login setup failed:`, err.message);
+        console.error(`[OnboardingOrchestrator] Stack:`, err.stack?.substring(0, 300));
+        // Clean up the session if it was stored
+        this.tiktokLoginSessions.delete(sessionId);
         await this.initBrowser().catch(() => {});
         return null;
       }
