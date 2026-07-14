@@ -2,6 +2,11 @@ import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { vaultService } from './vaultService.js';
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
+import { chromium as stealthChromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+// Apply stealth plugin to mask Playwright automation fingerprints
+stealthChromium.use(StealthPlugin());
 
 // ─── Action Types ─────────────────────────────────────────────────
 
@@ -52,7 +57,7 @@ export class NeuralActionEngine {
 
   private async getBrowser(): Promise<Browser> {
     if (!this.browser) {
-      this.browser = await chromium.launch({
+      this.browser = await stealthChromium.launch({
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
       });
