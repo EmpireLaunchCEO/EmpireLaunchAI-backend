@@ -698,10 +698,27 @@ export class OnboardingOrchestrator {
           await this.fillElement('input[type="password"]', credentials.password);
           await this.clickElement('button[type="submit"], input[type="submit"]');
           // Try waiting for the post-login URL, but don't fail if the specific waitUrl isn't matched
+          let loginVerified = false;
           try {
             await this.waitForPage(waitUrl, undefined, 30000);
+            loginVerified = true;
           } catch {
-            console.log(`[OnboardingOrchestrator] ${platform} post-login URL wait timed out; proceeding with credential extraction`);
+            console.log(`[OnboardingOrchestrator] ${platform} post-login URL wait timed out`);
+          }
+          
+          // Verify we actually logged in — check if we're still on a login page
+          if (!loginVerified && this.page) {
+            const postLoginUrl = this.page.url();
+            const postLoginText = await this.page.textContent('body').catch(() => '');
+            const stillOnLogin = postLoginUrl.includes('login') || (postLoginText || '').toLowerCase().includes('log in') || (postLoginText || '').toLowerCase().includes('sign in');
+            if (stillOnLogin) {
+              console.error(`[OnboardingOrchestrator] ${platform}: login appears to have failed — still on login page`);
+              await db.update(onboardingSessions)
+                .set({ status: 'failed', currentState: 'LOGIN_FAILED', updatedAt: new Date() })
+                .where(eq(onboardingSessions.id, sessionId));
+              throw new Error(`${platform} login failed — TikTok blocked the automated login attempt. Please try again or use a different linking method.`);
+            }
+            loginVerified = true;
           }
         } else {
           await db.update(onboardingSessions)
