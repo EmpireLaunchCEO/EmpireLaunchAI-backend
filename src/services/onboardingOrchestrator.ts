@@ -76,10 +76,17 @@ export class OnboardingOrchestrator {
       this.browser = null;
     }
     console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
-    this.browser = await chromium.launch({ 
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
+    this.browser = await chromium.launch({
+          headless: true,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--incognito',
+            '--disable-features=PasswordManagerReauthentication,ChromeSignin,AccountConsistency',
+            '--disable-autofill',
+            '--no-default-browser-check',
+          ]
+        });
   }
 
   /**
@@ -90,6 +97,8 @@ export class OnboardingOrchestrator {
     await this.initBrowser();
     const context = await this.browser!.newContext({
       storageState: undefined,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      viewport: { width: 1920, height: 1080 },
     });
     this.page = await context.newPage();
     await this.page.context().clearCookies();
