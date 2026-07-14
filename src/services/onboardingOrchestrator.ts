@@ -317,33 +317,20 @@ export class OnboardingOrchestrator {
         const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
         const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
         
-        // Rotate through dedicated ISP IPs to avoid TikTok flagging a single IP
-        // Each IP handles ~5 signups before rotating (15 IPs total = ~75 signups per cycle)
-        const dedicatedIps = (process.env.BRIGHTDATA_DEDICATED_IPS || 
-          '185.96.133.239,185.96.133.245,185.96.133.249,185.96.133.25,185.96.133.252,' +
-          '185.96.133.27,185.96.133.30,185.96.133.73,185.96.133.74,185.96.133.78,' +
-          '185.96.133.79,185.96.133.80,185.96.133.81,185.96.133.82,185.96.133.83')
-          .split(',').map(s => s.trim()).filter(Boolean);
-        // Round-robin: each signup uses the next IP
-        const ipIndex = (this.ipRotationCounter || 0) % dedicatedIps.length;
-        this.ipRotationCounter = (this.ipRotationCounter || 0) + 1;
-        const dedicatedIp = dedicatedIps[ipIndex];
-        
-        console.log(`[OnboardingOrchestrator] TikTok login using ISP proxy ${proxyHost}:${proxyPort} (IP ${ipIndex + 1}/${dedicatedIps.length}: ${dedicatedIp})`);
-        
-        // Launch browser with BrightData proxy — using dedicated ISP IP for consistency
-        // Dedicated IPs build trust with TikTok since they see the same IP every time
+        // Use session-based sticky IP (BrightData's recommended format for browser automation)
+        // Session ID rotates each time to get a fresh IP, avoiding TikTok rate limits
+        const sessionId = `session_${Date.now()}`;
+
+        console.log(`[OnboardingOrchestrator] TikTok login using BrightData proxy: ${proxyHost}:${proxyPort} (session: ${sessionId})`);
+
+        // Launch browser with BrightData proxy — using official BrightData Playwright format
         await this.initBrowser({
           server: `http://${proxyHost}:${proxyPort}`,
-          username: `${proxyUsername}-ip-${dedicatedIp}`,
+          username: `${proxyUsername}-session-${sessionId}`,
           password: proxyPassword,
         });
-        
+
         const context = await this.browser!.newContext({
-          storageState: undefined,
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-          viewport: { width: 1920, height: 1080 },
-          locale: 'en-US',
           ignoreHTTPSErrors: true,
         });
         const page = await context.newPage();
@@ -356,8 +343,8 @@ export class OnboardingOrchestrator {
           (window as any).chrome = { runtime: {} };
         });
 
-        // Navigate to TikTok login page with a shorter timeout
-        await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
+        // Navigate to TikTok login page with timeout
+        await page.goto('https://www.tiktok.com/login', { waitUntil: 'networkidle', timeout: 30000 });
         console.log('[OnboardingOrchestrator] TikTok page loaded, waiting for QR/render...');
         await new Promise(r => setTimeout(r, 4000));
 
