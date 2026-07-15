@@ -10,11 +10,9 @@ import { handleExtractionService } from './handleExtractionService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { chromium as playwrightChromium, Browser, Page } from 'playwright';
 import { chromium as stealthChromium } from 'playwright-extra';
+import { Browser, Page } from 'playwright';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import * as http from 'http';
-import * as net from 'net';
 
 // Apply stealth plugin to mask Playwright automation fingerprints
 stealthChromium.use(StealthPlugin());
@@ -35,9 +33,6 @@ export class OnboardingOrchestrator {
   
   // Store active TikTok login sessions (browser context + page) keyed by sessionId
   private tiktokLoginSessions: Map<string, { context: any; page: Page }> = new Map();
-  
-  // Round-robin counter for rotating through dedicated ISP IPs
-  private ipRotationCounter: number = 0;
   
   async startOnboarding(userId: string, platform: string, credentials?: { email?: string; password?: string; handle?: string }) {
     const sessionId = uuidv4();
@@ -79,19 +74,18 @@ export class OnboardingOrchestrator {
   private page: Page | null = null;
 
   /**
-   * Initialize the browser for automation.
+   * Initialize the browser for automation using Playwright stealth.
    * Creates a fresh browser instance each time to avoid fingerprinting reuse.
-   * Optionally accepts a proxy config (used for TikTok via BrightData ISP proxy).
    */
-  private async initBrowser(proxyConfig?: { server: string; username?: string; password?: string }): Promise<void> {
+  private async initBrowser(): Promise<void> {
     // Close any existing browser instance to get a fresh fingerprint
     if (this.browser) {
       try { await this.browser.close(); } catch {}
       this.browser = null;
     }
-    console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium...');
+    console.log('[OnboardingOrchestrator] Launching fresh Playwright Chromium with stealth...');
     
-    const launchOptions: any = {
+    this.browser = await stealthChromium.launch({
       headless: true,
       args: [
         '--no-sandbox',
@@ -102,125 +96,8 @@ export class OnboardingOrchestrator {
         '--no-default-browser-check',
         '--disable-blink-features=AutomationControlled',
       ]
-    };
-    
-    if (proxyConfig) {
-      // Use Playwright's built-in proxy option — this handles proxy auth correctly
-      launchOptions.proxy = {
-        server: proxyConfig.server,
-        username: proxyConfig.username,
-        password: proxyConfig.password,
-      };
-      console.log(`[OnboardingOrchestrator] Browser using proxy: ${proxyConfig.server} (user: ${proxyConfig.username?.substring(0, 20)}...)`);
-    }
-    
-    // For proxy sessions, use regular Playwright chromium (better proxy support)
-    // For non-proxy sessions, use playwright-extra stealth
-    if (proxyConfig) {
-      this.browser = await playwrightChromium.launch(launchOptions);
-    } else {
-      this.browser = await stealthChromium.launch(launchOptions);
-    }
-    console.log('[OnboardingOrchestrator] Browser launched successfully');
-  }
-
-  /**
-   * Start a local HTTP proxy server that forwards all traffic through BrightData.
-   * This avoids Playwright's built-in proxy handling which can have compatibility issues.
-   */
-  private localProxyServer: http.Server | null = null;
-  
-  private startLocalProxy(bdConfig: { server: string; username?: string; password?: string }): Promise<number> {
-    return new Promise((resolve, reject) => {
-      // Parse BrightData proxy host and port
-      const cleanServer = bdConfig.server.replace(/^https?:\/\//, '');
-      const [bdHost, bdPort] = cleanServer.split(':');
-      const bdAuth = Buffer.from(`${bdConfig.username || ''}:${bdConfig.password || ''}`).toString('base64');
-      
-      const server = http.createServer((req, res) => {
-        // Forward HTTP requests through BrightData proxy
-        const options = {
-          host: bdHost,
-          port: parseInt(bdPort || '33335'),
-          method: req.method,
-          path: req.url,
-          headers: {
-            ...req.headers,
-            'Proxy-Authorization': `Basic ${bdAuth}`,
-            host: req.headers.host || '',
-          },
-        };
-        
-        const proxyReq = http.request(options, (proxyRes) => {
-          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
-          proxyRes.pipe(res);
-        });
-        
-        proxyReq.on('error', (err) => {
-          console.error(`[LocalProxy] HTTP error: ${err.message}`);
-          res.writeHead(502);
-          res.end('Proxy error');
-        });
-        
-        req.pipe(proxyReq);
-      });
-      
-      // Handle CONNECT (HTTPS) tunneling
-      server.on('connect', (req, clientSocket, head) => {
-        const [targetHost, targetPort] = (req.url || '').split(':');
-        
-        // Connect to BrightData proxy
-        const bdSocket = new net.Socket();
-        bdSocket.connect(parseInt(bdPort || '33335'), bdHost, () => {
-          // Send CONNECT to BrightData with auth
-          bdSocket.write(
-            `CONNECT ${req.url} HTTP/1.1\r\n` +
-            `Host: ${req.url}\r\n` +
-            `Proxy-Authorization: Basic ${bdAuth}\r\n\r\n`
-          );
-        });
-        
-        bdSocket.on('data', (data) => {
-          const response = data.toString();
-          if (response.includes('200')) {
-            // Tunnel established - relay data between client and BrightData
-            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-            bdSocket.removeAllListeners('data');
-            clientSocket.pipe(bdSocket);
-            bdSocket.pipe(clientSocket);
-          } else {
-            console.error(`[LocalProxy] CONNECT failed: ${response.substring(0, 100)}`);
-            clientSocket.end();
-            bdSocket.end();
-          }
-        });
-        
-        bdSocket.on('error', (err) => {
-          console.error(`[LocalProxy] CONNECT socket error: ${err.message}`);
-          clientSocket.end();
-        });
-        
-        clientSocket.on('error', () => {
-          bdSocket.end();
-        });
-      });
-      
-      server.listen(0, '127.0.0.1', () => {
-        const addr = server.address();
-        if (addr && typeof addr === 'object') {
-          this.localProxyServer = server;
-          console.log(`[LocalProxy] Started on port ${addr.port}`);
-          resolve(addr.port);
-        } else {
-          reject(new Error('Failed to get local proxy port'));
-        }
-      });
-      
-      server.on('error', (err) => {
-        console.error(`[LocalProxy] Server error: ${err.message}`);
-        reject(err);
-      });
     });
+    console.log('[OnboardingOrchestrator] Browser launched successfully');
   }
 
   /**
@@ -297,56 +174,32 @@ export class OnboardingOrchestrator {
   }
 
   /**
-     * Start TikTok login — opens the TikTok login page in a stealth browser and
-     * returns a screenshot of whatever TikTok shows (email form, QR code, etc.).
-     * The user types their credentials on the frontend, which are then submitted
-     * via submitTikTokCredentials on the same open page.
-     * Uses BrightData ISP proxy to bypass TikTok's datacenter IP detection.
-     */
-    async startTikTokLogin(userId: string): Promise<{ sessionId: string; screenshotBase64: string; qrFound: boolean } | null> {
-      const sessionId = uuidv4();
-      console.log(`[OnboardingOrchestrator] Starting TikTok login for user ${userId}`);
+       * Start TikTok login — opens the TikTok login page in a stealth browser and
+       * returns a screenshot of whatever TikTok shows (email form, QR code, etc.).
+       * The user types their credentials on the frontend, which are then submitted
+       * via submitTikTokCredentials on the same open page.
+       */
+      async startTikTokLogin(userId: string): Promise<{ sessionId: string; screenshotBase64: string; qrFound: boolean } | null> {
+        const sessionId = uuidv4();
+        console.log(`[OnboardingOrchestrator] Starting TikTok login for user ${userId}`);
 
-      try {
-        // Get proxy config from env vars (set on Railway for BrightData ISP proxy)
-        // Supports both old format (BRIGHTDATA_PROXY_SERVER) and new format (HOST + PORT)
-        const proxyHost = process.env.BRIGHTDATA_PROXY_HOST || 
-          (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[0] : 'brd.superproxy.io');
-        const proxyPort = process.env.BRIGHTDATA_PROXY_PORT || 
-          (process.env.BRIGHTDATA_PROXY_SERVER ? process.env.BRIGHTDATA_PROXY_SERVER.split(':')[1] : '33335');
-        const proxyUsername = process.env.BRIGHTDATA_PROXY_USERNAME || 'brd-customer-hl_c59d7cbd-zone-empirelaunch';
-        const proxyPassword = process.env.BRIGHTDATA_PROXY_PASSWORD || 'hzfgjbj4jg7g';
-        
-        // Use session-based sticky IP (BrightData's recommended format for browser automation)
-        // Session ID rotates each time to get a fresh IP, avoiding TikTok rate limits
-        const sessionId = `session_${Date.now()}`;
+        try {
+          // Launch browser with stealth (no proxy — direct Playwright connection)
+          await this.initBrowser();
 
-        console.log(`[OnboardingOrchestrator] TikTok login using BrightData proxy: ${proxyHost}:${proxyPort} (session: ${sessionId})`);
+          const context = await this.browser!.newContext({
+            storageState: undefined,
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            viewport: { width: 1920, height: 1080 },
+            locale: 'en-US',
+          });
+          const page = await context.newPage();
+          await page.context().clearCookies();
 
-        // Launch browser with BrightData proxy — using official BrightData Playwright format
-        await this.initBrowser({
-          server: `http://${proxyHost}:${proxyPort}`,
-          username: `${proxyUsername}-session-${sessionId}`,
-          password: proxyPassword,
-        });
-
-        const context = await this.browser!.newContext({
-          ignoreHTTPSErrors: true,
-        });
-        const page = await context.newPage();
-        await page.context().clearCookies();
-        // Apply stealth evasions (using regular Playwright for proxy, so no stealth plugin)
-        await page.addInitScript(() => {
-          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] as any });
-          Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-          (window as any).chrome = { runtime: {} };
-        });
-
-        // Navigate to TikTok login page with timeout
-        await page.goto('https://www.tiktok.com/login', { waitUntil: 'networkidle', timeout: 30000 });
-        console.log('[OnboardingOrchestrator] TikTok page loaded, waiting for QR/render...');
-        await new Promise(r => setTimeout(r, 4000));
+          // Navigate to TikTok login page
+          await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 20000 });
+          console.log('[OnboardingOrchestrator] TikTok page loaded, waiting for QR/render...');
+          await new Promise(r => setTimeout(r, 4000));
 
         // Try to find the QR code element (should now show with ISP proxy)
         let screenshotBase64 = '';
