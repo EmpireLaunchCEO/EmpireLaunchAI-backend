@@ -256,7 +256,7 @@ export const abandonGoal = async (req: Request, res: Response) => {
 export const updateEmpire = async (req: Request, res: Response) => {
   try {
     const empireId = req.params.id;
-    const { name, niche, angle, targetCustomers, businessGoals, archetype } = req.body;
+    const { name, niche, angle, targetCustomers, businessGoals, archetype, automationMode } = req.body;
 
     if (!empireId) {
       return res.status(400).json({ error: 'Empire ID is required' });
@@ -276,7 +276,13 @@ export const updateEmpire = async (req: Request, res: Response) => {
     if (targetCustomers !== undefined) updateData.targetCustomers = targetCustomers;
     if (businessGoals !== undefined) updateData.businessGoals = businessGoals;
 
-    // Handle niche/angle by updating the description field (maintains backward compat)
+    // Handle automationMode → autoPost + approvalRequired
+    if (automationMode !== undefined) {
+      updateData.autoPost = automationMode === 'full_autopilot';
+      updateData.approvalRequired = automationMode !== 'full_autopilot';
+    }
+
+    // Handle niche/angle/automationMode by updating the description field (maintains backward compat)
     let newDesc = existingGoal.description || '';
     if (niche !== undefined) {
       if (/Empire Niche:\s*(.*?)(?:\.|$)/.test(newDesc)) {
@@ -292,7 +298,14 @@ export const updateEmpire = async (req: Request, res: Response) => {
         newDesc = `${newDesc} Angle: ${angle}.`.trim();
       }
     }
-    if (niche !== undefined || angle !== undefined) {
+    if (automationMode !== undefined) {
+      if (/Mode:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+        newDesc = newDesc.replace(/Mode:\s*(.*?)(?:\.|$)/, `Mode: ${automationMode}.`);
+      } else {
+        newDesc = `${newDesc} Mode: ${automationMode}.`.trim();
+      }
+    }
+    if (niche !== undefined || angle !== undefined || automationMode !== undefined) {
       updateData.description = newDesc;
     }
 
