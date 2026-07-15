@@ -76,4 +76,42 @@ router.post('/canva-gallery-harvest', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/mass-dna/continuous-canva-harvest
+ * Run the Canva harvest continuously until a target strand count is reached.
+ * Body: { targetStrands?: number } — defaults to 1,000,000
+ * Runs asynchronously (fire-and-forget) — check /stats for progress.
+ */
+router.post('/continuous-canva-harvest', async (req: Request, res: Response) => {
+  try {
+    const targetStrands = req.body.targetStrands || 1_000_000;
+    const userId = (req as any).userId || req.body.userId || 'system';
+
+    // Find the actual Canva-linked user
+    const { db, schema } = await import('../db/index.js');
+    const { eq } = await import('drizzle-orm');
+    const rows = await db.select()
+      .from(schema.integrations)
+      .where(eq(schema.integrations.platform, 'canva'))
+      .limit(1);
+    const canvaUserId = rows.length > 0 ? rows[0].userId : userId;
+
+    res.json({
+      success: true,
+      message: `Continuous Canva harvest starting — target: ${targetStrands.toLocaleString()} strands`,
+      targetStrands,
+      userId: canvaUserId,
+    });
+
+    // Fire-and-forget: continuous harvest runs asynchronously
+    canvaDnaHarvesterService.harvestContinuously(canvaUserId, targetStrands).then(result => {
+      console.log(`[MassDnaRoute] Continuous harvest complete: ${result.totalStrands.toLocaleString()} strands in ${result.cycles} cycles`);
+    }).catch(err => {
+      console.error('[MassDnaRoute] Continuous harvest failed:', err.message);
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 export default router;

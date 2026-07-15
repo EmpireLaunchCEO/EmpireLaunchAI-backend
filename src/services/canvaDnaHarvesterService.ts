@@ -28,11 +28,21 @@ export class CanvaDnaHarvesterService {
     'Newsletters', 'Planners',
   ];
 
+  // Keyword variations to multiply the harvest surface area
+  private readonly KEYWORD_VARIATIONS = [
+    'trending', 'minimalist', 'modern', 'bold', 'elegant',
+    'vintage', 'colorful', 'professional', 'creative', 'simple',
+  ];
+
+  // Scale: templates per category per keyword (was 20)
+  private readonly TEMPLATES_PER_PAGE = 60;
+  // Pages of infinite scroll to load per search
+  private readonly MAX_SCROLLS = 3;
+
   // Canva search URL for each category (Pro filters enabled)
-  private categoryUrl(category: string): string {
-    const slug = category.toLowerCase().replace(/\s+/g, '-');
-    // Pro filter: &pro=1, trending: &sort=trending
-    return `https://www.canva.com/templates/?q=${encodeURIComponent(category)}&sort=trending&pro=1`;
+  private categoryUrl(category: string, keyword?: string): string {
+    const query = keyword ? `${keyword} ${category}` : category;
+    return `https://www.canva.com/templates/?q=${encodeURIComponent(query)}&sort=trending&pro=1`;
   }
 
   /**
@@ -56,7 +66,6 @@ export class CanvaDnaHarvesterService {
         throw new Error('No Canva integration found for user. User must link Canva first via Neural Handshake.');
       }
 
-      // Extract email/password — stored during Neural Handshake onboarding
       const email = credentials.email || credentials.emailAddress || null;
       const password = credentials.password || null;
 
@@ -64,40 +73,27 @@ export class CanvaDnaHarvesterService {
       await this.initBrowser();
       await this.loginToCanva(email, password);
 
-      // 3. For each category, browse trending templates and extract DNA
+      // 3. For each category × keyword variation, browse and extract DNA
       for (const category of this.CATEGORIES) {
-        try {
-          const strands = await this.extractCategoryDna(userId, category);
-          if (strands.length > 0) {
-            await dnaVaultService.bulkStore(strands);
-            totalStrands += strands.length;
-            categoriesHarvested++;
-            console.log(`[CanvaDnaHarvester] Category "${category}": stored ${strands.length} strands`);
-            webSocketService.notifyUser(userId, 'ai-log', {
-              message: `[CANVA] ✅ Harvested ${strands.length} DNA strands from "${category}" templates`,
-            });
-          } else {
-            console.log(`[CanvaDnaHarvester] Category "${category}": no strands extracted`);
-            webSocketService.notifyUser(userId, 'ai-log', {
-              message: `[CANVA] ⚠️ No harvestable DNA found in "${category}" templates`,
-            });
+        for (const keyword of this.KEYWORD_VARIATIONS) {
+          try {
+            const strands = await this.extractCategoryDna(userId, category, keyword);
+            if (strands.length > 0) {
+              await dnaVaultService.bulkStore(strands);
+              totalStrands += strands.length;
+              categoriesHarvested++;
+            }
+          } catch (catErr) {
+            console.warn(`[CanvaDnaHarvester] "${keyword} ${category}" failed:`, (catErr as Error).message);
           }
-        } catch (catErr) {
-          console.warn(`[CanvaDnaHarvester] Category "${category}" failed:`, (catErr as Error).message);
-          webSocketService.notifyUser(userId, 'ai-log', {
-            message: `[CANVA] ⚠️ "${category}" harvest failed: ${(catErr as Error).message}`,
-          });
+          // Brief pause between searches to avoid rate-limiting
+          await new Promise(r => setTimeout(r, 1500));
         }
-
-        // Brief pause between categories to avoid rate-limiting
-        await new Promise(r => setTimeout(r, 2000));
       }
 
-      const summary = `[CANVA] 🎯 Harvest complete! ${totalStrands} DNA strands from ${categoriesHarvested}/${this.CATEGORIES.length} categories.`;
+      const summary = `[CANVA] 🎯 Harvest complete! ${totalStrands} DNA strands from ${categoriesHarvested} category-keyword combos.`;
       console.log(`[CanvaDnaHarvester] ${summary}`);
-      webSocketService.notifyUser(userId, 'ai-log', {
-        message: summary,
-      });
+      webSocketService.notifyUser(userId, 'ai-log', { message: summary });
 
       return { totalStrands, categoriesHarvested };
     } catch (error: any) {
@@ -185,17 +181,23 @@ export class CanvaDnaHarvesterService {
    * Extract DNA strands from a single category of Canva templates.
    * Browses the trending templates page, extracts design DNA from each visible card.
    */
-  private async extractCategoryDna(userId: string, category: string): Promise<any[]> {
+  private async extractCategoryDna(userId: string, category: string, keyword: string = 'trending'): Promise<any[]> {
     if (!this.page) throw new Error('Browser not initialized');
 
-    const url = this.categoryUrl(category);
+    const url = this.categoryUrl(category, keyword);
     console.log(`[CanvaDnaHarvester] Navigating to: ${url}`);
 
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await this.page.waitForTimeout(3000);
+    await this.page.waitForTimeout(2000);
 
-    // Wait for template cards to load
-    try {
+    const allStrands: any[] = [];
+    const seenTemplateIds = new Set<string>();
+
+    // Scroll to load more templates (infinite scroll pagination)
+    for (let scroll = 0; scroll < this.MAX_SCROLLS; scroll++) {
+      await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await this.page.waitForTimeout(2000);
+
       // Try multiple possible selectors for template cards
       const cardSelectors = [
         '[class*="template-card"]',
@@ -207,57 +209,54 @@ export class CanvaDnaHarvesterService {
         'div[class*="item"]',
       ];
 
-      let cards = null;
+      let cards: any[] | null = null;
       for (const selector of cardSelectors) {
         cards = await this.page.$$(selector);
-        if (cards && cards.length > 0) {
-          console.log(`[CanvaDnaHarvester] Found ${cards.length} cards with selector: ${selector}`);
-          break;
-        }
+        if (cards && cards.length > 0) break;
       }
 
       if (!cards || cards.length === 0) {
-        // Fallback: take a screenshot and try to extract from visible elements
-        console.log(`[CanvaDnaHarvester] No card elements found for "${category}", trying inline extraction`);
-        return this.extractDnaFromPageContent(userId, category);
+        if (scroll === 0) {
+          return this.extractDnaFromPageContent(userId, category);
+        }
+        break; // No more content loaded
       }
 
-      // Limit to first 20 templates per category
-      const limitedCards = cards.slice(0, 20);
-      const strands: any[] = [];
-
-      for (let i = 0; i < limitedCards.length; i++) {
+      // Take all cards found in this scroll batch
+      for (let i = 0; i < cards.length && allStrands.length < this.TEMPLATES_PER_PAGE * this.MAX_SCROLLS; i++) {
         try {
-          const card = limitedCards[i];
+          const card = cards[i];
+          const linkEl = await card.$('a');
+          const href = linkEl ? await linkEl.getAttribute('href') : null;
+          const templateId = href ? href.split('/').pop()?.split('?')[0] || `${category}_${i}_${scroll}` : `${category}_${i}_${scroll}`;
 
-          // Extract template title/name
+          if (seenTemplateIds.has(templateId)) continue;
+          seenTemplateIds.add(templateId);
+
           const titleEl = await card.$('h1, h2, h3, h4, [class*="title"], [class*="name"]');
-          const title = titleEl ? (await titleEl.textContent())?.trim() || `Template ${i + 1}` : `Template ${i + 1}`;
+          const title = titleEl ? (await titleEl.textContent())?.trim() || `Template ${i}` : `Template ${i}`;
 
-          // Extract image/thumbnail URL (for reference, not stored)
           const imgEl = await card.$('img');
           const thumbnailUrl = imgEl ? await imgEl.getAttribute('src') : null;
 
-          // Extract template link/id
-          const linkEl = await card.$('a');
-          const href = linkEl ? await linkEl.getAttribute('href') : null;
-          const templateId = href ? href.split('/').pop()?.split('?')[0] || href : url;
-
-          // Generate DNA strand from the template
           const strand = await this.analyzeTemplateDna(userId, category, title, templateId, thumbnailUrl);
-          if (strand) {
-            strands.push(strand);
-          }
+          if (strand) allStrands.push(strand);
         } catch (cardErr) {
-          console.warn(`[CanvaDnaHarvester] Card ${i} extraction failed:`, (cardErr as Error).message);
+          // Skip individual card failures
         }
       }
 
-      return strands;
-    } catch (err) {
-      console.warn(`[CanvaDnaHarvester] Card extraction failed for "${category}", using page content:`, (err as Error).message);
+      if (allStrands.length >= this.TEMPLATES_PER_PAGE * (scroll + 1)) {
+        continue; // Keep scrolling if we have room
+      }
+    }
+
+    // If we got nothing from card extraction, fall back to page content
+    if (allStrands.length === 0) {
       return this.extractDnaFromPageContent(userId, category);
     }
+
+    return allStrands;
   }
 
   /**
@@ -672,6 +671,77 @@ export class CanvaDnaHarvesterService {
       'Planners': { headline: 'Lato Bold', body: 'Roboto Regular' },
     };
     return styles[category] || { headline: 'Montserrat Bold', body: 'Open Sans Regular' };
+  }
+
+  // ─── Continuous harvest mode for massive scale ──────────────────
+
+  /**
+   * Run harvests continuously until the target strand count is reached.
+   * Each cycle browses all categories × keywords and stores DNA.
+   * Designed for the 1M+ strand scaling push.
+   */
+  async harvestContinuously(
+    userId: string,
+    targetStrands: number = 1_000_000,
+    onProgress?: (current: number, target: number) => void,
+  ): Promise<{ totalStrands: number; cycles: number }> {
+    console.log(`[CanvaDnaHarvester] Starting CONTINUOUS harvest — target: ${targetStrands.toLocaleString()} strands`);
+    webSocketService.notifyUser(userId, 'ai-log', {
+      message: `[CANVA] 🚀 Starting CONTINUOUS harvest — target: ${targetStrands.toLocaleString()} strands`,
+    });
+
+    let totalStrands = 0;
+    let cycles = 0;
+
+    // Get initial vault count for progress tracking
+    try {
+      const stats = await dnaVaultService.getVaultStats();
+      totalStrands = stats.totalStrands || 0;
+    } catch {}
+
+    const startCount = totalStrands;
+
+    try {
+      while (totalStrands < targetStrands) {
+        cycles++;
+        console.log(`[CanvaDnaHarvester] Cycle ${cycles} — current: ${totalStrands.toLocaleString()} / ${targetStrands.toLocaleString()}`);
+
+        try {
+          const result = await this.harvestForUser(userId);
+          totalStrands += result.totalStrands;
+
+          if (onProgress) {
+            onProgress(totalStrands, targetStrands);
+          }
+
+          webSocketService.notifyUser(userId, 'ai-log', {
+            message: `[CANVA] 📊 Cycle ${cycles}: +${result.totalStrands} strands (total: ${totalStrands.toLocaleString()})`,
+          });
+
+          console.log(`[CanvaDnaHarvester] Cycle ${cycles} complete: ${totalStrands.toLocaleString()} total strands`);
+        } catch (cycleErr: any) {
+          console.error(`[CanvaDnaHarvester] Cycle ${cycles} failed:`, cycleErr.message);
+          // Brief cool-down before retry
+          await new Promise(r => setTimeout(r, 30000));
+        }
+
+        // Brief pause between cycles to let browser/gc recover
+        if (totalStrands < targetStrands) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+
+      const gained = totalStrands - startCount;
+      console.log(`[CanvaDnaHarvester] CONTINUOUS harvest DONE: ${gained.toLocaleString()} new strands in ${cycles} cycles`);
+      webSocketService.notifyUser(userId, 'ai-log', {
+        message: `[CANVA] 🎉 CONTINUOUS harvest COMPLETE! ${gained.toLocaleString()} new strands (${cycles} cycles). Total: ${totalStrands.toLocaleString()}`,
+      });
+
+      return { totalStrands, cycles };
+    } catch (error: any) {
+      console.error(`[CanvaDnaHarvester] Continuous harvest aborted:`, error.message);
+      throw error;
+    }
   }
 
   // ─── Browser lifecycle ──────────────────────────────────────────
