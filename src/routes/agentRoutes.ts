@@ -135,4 +135,14 @@ router.post('/inbox/approve', mobileAuth, approveInboxDraft);
 // Intel / trend research endpoint
 router.get('/intel/trends', mobileAuth, getIntelTrends);
 
+// Debug: Check Canva integration status
+router.get('/debug/canva-status', async (req, res) => {
+  try {
+    const rows = await db.select().from(schema.integrations).where(eq(schema.integrations.platform, 'canva'));
+    res.json({ count: rows.length, integrations: rows.map(r => ({ id: r.id, userId: r.userId, isActive: r.isActive, hasCredentials: !!r.credentials })) });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;
