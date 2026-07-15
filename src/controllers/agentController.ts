@@ -319,8 +319,8 @@ export const updateEmpire = async (req: Request, res: Response) => {
     if (niche !== undefined || angle !== undefined) {
       const userId = existingGoal.userId;
       await userSettingsService.saveSettings(userId, {
-        businessNiche: niche ?? existingGoal.description?.match(/Empire Niche:\s*(.*?)(?:\.|$)/)?.[1] || undefined,
-        businessAngle: angle ?? existingGoal.description?.match(/Angle:\s*(.*?)(?:\.|$)/)?.[1] || undefined,
+        businessNiche: (niche ?? existingGoal.description?.match(/Empire Niche:\s*(.*?)(?:\.|$)/)?.[1]) || undefined,
+        businessAngle: (angle ?? existingGoal.description?.match(/Angle:\s*(.*?)(?:\.|$)/)?.[1]) || undefined,
       });
     }
 
