@@ -39,7 +39,6 @@ import auditRoutes from './routes/auditRoutes.js';
 import cinemaRoutes from './routes/cinemaRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
 import actionRoutes from './routes/actionRoutes.js';
-import dnaRoutes from './routes/dnaRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -50,6 +49,7 @@ import { startDnaLabWorker } from './workers/dnaLabWorker.js';
 import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
+import { schedulerService } from './services/schedulerService.js';
 
 import { migrate as migratePg } from 'drizzle-orm/node-postgres/migrator';
 import { migrate as migrateLibsql } from 'drizzle-orm/libsql/migrator';
@@ -92,6 +92,9 @@ if (!process.env.VERCEL) {
   startNeuralBrowserWorker();
   startDistributionWorker();
   startDnaLabWorker();
+  
+  // Start the weekly Canva gallery DNA harvest scheduler (Playwright-based)
+  schedulerService.start();
   
   // Note: onboardingWorker starts automatically upon import
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');
@@ -149,7 +152,6 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/cinema', cinemaRoutes);
 app.use('/api/setup', setupRoutes);
 app.use('/api/actions', actionRoutes);
-app.use('/api/dna', dnaRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v3' });
