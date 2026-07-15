@@ -402,13 +402,13 @@ export class CinemaEngineService {
     if (!fs.existsSync(filePath)) return { valid: false, error: 'File not found' };
     
     const stats = fs.statSync(filePath);
-    const maxSize = type === 'photo' ? 10 * 1024 * 1024 : 200 * 1024 * 1024; // 10MB photo, 200MB video
+    const maxSize = type === 'photo' ? 90 * 1024 * 1024 : 200 * 1024 * 1024; // 90MB photo, 200MB video
     
     if (stats.size > maxSize) return { valid: false, error: `File too large (max ${maxSize / 1024 / 1024}MB)` };
     if (stats.size === 0) return { valid: false, error: 'Empty file' };
 
     const ext = path.extname(filePath).toLowerCase();
-    const allowedPhoto = ['.jpg', '.jpeg', '.png', '.webp'];
+    const allowedPhoto = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
     const allowedVideo = ['.mp4', '.mov', '.avi', '.webm', '.mkv'];
     const allowed = type === 'photo' ? allowedPhoto : allowedVideo;
     

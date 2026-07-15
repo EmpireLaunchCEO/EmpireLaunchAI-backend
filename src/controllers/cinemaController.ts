@@ -27,7 +27,7 @@ const storage = multer.diskStorage({
 
 const fileFilter = (req: any, file: any, cb: any) => {
   const isPhoto = file.fieldname === 'photo';
-  const allowedPhoto = ['.jpg', '.jpeg', '.png', '.webp'];
+  const allowedPhoto = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
   const allowedVideo = ['.mp4', '.mov', '.avi', '.webm', '.mkv'];
   const ext = path.extname(file.originalname).toLowerCase();
   
