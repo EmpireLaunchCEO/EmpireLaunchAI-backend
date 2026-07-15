@@ -70,6 +70,9 @@ export const goals = sqliteTable('goals', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status').default('pending').notNull(), // 'pending', 'active', 'completed', 'failed'
+  archetype: text('archetype').default('CREATOR').notNull(), // 'CREATOR', 'CATALYST'
+  targetCustomers: text('target_customers'),
+  businessGoals: text('business_goals'),
   creationDraftId: text('creation_draft_id'),
   approvalRequired: integer('approval_required', { mode: 'boolean' }).default(true).notNull(),
   autoPost: integer('auto_post', { mode: 'boolean' }).default(false).notNull(),

@@ -72,6 +72,8 @@ export const goals = pgTable('goals', {
   description: text('description'),
   status: text('status').default('pending').notNull(), // 'pending', 'active', 'completed', 'failed'
   archetype: text('archetype').default('CREATOR').notNull(), // 'CREATOR', 'CATALYST'
+  targetCustomers: text('target_customers'),
+  businessGoals: text('business_goals'),
   approvalRequired: boolean('approval_required').default(true).notNull(),
   autoPost: boolean('auto_post').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),

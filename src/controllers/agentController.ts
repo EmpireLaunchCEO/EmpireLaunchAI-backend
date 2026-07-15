@@ -10,7 +10,7 @@ const { goals, users, approvals, tasks } = schema;
 
 export const initializeAgent = async (req: Request, res: Response) => {
   try {
-    const { userId, name, niche, angle, archetype, automationMode } = req.body;
+    const { userId, name, niche, angle, archetype, automationMode, targetCustomers, businessGoals } = req.body;
     
     if (!userId || !name || !niche) {
       return res.status(400).json({ error: 'Missing required fields: userId, name, niche' });
@@ -51,6 +51,8 @@ export const initializeAgent = async (req: Request, res: Response) => {
         .set({ 
           description,
           archetype: archetype || existingGoal.archetype,
+          targetCustomers: targetCustomers ?? existingGoal.targetCustomers,
+          businessGoals: businessGoals ?? existingGoal.businessGoals,
           updatedAt: new Date() 
         })
         .where(eq(goals.id, existingGoal.id));
@@ -75,6 +77,8 @@ export const initializeAgent = async (req: Request, res: Response) => {
       description: `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`,
       status: 'pending', // Will be set to 'active' by the worker
       archetype: archetype || 'CREATOR',
+      targetCustomers: targetCustomers || null,
+      businessGoals: businessGoals || null,
       approvalRequired: automationMode !== 'full_autopilot',
       autoPost: automationMode === 'full_autopilot',
       createdAt: new Date(),
@@ -246,6 +250,75 @@ export const abandonGoal = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error abandoning goal:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const updateEmpire = async (req: Request, res: Response) => {
+  try {
+    const empireId = req.params.id;
+    const { name, niche, angle, targetCustomers, businessGoals, archetype } = req.body;
+
+    if (!empireId) {
+      return res.status(400).json({ error: 'Empire ID is required' });
+    }
+
+    // Check that the goal exists
+    const [existingGoal] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
+    if (!existingGoal) {
+      return res.status(404).json({ error: 'Empire not found' });
+    }
+
+    // Build update data dynamically — only set fields that were provided
+    const updateData: any = { updatedAt: new Date() };
+
+    if (name !== undefined) updateData.title = name;
+    if (archetype !== undefined) updateData.archetype = archetype;
+    if (targetCustomers !== undefined) updateData.targetCustomers = targetCustomers;
+    if (businessGoals !== undefined) updateData.businessGoals = businessGoals;
+
+    // Handle niche/angle by updating the description field (maintains backward compat)
+    let newDesc = existingGoal.description || '';
+    if (niche !== undefined) {
+      if (/Empire Niche:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+        newDesc = newDesc.replace(/Empire Niche:\s*(.*?)(?:\.|$)/, `Empire Niche: ${niche}.`);
+      } else {
+        newDesc = `Empire Niche: ${niche}. ${newDesc}`.trim();
+      }
+    }
+    if (angle !== undefined) {
+      if (/Angle:\s*(.*?)(?:\.|$)/.test(newDesc)) {
+        newDesc = newDesc.replace(/Angle:\s*(.*?)(?:\.|$)/, `Angle: ${angle}.`);
+      } else {
+        newDesc = `${newDesc} Angle: ${angle}.`.trim();
+      }
+    }
+    if (niche !== undefined || angle !== undefined) {
+      updateData.description = newDesc;
+    }
+
+    // Execute the update
+    const [updatedGoal] = await db.update(goals)
+      .set(updateData)
+      .where(eq(goals.id, empireId))
+      .returning();
+
+    // Also sync niche/angle to user settings
+    if (niche !== undefined || angle !== undefined) {
+      const userId = existingGoal.userId;
+      await userSettingsService.saveSettings(userId, {
+        businessNiche: niche ?? existingGoal.description?.match(/Empire Niche:\s*(.*?)(?:\.|$)/)?.[1] || undefined,
+        businessAngle: angle ?? existingGoal.description?.match(/Angle:\s*(.*?)(?:\.|$)/)?.[1] || undefined,
+      });
+    }
+
+    res.json({
+      status: 'success',
+      empire: updatedGoal || { ...existingGoal, ...updateData },
+      message: 'Empire updated successfully',
+    });
+  } catch (error: any) {
+    console.error('Error updating empire:', error);
+    res.status(500).json({ error: error.message });
   }
 };
 

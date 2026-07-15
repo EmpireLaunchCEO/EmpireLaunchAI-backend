@@ -11,7 +11,8 @@ import {
   approveRoadmap,
   generateThankYou,
   approveInboxDraft,
-  initializeAgent
+  initializeAgent,
+  updateEmpire
 } from '../controllers/agentController.js';
 import { userSettingsService } from '../services/userSettingsService.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
@@ -56,6 +57,8 @@ router.get('/empire/:id', mobileAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// Update empire fields (name, niche, angle, targetCustomers, businessGoals, archetype)
+router.put('/empire/:id', mobileAuth, updateEmpire);
 router.post('/start', mobileAuth, startAgent);
 router.post('/goal', mobileAuth, createGoal);
 router.patch('/goal/:id', mobileAuth, async (req, res) => {
