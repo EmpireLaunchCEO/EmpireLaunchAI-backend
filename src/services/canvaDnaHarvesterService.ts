@@ -32,6 +32,17 @@ export class CanvaDnaHarvesterService {
   private readonly KEYWORD_VARIATIONS = [
     'trending', 'minimalist', 'modern', 'bold', 'elegant',
     'vintage', 'colorful', 'professional', 'creative', 'simple',
+    // Specific high-volume niches
+    'digital planner', 'resume', 'Instagram story', 'YouTube thumbnail',
+    'TikTok video', 'menu design', 'invitation', 'certificate',
+    'invoice template', 'brochure', 'magazine cover', 'labels',
+    'stickers', 'gift certificate', 'calendar', 'schedule',
+    'worksheet', 'flashcards', 'comic strip', 'photo collage',
+    'slideshow', 'newsletter', 'announcement', 'promotion',
+    'coupon', 'business card', 'letterhead', 'flyer',
+    'poster', 'banner ad', 'logo design', 'brand kit',
+    'mood board', 'wall art', 'printable', 'ebook cover',
+    'lead magnet', 'checklist', 'planner insert', 'journal page',
   ];
 
   // Scale: templates per category per keyword (was 20)
@@ -239,8 +250,8 @@ export class CanvaDnaHarvesterService {
           const imgEl = await card.$('img');
           const thumbnailUrl = imgEl ? await imgEl.getAttribute('src') : null;
 
-          const strand = await this.analyzeTemplateDna(userId, category, title, templateId, thumbnailUrl);
-          if (strand) allStrands.push(strand);
+          const strands = await this.analyzeTemplateDna(userId, category, title, templateId, thumbnailUrl);
+          if (strands && strands.length > 0) allStrands.push(...strands);
         } catch (cardErr) {
           // Skip individual card failures
         }
@@ -392,44 +403,79 @@ export class CanvaDnaHarvesterService {
     title: string,
     templateId: string,
     thumbnailUrl: string | null,
-  ): Promise<any | null> {
-    // Generate color palette from the template name/category
+  ): Promise<any[]> {
+    const strands: any[] = [];
     const colorPalette = this.generatePaletteFromCategory(category, title);
-
-    // Determine layout type from category
     const layoutType = this.guessCompositionalStyle(category);
     const aspectRatio = this.guessAspectRatio(category);
-
-    // Generate typography suggestions
     const fontStyles = this.guessFontStyles(category);
+    const bgStyle = this.guessBackgroundStyle(category);
+    const baseId = `canva_${templateId}`;
+    const subCat = `${category.toLowerCase().replace(/\s+/g, '_')}_${title.slice(0, 20).replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    return {
+    // Strand 1: Palette (one strand per color for maximum vault diversity)
+    for (const color of colorPalette) {
+      strands.push({
+        id: uuidv4(),
+        userId,
+        category: 'palette',
+        subCategory: subCat,
+        manifest: { title, templateId, color, palette: colorPalette, thumbnailUrl },
+        performanceScore: 80,
+        sourcePlatform: 'canva',
+        externalId: `${baseId}_color_${color.replace('#', '')}`,
+        isGlobal: true,
+        isSynthesized: true,
+        metadata: { userId, type: 'canva_template_color', category, tags: [category.toLowerCase(), 'color', 'canva'] },
+      });
+    }
+
+    // Strand 2: Typography
+    strands.push({
+      id: uuidv4(),
+      userId,
+      category: 'typography',
+      subCategory: subCat,
+      manifest: { title, templateId, headlineFont: fontStyles.headline, bodyFont: fontStyles.body, thumbnailUrl },
+      performanceScore: 78,
+      sourcePlatform: 'canva',
+      externalId: `${baseId}_font`,
+      isGlobal: true,
+      isSynthesized: true,
+      metadata: { userId, type: 'canva_template_font', category, tags: [category.toLowerCase(), 'typography', 'canva'] },
+    });
+
+    // Strand 3: Layout
+    strands.push({
       id: uuidv4(),
       userId,
       category: 'layout',
-      subCategory: `${category.toLowerCase().replace(/\s+/g, '_')}_${title.slice(0, 30).replace(/[^a-zA-Z0-9]/g, '_')}`,
-      manifest: {
-        title,
-        templateId,
-        format: category,
-        compositionalStyle: layoutType,
-        aspectRatio,
-        colorPalette,
-        fonts: fontStyles,
-        thumbnailUrl,
-      },
-      performanceScore: 85,
+      subCategory: subCat,
+      manifest: { title, templateId, format: category, compositionalStyle: layoutType, aspectRatio, thumbnailUrl },
+      performanceScore: 82,
       sourcePlatform: 'canva',
-      externalId: `canva_${templateId}`,
+      externalId: `${baseId}_layout`,
       isGlobal: true,
       isSynthesized: true,
-      metadata: {
-        userId,
-        type: 'canva_template_dna',
-        category,
-        tags: [category.toLowerCase(), 'canva_pro', 'trending'],
-      },
-    };
+      metadata: { userId, type: 'canva_template_layout', category, tags: [category.toLowerCase(), 'layout', 'canva'] },
+    });
+
+    // Strand 4: Background
+    strands.push({
+      id: uuidv4(),
+      userId,
+      category: 'background',
+      subCategory: subCat,
+      manifest: { title, templateId, style: bgStyle, thumbnailUrl },
+      performanceScore: 75,
+      sourcePlatform: 'canva',
+      externalId: `${baseId}_bg`,
+      isGlobal: true,
+      isSynthesized: true,
+      metadata: { userId, type: 'canva_template_background', category, tags: [category.toLowerCase(), 'background', 'canva'] },
+    });
+
+    return strands;
   }
 
   // ─── Helper: Category detection from text ──────────────────────
