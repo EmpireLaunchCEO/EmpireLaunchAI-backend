@@ -508,12 +508,24 @@ export const getIntelTrends = async (req: Request, res: Response) => {
       businessGoals: typeof businessGoals === 'string' ? businessGoals : undefined,
     };
 
-    const trends = await intelService.researchTrends(params);
+    const result = await intelService.researchTrends(params);
 
-    res.json({
-      status: 'success',
-      ...trends,
-    });
+    if (result.data) {
+      res.json({
+        status: 'success',
+        ...result.data,
+      });
+    } else {
+      res.json({
+        status: 'unavailable',
+        message: result.fallbackMessage || 'Unable to research trends at this time.',
+        trendingThemes: [],
+        seasonalOpportunities: [],
+        hotSellingItems: [],
+        lowCompetitionItems: [],
+        contentIdeas: [],
+      });
+    }
   } catch (error: any) {
     console.error('Error fetching intel trends:', error);
     res.status(500).json({ error: error.message });

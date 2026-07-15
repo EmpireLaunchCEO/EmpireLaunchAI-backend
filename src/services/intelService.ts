@@ -15,16 +15,8 @@ export interface IntelTrendsResult {
   contentIdeas: string[];
 }
 
-const DEFAULT_EMPTY_RESULT: IntelTrendsResult = {
-  trendingThemes: [],
-  seasonalOpportunities: [],
-  hotSellingItems: [],
-  lowCompetitionItems: [],
-  contentIdeas: [],
-};
-
 function buildIntelPrompt(params: IntelTrendsParams): string {
-  const context = [];
+  const context: string[] = [];
   if (params.niche) context.push(`Business niche: ${params.niche}`);
   if (params.angle) context.push(`Business angle/approach: ${params.angle}`);
   if (params.targetCustomers) context.push(`Target customers: ${params.targetCustomers}`);
@@ -34,7 +26,7 @@ function buildIntelPrompt(params: IntelTrendsParams): string {
 
 ${context.join('\n')}
 
-Based on your web research, return a single valid JSON object (no markdown, no code fences) with exactly these five keys. Each key must be an array of strings:
+Based on your web research, return a single valid JSON object (no markdown, no code fences, no surrounding text) with exactly these five keys. Each key must be an array of strings:
 
 {
   "trendingThemes": ["exact trending theme 1", "exact trending theme 2", ...],
@@ -52,43 +44,10 @@ RULES:
 - Return ONLY the JSON object — no explanation, no markdown formatting.`;
 }
 
-async function callGeminiWithGrounding(prompt: string): Promise<string> {
-  const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!geminiKey) {
-    throw new Error('GOOGLE_API_KEY not configured');
-  }
-
-  // Try with Google Search grounding tool first
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [
-        { role: 'user', parts: [{ text: prompt }] }
-      ],
-      tools: [{ google_search: {} }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
-    })
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => '');
-    throw new Error(`Gemini API error: ${response.status} ${errorBody}`);
-  }
-
-  const data = await response.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    throw new Error('Gemini returned empty response');
-  }
-  return text;
-}
-
-function parseIntelResponse(raw: string): IntelTrendsResult {
-  // Strip any markdown code fences
+function parseIntelResponse(raw: string): IntelTrendsResult | null {
   let cleaned = raw.trim();
+
+  // Strip markdown code fences
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   }
@@ -103,60 +62,62 @@ function parseIntelResponse(raw: string): IntelTrendsResult {
       contentIdeas: Array.isArray(parsed.contentIdeas) ? parsed.contentIdeas : [],
     };
   } catch {
-    // If JSON parse fails, try to extract arrays with regex as fallback
     console.warn('[IntelService] Failed to parse JSON response, attempting regex extraction');
-    return extractArraysFromText(cleaned);
+
+    // Fallback: regex extraction
+    const extract = (key: string): string[] => {
+      const regex = new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)\\]`, 'i');
+      const match = cleaned.match(regex);
+      if (!match || !match[1]) return [];
+      return match[1]
+        .split(',')
+        .map(s => s.replace(/^["'\s]+|["'\s]+$/g, '').trim())
+        .filter(Boolean);
+    };
+
+    const result: IntelTrendsResult = {
+      trendingThemes: extract('trendingThemes'),
+      seasonalOpportunities: extract('seasonalOpportunities'),
+      hotSellingItems: extract('hotSellingItems'),
+      lowCompetitionItems: extract('lowCompetitionItems'),
+      contentIdeas: extract('contentIdeas'),
+    };
+
+    // If we couldn't extract anything at all, return null
+    const hasAnyData = Object.values(result).some(arr => arr.length > 0);
+    return hasAnyData ? result : null;
   }
-}
-
-function extractArraysFromText(text: string): IntelTrendsResult {
-  const extract = (key: string): string[] => {
-    const regex = new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)\\]`, 'i');
-    const match = text.match(regex);
-    if (!match || !match[1]) return [];
-    return match[1]
-      .split(',')
-      .map(s => s.replace(/^["'\s]+|["'\s]+$/g, '').trim())
-      .filter(Boolean);
-  };
-
-  return {
-    trendingThemes: extract('trendingThemes'),
-    seasonalOpportunities: extract('seasonalOpportunities'),
-    hotSellingItems: extract('hotSellingItems'),
-    lowCompetitionItems: extract('lowCompetitionItems'),
-    contentIdeas: extract('contentIdeas'),
-  };
 }
 
 export class IntelService {
   /**
    * Researches current market trends for the given business parameters.
-   * Uses Gemini with Google Search grounding for real-time web data.
-   * Falls back to standard reasoning if grounding is unavailable.
+   * Uses the existing ReasoningEngine (Gemini 2.5 Flash) for research.
+   * Returns structured trend data or a fallback message on failure.
    */
-  async researchTrends(params: IntelTrendsParams): Promise<IntelTrendsResult> {
+  async researchTrends(params: IntelTrendsParams): Promise<{ data: IntelTrendsResult | null; fallbackMessage?: string }> {
     const prompt = buildIntelPrompt(params);
 
     try {
-      // Try with Google Search grounding first
-      const raw = await callGeminiWithGrounding(prompt);
-      return parseIntelResponse(raw);
-    } catch (err: any) {
-      console.warn('[IntelService] Grounded search failed, falling back to standard reasoning:', err.message);
-    }
-
-    // Fallback: use standard reasoning without grounding
-    try {
-      const raw = await reasoningEngine.reason(buildIntelPrompt(params), {
+      const raw = await reasoningEngine.reason(prompt, {
         temperature: 0.3,
         maxTokens: 2048,
       });
-      return parseIntelResponse(raw);
+
+      const parsed = parseIntelResponse(raw);
+      if (parsed) {
+        return { data: parsed };
+      }
+
+      console.warn('[IntelService] Could not parse AI response into structured trends');
     } catch (err: any) {
-      console.error('[IntelService] All AI calls failed:', err.message);
-      return DEFAULT_EMPTY_RESULT;
+      console.error('[IntelService] reasoningEngine.reason() failed:', err.message);
     }
+
+    return {
+      data: null,
+      fallbackMessage: 'Unable to research trends at this time. Please try again later.',
+    };
   }
 }
 
