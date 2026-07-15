@@ -4,6 +4,7 @@ import { aiTaskQueue, onboardingQueue } from '../services/queueService.js';
 import { fraudSentinel } from '../services/fraudSentinel.js';
 import { strategyOrchestrator } from '../services/strategyOrchestrator.js';
 import { inboxAssistantService } from '../services/inboxAssistantService.js';
+import { intelService } from '../services/intelService.js';
 import { eq, and, count, inArray } from 'drizzle-orm';
 import { userSettingsService } from '../services/userSettingsService.js';
 const { goals, users, approvals, tasks } = schema;
@@ -488,6 +489,33 @@ export const getStrategyTasks = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error fetching strategy tasks:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getIntelTrends = async (req: Request, res: Response) => {
+  try {
+    const { niche, angle, targetCustomers, businessGoals } = req.query;
+
+    if (!niche || typeof niche !== 'string') {
+      return res.status(400).json({ error: 'niche query parameter is required' });
+    }
+
+    const params = {
+      niche: niche as string,
+      angle: typeof angle === 'string' ? angle : undefined,
+      targetCustomers: typeof targetCustomers === 'string' ? targetCustomers : undefined,
+      businessGoals: typeof businessGoals === 'string' ? businessGoals : undefined,
+    };
+
+    const trends = await intelService.researchTrends(params);
+
+    res.json({
+      status: 'success',
+      ...trends,
+    });
+  } catch (error: any) {
+    console.error('Error fetching intel trends:', error);
     res.status(500).json({ error: error.message });
   }
 };

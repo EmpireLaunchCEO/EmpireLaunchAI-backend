@@ -12,7 +12,8 @@ import {
   generateThankYou,
   approveInboxDraft,
   initializeAgent,
-  updateEmpire
+  updateEmpire,
+  getIntelTrends
 } from '../controllers/agentController.js';
 import { userSettingsService } from '../services/userSettingsService.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
@@ -130,5 +131,8 @@ router.get('/strategy/:empireId', mobileAuth, getStrategyTasks);
 
 router.post('/inbox/thank-you', mobileAuth, generateThankYou);
 router.post('/inbox/approve', mobileAuth, approveInboxDraft);
+
+// Intel / trend research endpoint
+router.get('/intel/trends', mobileAuth, getIntelTrends);
 
 export default router;
