@@ -38,7 +38,7 @@ export class UsageService {
       return 'unlimited';
     }
 
-    const weeklyNeuralLimit = 14;
+    const weeklyNeuralLimit = 7;
     const monthlyDesignLimit = 50;
     
     const now = new Date();
@@ -107,7 +107,7 @@ export class UsageService {
         limit = 50;
       } else if (type === 'neural_twin' || type === 'customize_video') {
         period = 'week';
-        limit = 14;
+        limit = 7;
       }
 
       throw new Error(`Usage limit reached. You can generate up to ${limit} ${type.replace(/_/g, ' ')}s per ${period}.`);

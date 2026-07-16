@@ -234,7 +234,7 @@ export class CinemaController {
         userId,
         neural: {
           remaining: neuralRemaining,
-          limit: 14,
+          limit: 7,
           period: 'week',
         },
         enhanced: {
@@ -248,7 +248,7 @@ export class CinemaController {
         },
         customize: {
           remaining: customizeRemaining,
-          limit: 14,
+          limit: 7,
           period: 'week',
         },
       });
