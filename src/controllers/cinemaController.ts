@@ -70,6 +70,17 @@ export class CinemaController {
       const storedPath = cinemaEngineService.storeUpload(filePath, 'photo');
       const userId = (req as any).user?.id || 'anonymous';
 
+      // Save to creations table so it shows up in Operations page
+      await db.insert(schema.creations).values({
+        id: uuidv4(),
+        userId,
+        type: 'facial_dna',
+        title: `Photo - ${path.basename(storedPath)}`,
+        status: 'completed',
+        fileUrl: storedPath,
+        metadata: { fileSize: (req as any).file?.size, originalName: (req as any).file?.originalname },
+      }).onConflictDoNothing();
+
       res.json({
         success: true,
         photoUrl: storedPath,
@@ -100,6 +111,18 @@ export class CinemaController {
       }
 
       const storedPath = cinemaEngineService.storeUpload(filePath, 'video');
+      const userId = (req as any).user?.id || 'anonymous';
+
+      // Save to creations table so it shows up in Operations page
+      await db.insert(schema.creations).values({
+        id: uuidv4(),
+        userId,
+        type: 'raw_video',
+        title: `Video - ${path.basename(storedPath)}`,
+        status: 'completed',
+        fileUrl: storedPath,
+        metadata: { fileSize: (req as any).file?.size, originalName: (req as any).file?.originalname },
+      }).onConflictDoNothing();
 
       res.json({
         success: true,
@@ -266,19 +289,19 @@ export class CinemaController {
    */
   async getCreations(req: Request, res: Response): Promise<void> {
     try {
-      const userId = (req as any).user?.id;
+      const userId = (req as any).user?.id || (req.query.userId as string);
       if (!userId) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
       
-      const creations = await db.select()
+      const userCreations = await db.select()
         .from(schema.creations)
         .where(eq(schema.creations.userId, userId))
         .orderBy(schema.creations.createdAt)
         .limit(50);
       
-      res.json(creations);
+      res.json({ creations: userCreations });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
