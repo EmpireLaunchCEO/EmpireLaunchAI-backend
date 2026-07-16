@@ -307,7 +307,6 @@ export class CinemaController {
           title: `${niche} - ${angle}`,
           status: 'completed',
           fileUrl: result.masterAssetUrl,
-          thumbnailUrl: result.thumbnailUrl || undefined,
           metadata: { niche, angle, platforms: platforms || ['tiktok'] },
         }).onConflictDoNothing();
       }
