@@ -158,6 +158,19 @@ export class CinemaController {
         voiceStyle,
       });
 
+      // Save to creations table so it shows up in Operations page
+      if (result.status === 'completed' && result.videoUrl) {
+        await db.insert(schema.creations).values({
+          id: uuidv4(),
+          userId,
+          type: 'neural_twin',
+          title: `Neural Twin - ${path.basename(result.videoUrl || '')}`,
+          status: 'completed',
+          fileUrl: result.videoUrl,
+          metadata: { photoPath, voiceStyle, script: script?.slice(0, 100) },
+        }).onConflictDoNothing();
+      }
+
       res.json({
         success: result.status === 'completed',
         asset: result,
@@ -182,6 +195,19 @@ export class CinemaController {
       }
 
       const result = await cinemaEngineService.enhanceRawVideo(userId, videoPath);
+
+      // Save to creations table so it shows up in Operations page
+      if (result.status === 'completed' && result.videoUrl) {
+        await db.insert(schema.creations).values({
+          id: uuidv4(),
+          userId,
+          type: 'enhanced_video',
+          title: `Enhanced - ${path.basename(result.videoUrl || videoPath)}`,
+          status: 'completed',
+          fileUrl: result.videoUrl,
+          metadata: { sourceVideo: videoPath },
+        }).onConflictDoNothing();
+      }
 
       res.json({
         success: result.status === 'completed',
@@ -271,6 +297,20 @@ export class CinemaController {
         platforms: platforms || ['tiktok'],
         archetype: 'creator',
       });
+      
+      // Save to creations table so it shows up in Operations page
+      if (result.masterAssetUrl) {
+        await db.insert(schema.creations).values({
+          id: uuidv4(),
+          userId,
+          type: 'enhanced_video',
+          title: `${niche} - ${angle}`,
+          status: 'completed',
+          fileUrl: result.masterAssetUrl,
+          thumbnailUrl: result.thumbnailUrl || undefined,
+          metadata: { niche, angle, platforms: platforms || ['tiktok'] },
+        }).onConflictDoNothing();
+      }
       
       res.json({
         message: 'Video generated successfully',
