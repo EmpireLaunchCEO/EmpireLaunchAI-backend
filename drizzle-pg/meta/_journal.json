@@ -1,1 +1,1 @@
-{"version":"7","dialect":"postgresql","entries":[{"idx":0,"version":"7","when":1746307200000,"tag":"0001_create_audit_statements","breakpoints":true}]}
+{"version":"7","dialect":"postgresql","entries":[{"idx":0,"version":"7","when":1746307200000,"tag":"0001_create_audit_statements","breakpoints":true},{"idx":1,"version":"7","when":1746314400000,"tag":"0002_create_creations","breakpoints":true}]}
