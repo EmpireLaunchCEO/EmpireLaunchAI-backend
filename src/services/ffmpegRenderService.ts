@@ -16,7 +16,7 @@ export interface PlatformManifest {
 }
 
 export interface RenderConfig {
-  sourceVideoPath: string;
+  sourceVideoPath?: string;
   platforms?: string[];         // Which platforms to render for (default: all)
   enableWatermark?: boolean;
   watermarkUrl?: string;

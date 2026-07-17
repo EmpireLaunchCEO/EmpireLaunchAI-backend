@@ -102,7 +102,7 @@ router.post('/process', async (req: Request, res: Response) => {
               sceneId: uuidv4().slice(0, 8),
               imagePrompt: decision.prompt,
               textOverlays: [],
-              duration: 0,
+              durationSeconds: 0,
             }],
             pacing: 'moderate',
           });
@@ -133,7 +133,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 sceneId: uuidv4().slice(0, 8),
                 imagePrompt: `Product scene: ${decision.prompt}`,
                 textOverlays: [],
-                duration: 0,
+                durationSeconds: 0,
               }],
               pacing: 'slow',
             });
