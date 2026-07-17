@@ -87,13 +87,13 @@ export class RenderingEngine {
   }
 
   /**
-   * Phase 1: Generate a single scene image using OpenAI gpt-image-1-mini.
+   * Phase 1: Generate a single scene image using OpenAI gpt-image-2.
    * Uses the scene's image prompt to create a photorealistic background.
    */
   private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
-    // Call OpenAI gpt-image-1-mini via chat completions API
+    // Call OpenAI gpt-image-2 via chat completions API
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error('OPENAI_API_KEY not configured — cannot generate scene images');
@@ -106,7 +106,7 @@ export class RenderingEngine {
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: 'gpt-image-1-mini',
+        model: 'gpt-image-2',
         messages: [
           { 
             role: 'user', 
@@ -123,7 +123,7 @@ export class RenderingEngine {
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      console.error(`[RenderingEngine] gpt-image-1-mini error (${response.status}):`, errorBody);
+      console.error(`[RenderingEngine] gpt-image-2 error (${response.status}):`, errorBody);
       // Fallback: generate a solid color placeholder
       const fallbackSvg = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#2C3E50"/></svg>`;
       await sharp(Buffer.from(fallbackSvg)).png().toFile(outputPath);
@@ -146,7 +146,7 @@ export class RenderingEngine {
     const imageBuffer = Buffer.from(base64Data, 'base64');
     await sharp(imageBuffer).png().toFile(outputPath);
 
-    console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-1-mini`);
+    console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-2`);
     return outputPath;
   }
 
