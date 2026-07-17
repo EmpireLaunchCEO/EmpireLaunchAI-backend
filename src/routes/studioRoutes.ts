@@ -103,6 +103,7 @@ router.post('/process', async (req: Request, res: Response) => {
               imagePrompt: decision.prompt,
               textOverlays: [],
               durationSeconds: 0,
+              transition: 'none',
             }],
             pacing: 'moderate',
           });
@@ -134,6 +135,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 imagePrompt: `Product scene: ${decision.prompt}`,
                 textOverlays: [],
                 durationSeconds: 0,
+                transition: 'none',
               }],
               pacing: 'slow',
             });
