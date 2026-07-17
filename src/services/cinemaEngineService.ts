@@ -5,6 +5,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
+import { soraVideoService } from './soraVideoService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -73,27 +74,55 @@ export class CinemaEngineService {
     try {
       if (!inputPath) throw new Error('No input photo provided');
 
-      // Enforce Daily Limit (3 videos/day)
+      // Enforce Weekly Limit
       await usageService.enforceLimit(userId, 'neural_twin');
 
       // Step 1: Extract Facial DNA from photo using Gemini Vision
       const facialDna = await this.extractFacialDna(userId, inputPath);
 
-      // Step 2: Generate lip-sync phoneme mapping
-      const lipSyncData = await this.generateLipSyncReasoning(script);
+      // Step 2: Try Sora 2 for direct video generation
+      try {
+        const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle);
+        console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
 
-      // Step 3: Generate talking head frames (simulated with DALL-E style prompts)
+        const soraResult = await soraVideoService.generateVideo(soraPrompt, {
+          duration: Math.min(Math.ceil(script.split(' ').length / 2), 30),
+          size: '1024x1024',
+        });
+
+        if (soraResult.success && soraResult.videoPath) {
+          // Copy Sora output to the expected cinema path
+          fs.copyFileSync(soraResult.videoPath, outputPath);
+          try { fs.unlinkSync(soraResult.videoPath); } catch {}
+
+          await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'sora-2' });
+
+          return {
+            id: assetId,
+            videoUrl: `/assets/cinema/renders/twin_${assetId}.mp4`,
+            thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
+            status: 'completed',
+            metadata: {
+              script,
+              facialDna,
+              engine: 'Sora 2 Neural Twin',
+            },
+          };
+        }
+        console.warn(`[CinemaEngine] Sora 2 failed: ${soraResult.error}. Falling back to frame pipeline...`);
+      } catch (soraErr: any) {
+        console.warn(`[CinemaEngine] Sora 2 error: ${soraErr.message}. Falling back.`);
+      }
+
+      // Fallback: legacy frame-by-frame pipeline
+      const lipSyncData = await this.generateLipSyncReasoning(script);
       const framePaths = await this.generateTalkingFrames(
         facialDna, lipSyncData, script, this.cinemaDir, assetId
       );
-
-      // Step 4: Compose into video with FFmpeg
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData);
 
-      // Log usage after successful generation
       await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length });
 
-      // Cleanup temp frames
       for (const fp of framePaths) {
         try { fs.unlinkSync(fp); } catch {}
       }
@@ -107,7 +136,7 @@ export class CinemaEngineService {
           script,
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
-          engine: 'Empire Cinema Neural Layer v2',
+          engine: 'Empire Cinema Neural Layer v2 (fallback)',
         },
       };
     } catch (error: any) {
@@ -121,6 +150,23 @@ export class CinemaEngineService {
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Build a Sora 2 prompt from facial DNA + script for Neural Twin generation.
+   */
+  private buildSoraTwinPrompt(facialDna: FacialDNA, script: string, voiceStyle?: string): string {
+    const style = voiceStyle || 'natural';
+    return `Create a realistic talking-head video of a person with the following characteristics:
+
+Face: ${facialDna.faceShape} face shape, ${facialDna.skinTone} skin tone, ${facialDna.eyeColor} eyes.
+Hair: ${facialDna.hairStyle}, ${facialDna.hairColor}.
+Features: ${facialDna.jawline} jawline, ${facialDna.lipShape} lips, ${facialDna.noseShape} nose, ${facialDna.eyebrowShape} eyebrows.
+
+The person is speaking directly to camera in a ${style} tone, delivering this script:
+"${script}"
+
+Style: professional, well-lit studio background, natural head movement, ${style} expression.`;
   }
 
   /**

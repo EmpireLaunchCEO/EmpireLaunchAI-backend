@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { ProductionScene, TextOverlay } from './productionDirector.js';
+import { soraVideoService } from './soraVideoService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -42,7 +43,7 @@ export class RenderingEngine {
   }
 
   /**
-   * Full render pipeline: generate images → overlay text → compose video.
+   * Full render pipeline: try Sora 2 first, fall back to gpt-image-2 + FFmpeg.
    */
   async render(params: RenderParams): Promise<RenderResult> {
     const taskId = uuidv4().slice(0, 8);
@@ -51,21 +52,43 @@ export class RenderingEngine {
 
     const sceneImages: string[] = [];
 
+    // Build a unified Sora prompt from all scene prompts
+    const soraPrompt = params.scenes
+      .map((s, i) => `Scene ${i + 1}: ${s.imagePrompt}`)
+      .join('\n');
+
+    // Try Sora 2 first
     try {
-      // Phase 1: Generate all scene images via DALL-E 3
+      console.log(`[RenderingEngine] Attempting Sora 2 generation...`);
+      const soraResult = await soraVideoService.generateVideo(soraPrompt, {
+        duration: Math.min(params.scenes.length * 5, 30),
+        size: '1024x1024',
+      });
+
+      if (soraResult.success && soraResult.videoPath) {
+        console.log(`[RenderingEngine] Sora 2 generated video: ${soraResult.videoPath}`);
+        return {
+          success: true,
+          videoUrl: soraResult.videoUrl || soraResult.videoPath,
+          sceneImages: [soraResult.videoPath],
+        };
+      }
+      console.warn(`[RenderingEngine] Sora 2 failed: ${soraResult.error}. Falling back to gpt-image-2 + FFmpeg...`);
+    } catch (soraErr: any) {
+      console.warn(`[RenderingEngine] Sora 2 error: ${soraErr.message}. Falling back.`);
+    }
+
+    // Fallback: gpt-image-2 + Sharp + FFmpeg pipeline
+    try {
       for (let i = 0; i < params.scenes.length; i++) {
         const scene = params.scenes[i];
         console.log(`[RenderingEngine] Generating scene ${i + 1}/${params.scenes.length}: "${scene.sceneId}"`);
 
         const dalleImage = await this.generateSceneImage(scene.imagePrompt, workingDir, i);
-        
-        // Phase 2: Overlay text via Sharp (SVG compositing)
         const imageWithText = await this.applyTextOverlays(dalleImage, scene.textOverlays, workingDir, i);
-        
         sceneImages.push(imageWithText);
       }
 
-      // Phase 3: Compose video via FFmpeg
       console.log(`[RenderingEngine] Composing video from ${sceneImages.length} scenes...`);
       const videoUrl = await this.composeVideo(sceneImages, params.scenes, params.pacing, workingDir, params.backgroundAudioUrl);
 
@@ -76,7 +99,6 @@ export class RenderingEngine {
       };
     } catch (error: any) {
       console.error('[RenderingEngine] Render failed:', error.message);
-      // Clean up on failure
       this.cleanupDir(workingDir);
       return {
         success: false,
