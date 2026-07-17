@@ -91,7 +91,7 @@ export class SubscriptionGuard {
     }
 
     const id = uuidv4();
-    const amount = 4000 * slots;
+    const amount = 5000 * slots;
     await db.insert(schema.approvals).values({
         id,
         userId,

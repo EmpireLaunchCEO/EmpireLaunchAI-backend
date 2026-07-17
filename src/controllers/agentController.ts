@@ -179,7 +179,7 @@ export const createGoal = async (req: Request, res: Response) => {
       return res.status(402).json({ 
         error: 'Active business limit reached', 
         limit: user.businessSlots,
-        message: 'Abandon an existing business or purchase a new slot for $30.'
+        message: 'Abandon an existing business or purchase a new slot for $50.'
       });
     }
 
@@ -356,8 +356,8 @@ export const purchaseSlot = async (req: Request, res: Response) => {
       status: 'pending',
       payload: {
         type: 'SLOT_PURCHASE',
-        amount: 3000, // $30.00
-        message: `Purchase business slot #${user.businessSlots + 1} for $30.`
+        amount: 5000, // $50.00
+        message: `Purchase business slot #${user.businessSlots + 1} for $50.`
       },
       createdAt: new Date(),
       updatedAt: new Date(),

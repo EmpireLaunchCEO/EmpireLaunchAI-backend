@@ -26,7 +26,7 @@ export class RevenueOracleService {
     const tier = user?.tier || 'STANDARD_USER';
     const slots = user?.businessSlots || 1;
     
-    let subscriptionFee = 4000 * slots; // $40 per business slot in cents
+    let subscriptionFee = 5000 * slots; // $50 per business slot in cents
     let surchargePer1000 = 4000; // $40 in cents (4% Success-Share)
 
     if (tier === 'OWNER_MASTER') {

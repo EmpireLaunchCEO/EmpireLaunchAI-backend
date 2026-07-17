@@ -204,7 +204,7 @@ export const createPlatformCheckout = async (req: Request, res: Response) => {
 
     const validCurrencies = ['usd', 'eur', 'gbp', 'jpy', 'cny', 'krw', 'cad', 'aud', 'brl', 'mxn', 'inr'];
     const checkoutCurrency = currency && validCurrencies.includes(currency) ? currency : 'usd';
-    const checkoutAmount = typeof amountInCents === 'number' && amountInCents > 0 ? amountInCents : 4000;
+    const checkoutAmount = typeof amountInCents === 'number' && amountInCents > 0 ? amountInCents : 5000;
 
     const session = await stripeService.createPlatformCheckoutSession(userId, returnUrl, checkoutCurrency, checkoutAmount);
     res.json({ url: session.url });
