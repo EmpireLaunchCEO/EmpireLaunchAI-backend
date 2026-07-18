@@ -26,6 +26,8 @@
     "dotenv": "16.4.5"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1090.0",
+    "@aws-sdk/lib-storage": "^3.1090.0",
     "@langchain/community": "0.3.30",
     "@langchain/core": "0.3.37",
     "@langchain/google-genai": "0.1.8",
