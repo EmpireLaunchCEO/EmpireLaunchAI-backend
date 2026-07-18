@@ -4,6 +4,7 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
+import { libraryService } from '../services/libraryService.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
@@ -95,7 +96,6 @@ router.post('/process', async (req: Request, res: Response) => {
     switch (decision.classification) {
       case 'image_creation':
       case 'image_editing': {
-        // Call renderingEngine standalone for image generation
         try {
           const imageResult = await renderingEngine.render({
             scenes: [{
@@ -106,17 +106,38 @@ router.post('/process', async (req: Request, res: Response) => {
               transition: 'none',
             }],
             pacing: 'moderate',
+            userId: uid,
           });
 
           if (imageResult.success && imageResult.sceneImages.length > 0) {
             const imgUrl = imageResult.sceneImages[0];
+            const aiProvider = imageResult.videoUrl ? 'Sora 2' : 'GPT Image 2';
+            const assetType = decision.classification === 'image_editing' ? 'edit' : 'design';
             assets.push({ type: 'image', url: imgUrl });
-            // Store in creations table
+
+            // Store in creations table with AI provider tag
+            const creationId = uuidv4();
             await db.insert(schema.creations).values({
-              id: uuidv4(), userId: uid, type: 'design',
+              id: creationId, userId: uid, type: 'design',
               title: decision.prompt.slice(0, 60), status: 'completed',
-              fileUrl: imgUrl, metadata: { classification: decision.classification, prompt: decision.prompt },
+              fileUrl: imgUrl,
+              metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
             }).onConflictDoNothing();
+
+            // Auto-save to library
+            try {
+              await libraryService.create({
+                userId: uid,
+                brandId: brandId || uid,
+                type: assetType,
+                name: decision.prompt.slice(0, 60),
+                filePath: imgUrl,
+                mimeType: 'image/png',
+                metadata: { aiProvider, source: 'studio', creationId },
+              });
+            } catch (libErr: any) {
+              console.warn('[StudioRoute] Library save failed:', libErr.message);
+            }
           }
         } catch (imgErr: any) {
           console.error('[StudioRoute] Image generation failed:', imgErr.message);
@@ -172,13 +193,33 @@ router.post('/process', async (req: Request, res: Response) => {
               }
             }
 
-            // Store in creations table
+            // Store in creations table with AI provider tag
+            const creationId = uuidv4();
+            const aiProvider = 'Sora 2 + FFmpeg';
             await db.insert(schema.creations).values({
-              id: uuidv4(), userId: uid, type: 'enhanced_video',
+              id: creationId, userId: uid, type: 'enhanced_video',
               title: decision.prompt.slice(0, 60), status: 'completed',
               fileUrl: soraResult.videoUrl || soraResult.videoPath,
-              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms },
+              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
             }).onConflictDoNothing();
+
+            // Auto-save each output to library
+            for (const out of renderResult.outputs) {
+              try {
+                await libraryService.create({
+                  userId: uid,
+                  brandId: brandId || uid,
+                  type: 'video',
+                  name: `${decision.prompt.slice(0, 50)} - ${out.platform}`,
+                  filePath: out.videoUrl,
+                  thumbnailPath: out.thumbnailUrl,
+                  mimeType: 'video/mp4',
+                  metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
+                });
+              } catch (libErr: any) {
+                console.warn('[StudioRoute] Library save failed:', libErr.message);
+              }
+            }
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
@@ -187,7 +228,6 @@ router.post('/process', async (req: Request, res: Response) => {
       }
 
       case 'video_editing': {
-        // For video editing, we need an existing video — use attachments
         const sourceVideo = attachments?.[0] || decision.parameters.sourceVideo;
         if (sourceVideo) {
           try {
@@ -198,6 +238,8 @@ router.post('/process', async (req: Request, res: Response) => {
             });
 
             if (renderResult.success) {
+              const creationId = uuidv4();
+              const aiProvider = 'FFmpeg';
               for (const out of renderResult.outputs) {
                 assets.push({
                   type: 'video',
@@ -205,6 +247,21 @@ router.post('/process', async (req: Request, res: Response) => {
                   thumbnailUrl: out.thumbnailUrl,
                   platform: out.platform,
                 });
+                // Auto-save to library
+                try {
+                  await libraryService.create({
+                    userId: uid,
+                    brandId: brandId || uid,
+                    type: 'edit',
+                    name: `Edited Video - ${out.platform}`,
+                    filePath: out.videoUrl,
+                    thumbnailPath: out.thumbnailUrl,
+                    mimeType: 'video/mp4',
+                    metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
+                  });
+                } catch (libErr: any) {
+                  console.warn('[StudioRoute] Library save failed:', libErr.message);
+                }
               }
             }
           } catch (editErr: any) {
@@ -219,13 +276,15 @@ router.post('/process', async (req: Request, res: Response) => {
         if (sourceVideo) {
           try {
             const renderResult = await ffmpegRenderService.render(sourceVideo, {
-              platforms: undefined, // all platforms
+              platforms: undefined,
               enableWatermark: !!decision.parameters.brandName,
               titleOverlay: decision.parameters.titleOverlay,
               callToAction: decision.parameters.callToAction,
             });
 
             if (renderResult.success) {
+              const creationId = uuidv4();
+              const aiProvider = 'FFmpeg';
               for (const out of renderResult.outputs) {
                 assets.push({
                   type: 'video',
@@ -233,6 +292,21 @@ router.post('/process', async (req: Request, res: Response) => {
                   thumbnailUrl: out.thumbnailUrl,
                   platform: out.platform,
                 });
+                // Auto-save to library
+                try {
+                  await libraryService.create({
+                    userId: uid,
+                    brandId: brandId || uid,
+                    type: 'video',
+                    name: `Rendered - ${out.platform}`,
+                    filePath: out.videoUrl,
+                    thumbnailPath: out.thumbnailUrl,
+                    mimeType: 'video/mp4',
+                    metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
+                  });
+                } catch (libErr: any) {
+                  console.warn('[StudioRoute] Library save failed:', libErr.message);
+                }
               }
             }
           } catch (renderErr: any) {
