@@ -1,20 +1,22 @@
--- Migration: Add library_items table for user design asset library
-CREATE TABLE IF NOT EXISTS library_items (
+-- Migration: Add library_assets table for client asset library
+-- Assets auto-expire 90 days after creation. Only metadata in DB, files on disk.
+
+CREATE TABLE IF NOT EXISTS library_assets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id),
-  name TEXT NOT NULL,
-  description TEXT,
+  brand_id UUID,
   type TEXT NOT NULL,
-  category TEXT,
-  tags JSONB,
-  file_url TEXT,
-  thumbnail_url TEXT,
-  source_creation_id UUID,
-  source_dna_strand_id UUID,
-  source_style_dna_id UUID,
+  name TEXT,
+  file_path TEXT,
+  thumbnail_path TEXT,
+  mime_type TEXT,
+  file_size INTEGER,
   metadata JSONB,
-  is_favorite BOOLEAN DEFAULT false NOT NULL,
-  is_public BOOLEAN DEFAULT false NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
   created_at TIMESTAMP DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMP DEFAULT NOW() NOT NULL
 );
+
+-- Index for fast user+type queries (the main listing page)
+CREATE INDEX IF NOT EXISTS idx_library_assets_user_type ON library_assets(user_id, type);
+CREATE INDEX IF NOT EXISTS idx_library_assets_expires ON library_assets(expires_at);

@@ -493,25 +493,22 @@ export const masterAssets = pgTable('master_assets', {
 });
 
 /**
- * Library — user's saved design assets, templates, and DNA strands.
- * Integrates with creations, styleDna, and dnaStrands tables.
+ * Library Assets — client-facing asset library.
+ * Each row is metadata for a file on disk at public/assets/library/.
+ * Assets auto-expire 90 days after creation.
  */
-export const libraryItems = pgTable('library_items', {
+export const libraryAssets = pgTable('library_assets', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  name: text('name').notNull(),
-  description: text('description'),
-  type: text('type').notNull(), // 'template', 'design', 'dna_strand', 'image', 'video', 'font', 'palette', 'brand_kit'
-  category: text('category'),   // e.g. 'social_media', 'logo', 'flyer', 'presentation'
-  tags: jsonb('tags'),          // string[] for search/filter
-  fileUrl: text('file_url'),
-  thumbnailUrl: text('thumbnail_url'),
-  sourceCreationId: uuid('source_creation_id'),    // Link to creations table
-  sourceDnaStrandId: uuid('source_dna_strand_id'), // Link to dnaStrands table
-  sourceStyleDnaId: uuid('source_style_dna_id'),   // Link to styleDna table
-  metadata: jsonb('metadata'),
-  isFavorite: boolean('is_favorite').default(false).notNull(),
-  isPublic: boolean('is_public').default(false).notNull(),
+  brandId: uuid('brand_id'), // FK to goals
+  type: text('type').notNull(), // 'video' | 'twin_video' | 'edit' | 'faceless' | 'design'
+  name: text('name'),          // User-provided or auto-generated default
+  filePath: text('file_path'), // Path to file on disk
+  thumbnailPath: text('thumbnail_path'),
+  mimeType: text('mime_type'), // e.g. 'video/mp4', 'image/png'
+  fileSize: integer('file_size'), // bytes
+  metadata: jsonb('metadata'),   // { duration, dimensions, ... }
+  expiresAt: timestamp('expires_at').notNull(), // createdAt + 90 days
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
