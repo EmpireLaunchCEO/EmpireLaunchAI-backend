@@ -247,37 +247,40 @@ export class LibraryService {
     return true;
   }
 
-  /** Get counts by type for category boxes. Filters by brandId. */
+  /** Get counts by type with expiration breakdown. */
   async getCounts(userId: string, brandId?: string) {
     const types = ['video', 'twin_video', 'edit', 'faceless', 'design'] as const;
-    const active: Record<string, number> = {};
-    const expiringSoon: Record<string, number> = {};
-    const expired: Record<string, number> = {};
+    const result: Record<string, { total: number; expiresIn15Days: number; expiresIn30Days: number }> = {};
 
     for (const type of types) {
       let baseConditions = [eq(libraryAssets.userId, userId), eq(libraryAssets.type, type)];
       if (brandId) baseConditions.push(eq(libraryAssets.brandId, brandId));
 
-      // Active (not yet expired)
-      const activeCond = and(...baseConditions, sql`${libraryAssets.expiresAt} > NOW()`);
-      const [activeRow] = await db.select({ value: count() }).from(libraryAssets).where(activeCond);
-      active[type] = (activeRow as any)?.value || 0;
+      // Total active (not expired)
+      const totalCond = and(...baseConditions, sql`${libraryAssets.expiresAt} > NOW()`);
+      const [totalRow] = await db.select({ value: count() }).from(libraryAssets).where(totalCond);
+      const total = (totalRow as any)?.value || 0;
 
-      // Expiring within 7 days
-      const warningCond = and(...baseConditions,
+      // Expiring within 15 days
+      const within15Cond = and(...baseConditions,
         sql`${libraryAssets.expiresAt} > NOW()`,
-        sql`${libraryAssets.expiresAt} <= NOW() + INTERVAL '7 days'`,
+        sql`${libraryAssets.expiresAt} <= NOW() + INTERVAL '15 days'`,
       );
-      const [warnRow] = await db.select({ value: count() }).from(libraryAssets).where(warningCond);
-      expiringSoon[type] = (warnRow as any)?.value || 0;
+      const [w15Row] = await db.select({ value: count() }).from(libraryAssets).where(within15Cond);
+      const expiresIn15Days = (w15Row as any)?.value || 0;
 
-      // Already expired
-      const expiredCond = and(...baseConditions, sql`${libraryAssets.expiresAt} <= NOW()`);
-      const [expRow] = await db.select({ value: count() }).from(libraryAssets).where(expiredCond);
-      expired[type] = (expRow as any)?.value || 0;
+      // Expiring between 15 and 30 days (not within 15)
+      const within30Cond = and(...baseConditions,
+        sql`${libraryAssets.expiresAt} > NOW() + INTERVAL '15 days'`,
+        sql`${libraryAssets.expiresAt} <= NOW() + INTERVAL '30 days'`,
+      );
+      const [w30Row] = await db.select({ value: count() }).from(libraryAssets).where(within30Cond);
+      const expiresIn30Days = (w30Row as any)?.value || 0;
+
+      result[type] = { total, expiresIn15Days, expiresIn30Days };
     }
 
-    return { active, expiringSoon, expired };
+    return result;
   }
 
   async getExpired(userId: string) {
