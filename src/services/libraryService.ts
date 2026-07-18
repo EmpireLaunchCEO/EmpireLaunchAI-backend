@@ -10,10 +10,10 @@ const EXPIRATION_DAYS = 90;
 
 export interface LibraryAssetInput {
   userId: string;
-  brandId?: string;
+  brandId: string;
   type: 'video' | 'twin_video' | 'edit' | 'faceless' | 'design';
   name?: string;
-  filePath: string;
+  filePath: string; // R2 key or local path
   thumbnailPath?: string;
   mimeType?: string;
   fileSize?: number;
@@ -30,7 +30,6 @@ export class LibraryService {
     }
   }
 
-  /** Generate default name: "Video Design - Jul 17, 2026" */
   private defaultName(type: string): string {
     const label = type === 'twin_video' ? 'Neural Twin' :
       type === 'faceless' ? 'Faceless Video' :
@@ -40,38 +39,91 @@ export class LibraryService {
     return `${label} - ${date}`;
   }
 
-  /** Compute file storage path */
+  /** Compute local file storage path (fallback when R2 is unavailable). */
   storagePath(userId: string, type: string, ext: string): string {
     const dir = path.join(this.baseDir, type, userId);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     return path.join(dir, `${uuidv4()}.${ext}`);
   }
 
-  /** Create a library asset record. If R2 is available, uploads local file to R2 first. */
+  /** Upload a file buffer to R2 and create a library asset record. */
+  async uploadAndCreate(
+    buffer: Buffer,
+    mimeType: string,
+    brandId: string,
+    userId: string,
+    type: LibraryAssetInput['type'],
+    name?: string,
+    metadata?: Record<string, any>,
+  ) {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + EXPIRATION_DAYS * 24 * 60 * 60 * 1000);
+
+    let filePath: string;
+    let fileSize: number;
+
+    if (r2Storage.isAvailable) {
+      // Upload to R2, store the object key
+      const ext = mimeType.split('/')[1] || 'bin';
+      const key = r2Storage.buildKey(brandId, type, ext);
+      const result = await r2Storage.uploadBuffer(buffer, key, mimeType);
+      if (!result.success) throw new Error(result.error || 'R2 upload failed');
+      filePath = key;
+      fileSize = buffer.length;
+    } else {
+      // Fallback: write to local disk
+      const ext = mimeType.split('/')[1] || 'bin';
+      const localPath = this.storagePath(userId, type, ext);
+      fs.writeFileSync(localPath, buffer);
+      filePath = localPath;
+      fileSize = buffer.length;
+    }
+
+    const [asset] = await db.insert(libraryAssets).values({
+      id: uuidv4(),
+      userId,
+      brandId: brandId || null,
+      type,
+      name: name || this.defaultName(type),
+      filePath,
+      thumbnailPath: null,
+      mimeType,
+      fileSize,
+      metadata: metadata || {},
+      expiresAt,
+      createdAt: now,
+      updatedAt: now,
+    }).returning();
+
+    return asset;
+  }
+
+  /** Create a library asset record from an existing local file. Uploads to R2 if available. */
   async create(input: LibraryAssetInput) {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + EXPIRATION_DAYS * 24 * 60 * 60 * 1000);
 
-    // If R2 is available and the file is local (not an http URL), upload it
-    let finalPath = input.filePath;
-    let finalThumbPath = input.thumbnailPath;
+    let finalKey = input.filePath;
+    let finalThumb = input.thumbnailPath;
 
     if (r2Storage.isAvailable) {
-      const ext = path.extname(input.filePath).replace('.', '') || 'mp4';
-      const r2Key = r2Storage.generateKey('library', input.userId, ext);
-      const uploaded = await r2Storage.uploadFile(input.filePath, r2Key, input.mimeType);
-      if (uploaded.success && uploaded.url !== input.filePath) {
-        finalPath = uploaded.url;
-        // Remove local file after successful upload (keep only in R2)
-        try { fs.unlinkSync(input.filePath); } catch {}
+      // If filePath is a local path (not already an R2 key), upload it
+      if (!input.filePath.startsWith('brands/') && fs.existsSync(input.filePath)) {
+        const ext = path.extname(input.filePath).replace('.', '') || 'mp4';
+        const brandId = input.brandId || 'unknown';
+        const result = await r2Storage.uploadFile(input.filePath, brandId, input.type, input.mimeType);
+        if (result.success && result.key) {
+          finalKey = result.key;
+          try { fs.unlinkSync(input.filePath); } catch {}
+        }
       }
 
-      if (input.thumbnailPath && fs.existsSync(input.thumbnailPath)) {
+      if (input.thumbnailPath && !input.thumbnailPath.startsWith('brands/') && fs.existsSync(input.thumbnailPath)) {
         const thumbExt = path.extname(input.thumbnailPath).replace('.', '') || 'png';
-        const thumbKey = r2Storage.generateKey('library/thumb', input.userId, thumbExt);
-        const thumbUploaded = await r2Storage.uploadFile(input.thumbnailPath, thumbKey, 'image/' + thumbExt);
-        if (thumbUploaded.success && thumbUploaded.url !== input.thumbnailPath) {
-          finalThumbPath = thumbUploaded.url;
+        const brandId = input.brandId || 'unknown';
+        const thumbResult = await r2Storage.uploadFile(input.thumbnailPath, brandId, 'thumb', 'image/' + thumbExt);
+        if (thumbResult.success && thumbResult.key) {
+          finalThumb = thumbResult.key;
           try { fs.unlinkSync(input.thumbnailPath); } catch {}
         }
       }
@@ -85,8 +137,8 @@ export class LibraryService {
       brandId: input.brandId || null,
       type: input.type,
       name: input.name || this.defaultName(input.type),
-      filePath: finalPath,
-      thumbnailPath: finalThumbPath || null,
+      filePath: finalKey,
+      thumbnailPath: finalThumb || null,
       mimeType: input.mimeType || null,
       fileSize: fileSize || null,
       metadata: input.metadata || {},
@@ -98,7 +150,18 @@ export class LibraryService {
     return asset;
   }
 
-  /** List assets with pagination and filters */
+  /** Resolve a stored filePath (R2 key or local path) to a presigned URL for download. */
+  private async resolveUrl(storedPath: string | null): Promise<string | null> {
+    if (!storedPath) return null;
+    if (storedPath.startsWith('http')) return storedPath;
+    if (storedPath.startsWith('brands/') && r2Storage.isAvailable) {
+      return await r2Storage.getSignedUrl(storedPath) || r2Storage.getFileUrl(storedPath);
+    }
+    // Local path — return as-is (served by Express static)
+    return storedPath;
+  }
+
+  /** List assets with pagination and filters. Returns presigned URLs. */
   async list(params: {
     userId: string;
     brandId?: string;
@@ -123,23 +186,36 @@ export class LibraryService {
     const [result] = await db.select({ value: count() }).from(libraryAssets).where(whereClause);
     const total = (result as any)?.value || 0;
 
-    const assets = await db.select()
+    const rows = await db.select()
       .from(libraryAssets)
       .where(whereClause)
       .orderBy(desc(libraryAssets.createdAt))
       .limit(limit)
       .offset(offset);
 
+    // Resolve file paths to presigned URLs
+    const assets = await Promise.all(rows.map(async (row) => ({
+      ...row,
+      filePath: await this.resolveUrl(row.filePath),
+      thumbnailPath: await this.resolveUrl(row.thumbnailPath),
+    })));
+
     return { assets, total, page, limit };
   }
 
-  /** Get single asset */
+  /** Get single asset with presigned URLs. */
   async getById(id: string) {
     const [asset] = await db.select().from(libraryAssets).where(eq(libraryAssets.id, id)).limit(1);
-    return asset || null;
+    if (!asset) return null;
+
+    return {
+      ...asset,
+      filePath: await this.resolveUrl(asset.filePath),
+      thumbnailPath: await this.resolveUrl(asset.thumbnailPath),
+    };
   }
 
-  /** Rename an asset */
+  /** Rename an asset. */
   async rename(id: string, name: string) {
     const [asset] = await db.update(libraryAssets)
       .set({ name, updatedAt: new Date() })
@@ -148,27 +224,22 @@ export class LibraryService {
     return asset || null;
   }
 
-  /** Set name (for operations page naming flow) */
   async setName(id: string, name: string) {
     return this.rename(id, name);
   }
 
-  /** Delete asset — removes file (local + R2) + DB record */
+  /** Delete asset — removes from R2 first, then local disk, then DB. */
   async delete(id: string): Promise<boolean> {
     const [asset] = await db.select().from(libraryAssets).where(eq(libraryAssets.id, id)).limit(1);
     if (!asset) return false;
 
-    // Remove from R2 if available (extract key from URL)
-    if (r2Storage.isAvailable && asset.filePath) {
-      const r2Key = this.extractKeyFromUrl(asset.filePath);
-      if (r2Key) await r2Storage.deleteObject(r2Key);
-    }
-    if (r2Storage.isAvailable && asset.thumbnailPath) {
-      const thumbKey = this.extractKeyFromUrl(asset.thumbnailPath);
-      if (thumbKey) await r2Storage.deleteObject(thumbKey);
+    // Remove from R2 first
+    if (r2Storage.isAvailable) {
+      if (asset.filePath?.startsWith('brands/')) await r2Storage.deleteFile(asset.filePath);
+      if (asset.thumbnailPath?.startsWith('brands/')) await r2Storage.deleteFile(asset.thumbnailPath);
     }
 
-    // Remove local files
+    // Clean up local fallback files
     try { if (asset.filePath && fs.existsSync(asset.filePath)) fs.unlinkSync(asset.filePath); } catch {}
     try { if (asset.thumbnailPath && fs.existsSync(asset.thumbnailPath)) fs.unlinkSync(asset.thumbnailPath); } catch {}
 
@@ -176,18 +247,7 @@ export class LibraryService {
     return true;
   }
 
-  /** Extract R2 object key from a stored URL */
-  private extractKeyFromUrl(url: string): string | null {
-    if (!url.startsWith('http')) return null;
-    try {
-      const u = new URL(url);
-      return u.pathname.replace(/^\//, '');
-    } catch {
-      return null;
-    }
-  }
-
-  /** Get counts by type for the 5 category boxes */
+  /** Get counts by type for category boxes. Filters by brandId. */
   async getCounts(userId: string, brandId?: string) {
     const types = ['video', 'twin_video', 'edit', 'faceless', 'design'] as const;
     const result: Record<string, number> = {};
@@ -202,7 +262,6 @@ export class LibraryService {
     return result;
   }
 
-  /** Get expired assets */
   async getExpired(userId: string) {
     return db.select()
       .from(libraryAssets)
@@ -213,21 +272,14 @@ export class LibraryService {
       .orderBy(desc(libraryAssets.expiresAt));
   }
 
-  /** Clean up expired assets (delete from local + R2 + DB) */
   async cleanupExpired(userId: string): Promise<number> {
     const expired = await this.getExpired(userId);
     let deleted = 0;
     for (const asset of expired) {
-      // Remove from R2
-      if (r2Storage.isAvailable && asset.filePath) {
-        const r2Key = this.extractKeyFromUrl(asset.filePath);
-        if (r2Key) await r2Storage.deleteObject(r2Key);
+      if (r2Storage.isAvailable) {
+        if (asset.filePath?.startsWith('brands/')) await r2Storage.deleteFile(asset.filePath);
+        if (asset.thumbnailPath?.startsWith('brands/')) await r2Storage.deleteFile(asset.thumbnailPath);
       }
-      if (r2Storage.isAvailable && asset.thumbnailPath) {
-        const thumbKey = this.extractKeyFromUrl(asset.thumbnailPath);
-        if (thumbKey) await r2Storage.deleteObject(thumbKey);
-      }
-      // Remove local files
       try { if (asset.filePath && fs.existsSync(asset.filePath)) fs.unlinkSync(asset.filePath); } catch {}
       try { if (asset.thumbnailPath && fs.existsSync(asset.thumbnailPath)) fs.unlinkSync(asset.thumbnailPath); } catch {}
       await db.delete(libraryAssets).where(eq(libraryAssets.id, asset.id));
