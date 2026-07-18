@@ -250,16 +250,34 @@ export class LibraryService {
   /** Get counts by type for category boxes. Filters by brandId. */
   async getCounts(userId: string, brandId?: string) {
     const types = ['video', 'twin_video', 'edit', 'faceless', 'design'] as const;
-    const result: Record<string, number> = {};
+    const active: Record<string, number> = {};
+    const expiringSoon: Record<string, number> = {};
+    const expired: Record<string, number> = {};
 
     for (const type of types) {
-      let conditions = [eq(libraryAssets.userId, userId), eq(libraryAssets.type, type), sql`${libraryAssets.expiresAt} > NOW()`];
-      if (brandId) conditions.push(eq(libraryAssets.brandId, brandId));
-      const [row] = await db.select({ value: count() }).from(libraryAssets).where(and(...conditions));
-      result[type] = (row as any)?.value || 0;
+      let baseConditions = [eq(libraryAssets.userId, userId), eq(libraryAssets.type, type)];
+      if (brandId) baseConditions.push(eq(libraryAssets.brandId, brandId));
+
+      // Active (not yet expired)
+      const activeCond = and(...baseConditions, sql`${libraryAssets.expiresAt} > NOW()`);
+      const [activeRow] = await db.select({ value: count() }).from(libraryAssets).where(activeCond);
+      active[type] = (activeRow as any)?.value || 0;
+
+      // Expiring within 7 days
+      const warningCond = and(...baseConditions,
+        sql`${libraryAssets.expiresAt} > NOW()`,
+        sql`${libraryAssets.expiresAt} <= NOW() + INTERVAL '7 days'`,
+      );
+      const [warnRow] = await db.select({ value: count() }).from(libraryAssets).where(warningCond);
+      expiringSoon[type] = (warnRow as any)?.value || 0;
+
+      // Already expired
+      const expiredCond = and(...baseConditions, sql`${libraryAssets.expiresAt} <= NOW()`);
+      const [expRow] = await db.select({ value: count() }).from(libraryAssets).where(expiredCond);
+      expired[type] = (expRow as any)?.value || 0;
     }
 
-    return result;
+    return { active, expiringSoon, expired };
   }
 
   async getExpired(userId: string) {
