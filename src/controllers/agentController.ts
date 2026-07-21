@@ -5,7 +5,7 @@ import { fraudSentinel } from '../services/fraudSentinel.js';
 import { strategyOrchestrator } from '../services/strategyOrchestrator.js';
 import { inboxAssistantService } from '../services/inboxAssistantService.js';
 import { intelService } from '../services/intelService.js';
-import { eq, and, count, inArray } from 'drizzle-orm';
+import { eq, and, count, inArray, sql } from 'drizzle-orm';
 import { userSettingsService } from '../services/userSettingsService.js';
 const { goals, users, approvals, tasks } = schema;
 
@@ -254,13 +254,24 @@ export const abandonGoal = async (req: Request, res: Response) => {
   }
 };
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const updateEmpire = async (req: Request, res: Response) => {
   try {
-    const empireId = req.params.id;
+    let empireId = req.params.id;
     const { name, niche, angle, targetCustomers, businessGoals, archetype, automationMode } = req.body;
 
     if (!empireId) {
       return res.status(400).json({ error: 'Empire ID is required' });
+    }
+
+    // If empireId is not a UUID (e.g. '1' from dashboard fallback), resolve to latest goal
+    if (!UUID_REGEX.test(empireId)) {
+      const [latestGoal] = await db.select().from(goals).orderBy(sql`created_at DESC`).limit(1);
+      if (!latestGoal) {
+        return res.status(404).json({ error: 'No empire found' });
+      }
+      empireId = latestGoal.id;
     }
 
     // Check that the goal exists
