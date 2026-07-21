@@ -25,6 +25,7 @@ export const globalRateLimiter = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   store: redisStore,
+  skip: (req) => req.method === 'OPTIONS', // CORS preflight should not consume rate limit
 });
 
 export const aiActionRateLimiter = rateLimit({
