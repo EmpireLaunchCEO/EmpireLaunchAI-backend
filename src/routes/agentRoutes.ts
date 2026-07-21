@@ -65,6 +65,7 @@ router.get('/empire/:id', mobileAuth, async (req, res) => {
 });
 // Update empire fields (name, niche, angle, targetCustomers, businessGoals, archetype)
 router.put('/empire/:id', mobileAuth, json({ type: '*/*' }), updateEmpire);
+router.post('/empire/:id', mobileAuth, json({ type: '*/*' }), updateEmpire);
 router.post('/start', mobileAuth, startAgent);
 router.post('/goal', mobileAuth, createGoal);
 router.patch('/goal/:id', mobileAuth, async (req, res) => {
