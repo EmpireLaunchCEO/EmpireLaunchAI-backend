@@ -44,11 +44,16 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
 router.get('/empire/:id', mobileAuth, async (req, res) => {
   try {
     let goalId = req.params.id;
+    let goal = null;
     
-    let [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+    // Only do UUID lookup if the ID looks like a UUID
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(goalId);
+    if (isUuid) {
+      [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+    }
     
-    // If not found and ID is '1' (default), try to get the latest goal
-    if (!goal && goalId === '1') {
+    // If not found (or not a UUID), fall back to the latest goal
+    if (!goal) {
       [goal] = await db.select().from(schema.goals).orderBy(desc(schema.goals.createdAt)).limit(1);
     }
     
