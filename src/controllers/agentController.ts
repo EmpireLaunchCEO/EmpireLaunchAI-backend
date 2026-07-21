@@ -258,7 +258,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export const updateEmpire = async (req: Request, res: Response) => {
   try {
-    let empireId = req.params.id;
+    let empireId = String(req.params.id);
     const { name, niche, angle, targetCustomers, businessGoals, archetype, automationMode } = req.body;
 
     if (!empireId) {
