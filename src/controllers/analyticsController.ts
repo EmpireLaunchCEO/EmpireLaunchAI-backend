@@ -6,7 +6,7 @@ import { eq, desc } from 'drizzle-orm';
 
 export const getPerformanceMetrics = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const { start, end } = req.query;
 
     const startDate = start ? new Date(start as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -22,7 +22,7 @@ export const getPerformanceMetrics = async (req: Request, res: Response) => {
 
 export const getGrowthForecast = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const forecast = await roiAnalyticsService.getGrowthForecast(userId);
     res.json({ forecast });
   } catch (error: any) {
@@ -33,7 +33,7 @@ export const getGrowthForecast = async (req: Request, res: Response) => {
 
 export const getOpportunityCards = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const cards = await roiAnalyticsService.generateOpportunityCards(userId);
     res.json({ cards });
   } catch (error: any) {
@@ -44,7 +44,7 @@ export const getOpportunityCards = async (req: Request, res: Response) => {
 
 export const syncAnalyticsData = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     await roiAnalyticsService.syncToBigQuery(userId);
     await roiAnalyticsService.syncPlatformEngagement(userId);
     res.json({ status: 'success', message: 'Data synced to BigQuery and platforms refreshed' });
@@ -56,7 +56,7 @@ export const syncAnalyticsData = async (req: Request, res: Response) => {
 
 export const getEmpireHealth = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const health = await roiAnalyticsService.getEmpireHealth(userId);
     
     // Transform to frontend format
@@ -89,7 +89,7 @@ export const getEmpireHealth = async (req: Request, res: Response) => {
 
 export const getRevenueTransactions = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const transactions = await db.select()
       .from(schema.revenueTransactions)
       .where(eq(schema.revenueTransactions.userId, userId))
@@ -105,7 +105,7 @@ export const getRevenueTransactions = async (req: Request, res: Response) => {
 
 export const getStrategyQueue = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
 
     // 1. Fetch existing suggestions
     let suggestions = await db.select()
