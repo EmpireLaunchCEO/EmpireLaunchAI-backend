@@ -15,7 +15,7 @@ export const getPublicKey = (req: Request, res: Response) => {
 export const subscribe = async (req: Request, res: Response) => {
   try {
     const { subscription, platform, type } = req.body;
-    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000'; 
+    const userId = (req as any).userId;
 
     if (!subscription || (type === 'NATIVE' && !subscription.token) || (type !== 'NATIVE' && !subscription.endpoint)) {
       return res.status(400).json({ error: 'Invalid subscription object' });
@@ -34,7 +34,7 @@ export const subscribe = async (req: Request, res: Response) => {
  */
 export const testPush = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const result = await notificationService.sendPushNotification(userId, {
       title: 'EmpireLaunch AI Test',
       body: 'Your mobile push infrastructure is ready!',
