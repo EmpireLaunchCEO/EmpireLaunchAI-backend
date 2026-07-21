@@ -19,18 +19,31 @@ function createRedisStore(): any | undefined {
 
 const redisStore = createRedisStore();
 
+// Per-user key generator: uses auth token for authenticated users, IP for anonymous
+const userAwareKeyGenerator = (req: any): string => {
+  const authHeader = req.headers?.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    return `user:${authHeader.slice(7)}`; // Per-user bucket
+  }
+  return req.ip ?? 'unknown'; // Per-IP bucket for unauthenticated
+};
+
 export const globalRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 100, // Limit each IP to 100 requests per window
+  limit: 1000, // Per-user for authenticated, per-IP for anonymous
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   store: redisStore,
+  keyGenerator: userAwareKeyGenerator,
   skip: (req) => req.method === 'OPTIONS', // CORS preflight should not consume rate limit
 });
 
 export const aiActionRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  limit: 20, // Limit each IP to 20 AI actions per hour
-  message: 'Too many AI requests from this IP, please try again after an hour',
+  limit: 100, // Per-user for authenticated, per-IP for anonymous
+  message: 'Too many AI requests, please try again later',
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
   store: redisStore,
+  keyGenerator: userAwareKeyGenerator,
 });
