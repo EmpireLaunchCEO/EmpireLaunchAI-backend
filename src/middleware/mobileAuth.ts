@@ -37,11 +37,11 @@ export const mobileAuth = async (req: Request, res: Response, next: NextFunction
       console.error('[mobileAuth] Database error:', err);
     }
 
-    // Token was provided but invalid/expired
-    return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+    // Token was provided but invalid/expired — fall through to auto-create a session
+    // (This handles the case where the frontend generated a client-side UUID token)
   }
 
-  // No token provided — auto-create a session for the beta user
+  // Auto-create a session for the beta user
   const finalUserId = userIdFromHeader || BETA_USER_ID;
   const newToken = randomUUID();
   const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
