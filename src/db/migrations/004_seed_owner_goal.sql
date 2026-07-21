@@ -9,5 +9,5 @@ WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = '00000000-0000-0000-0000-000000
 
 -- 2. Create the owner's goal/empire if no goals exist yet
 INSERT INTO goals (user_id, title, description, status, archetype, approval_required, auto_post, created_at, updated_at)
-SELECT '00000000-0000-0000-0000-000000000000', 'Staci Empire', 'Empire Niche: Digital Products.', 'active', 'SELLER', false, false, NOW(), NOW()
+SELECT '00000000-0000-0000-0000-000000000000', 'EmpireLaunch AI', 'Empire Niche: Content Creation Platform that is AI powered.', 'active', 'SELLER', false, false, NOW(), NOW()
 WHERE NOT EXISTS (SELECT 1 FROM goals);
