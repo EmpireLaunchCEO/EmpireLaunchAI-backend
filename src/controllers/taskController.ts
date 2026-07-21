@@ -5,7 +5,7 @@ import { eq, and, sql } from 'drizzle-orm';
 
 export const getTasks = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     
     // Join tasks with goals
     const userTasks = await db.select({
@@ -45,7 +45,7 @@ export const updateTask = async (req: Request, res: Response) => {
 
 export const getGoals = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     
     const userGoals = await db.select().from(goals)
       .where(eq(goals.userId, userId));

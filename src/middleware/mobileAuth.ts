@@ -12,7 +12,6 @@ export const mobileAuth = async (req: Request, res: Response, next: NextFunction
   const userIdFromHeader = req.headers['x-user-id'] as string;
   const { users } = schema;
 
-  const BETA_USER_ID = '00000000-0000-0000-0000-000000000000';
   const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
   // If a token is provided, look it up in the database
@@ -41,8 +40,8 @@ export const mobileAuth = async (req: Request, res: Response, next: NextFunction
     // (This handles the case where the frontend generated a client-side UUID token)
   }
 
-  // Auto-create a session for the beta user
-  const finalUserId = userIdFromHeader || BETA_USER_ID;
+  // Auto-create a session — use provided userId or generate a new one
+  const finalUserId = userIdFromHeader || randomUUID();
   const newToken = randomUUID();
   const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
@@ -60,9 +59,10 @@ export const mobileAuth = async (req: Request, res: Response, next: NextFunction
         })
         .where(eq(users.id, finalUserId));
     } else {
-      // Create user with session
+      // Create user with session — generate placeholder email for auto-provisioned users
       await db.insert(users).values({
         id: finalUserId,
+        email: `${finalUserId}@user.empirelaunch.ai`,
         mobileSessionToken: newToken,
         mobileSessionExpiresAt: expiresAt,
         createdAt: new Date(),

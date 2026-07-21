@@ -106,7 +106,7 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
       .where(eq(schema.goals.id, goalId));
 
     // 2. Persist to Global User Settings for "Memory"
-    const userId = (req as any).userId || '00000000-0000-0000-0000-000000000000';
+    const userId = (req as any).userId;
     const settingsUpdate: any = { 
       updatedAt: new Date(),
       userId: userId 

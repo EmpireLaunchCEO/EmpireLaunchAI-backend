@@ -207,11 +207,6 @@ export class UserSettingsService {
     const settings = await this.getSettings(userId);
     const hydrated = { ...this.getDefaults(), ...settings };
     
-    // Master Bypass: Force isPaid for the owner/admin user ID
-    if (userId === '00000000-0000-0000-0000-000000000000') {
-      hydrated.isPaid = true;
-    }
-    
     return hydrated;
   }
 
