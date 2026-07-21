@@ -43,7 +43,7 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
 // Alias for frontend compatibility
 router.get('/empire/:id', mobileAuth, async (req, res) => {
   try {
-    let goalId = req.params.id;
+    let goalId = String(req.params.id);
     let goal = null;
     
     // Only do UUID lookup if the ID looks like a UUID
