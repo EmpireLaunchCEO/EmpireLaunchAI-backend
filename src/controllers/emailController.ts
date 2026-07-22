@@ -80,7 +80,8 @@ export const sendManualThankYou = async (req: Request, res: Response) => {
 
 export const generateDraft = async (req: Request, res: Response) => {
   try {
-    const { userId, customerInquiry, businessNiche, userGoal, productName, tone } = req.body;
+    const userId = (req as any).userId;
+    const { customerInquiry, businessNiche, userGoal, productName, tone } = req.body;
 
     if (!userId || !customerInquiry || !businessNiche || !userGoal) {
       return res.status(400).json({ error: 'userId, customerInquiry, businessNiche, and userGoal are required' });
