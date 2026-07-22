@@ -11,7 +11,8 @@ const { goals, users, approvals, tasks } = schema;
 
 export const initializeAgent = async (req: Request, res: Response) => {
   try {
-    const { userId, name, niche, angle, archetype, automationMode, targetCustomers, businessGoals } = req.body;
+    const userId = (req as any).userId;
+    const { name, niche, angle, archetype, automationMode, targetCustomers, businessGoals } = req.body;
     
     if (!userId || !name || !niche) {
       return res.status(400).json({ error: 'Missing required fields: userId, name, niche' });
@@ -116,7 +117,8 @@ export const initializeAgent = async (req: Request, res: Response) => {
 
 export const startAgent = async (req: Request, res: Response) => {
   try {
-    const { goal, userId } = req.body;
+    const userId = (req as any).userId || 'default-user';
+    const { goal } = req.body;
     
     if (!goal) {
       return res.status(400).json({ error: 'Goal is required' });
@@ -130,7 +132,7 @@ export const startAgent = async (req: Request, res: Response) => {
 
     const job = await aiTaskQueue.add('start-agent-job', {
       goal,
-      userId: userId || 'default-user',
+      userId,
       context: {
         goal
       }
@@ -149,7 +151,8 @@ export const startAgent = async (req: Request, res: Response) => {
 
 export const createGoal = async (req: Request, res: Response) => {
   try {
-    const { userId, title, description, approvalRequired, autoPost } = req.body;
+    const userId = (req as any).userId;
+    const { title, description, approvalRequired, autoPost } = req.body;
     
     if (!userId || !title) {
       return res.status(400).json({ error: 'UserId and title are required' });
@@ -226,7 +229,8 @@ export const createGoal = async (req: Request, res: Response) => {
 
 export const abandonGoal = async (req: Request, res: Response) => {
   try {
-    const { userId, goalId } = req.body;
+    const userId = (req as any).userId;
+    const { goalId } = req.body;
     
     if (!userId || !goalId) {
       return res.status(400).json({ error: 'UserId and goalId are required' });
@@ -258,6 +262,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export const updateEmpire = async (req: Request, res: Response) => {
   try {
+    const userId = (req as any).userId;
     let empireId = String(req.params.id);
     const { name, niche, angle, targetCustomers, businessGoals, archetype, automationMode } = req.body;
 
@@ -267,17 +272,22 @@ export const updateEmpire = async (req: Request, res: Response) => {
 
     // If empireId is not a UUID (e.g. '1' from dashboard fallback), resolve to latest goal
     if (!UUID_REGEX.test(empireId)) {
-      const [latestGoal] = await db.select().from(goals).orderBy(sql`created_at DESC`).limit(1);
+      const [latestGoal] = await db.select().from(goals)
+        .where(eq(goals.userId, userId))
+        .orderBy(sql`created_at DESC`).limit(1);
       if (!latestGoal) {
         return res.status(404).json({ error: 'No empire found' });
       }
       empireId = latestGoal.id;
     }
 
-    // Check that the goal exists
+    // Check that the goal exists AND belongs to the authenticated user
     const [existingGoal] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
     if (!existingGoal) {
       return res.status(404).json({ error: 'Empire not found' });
+    }
+    if (existingGoal.userId !== userId) {
+      return res.status(403).json({ error: 'You do not own this empire' });
     }
 
     // Build update data dynamically — only set fields that were provided
@@ -329,7 +339,6 @@ export const updateEmpire = async (req: Request, res: Response) => {
 
     // Also sync niche/angle to user settings
     if (niche !== undefined || angle !== undefined) {
-      const userId = existingGoal.userId;
       await userSettingsService.saveSettings(userId, {
         businessNiche: (niche ?? existingGoal.description?.match(/Empire Niche:\s*(.*?)(?:\.|$)/)?.[1]) || undefined,
         businessAngle: (angle ?? existingGoal.description?.match(/Angle:\s*(.*?)(?:\.|$)/)?.[1]) || undefined,
@@ -349,7 +358,7 @@ export const updateEmpire = async (req: Request, res: Response) => {
 
 export const purchaseSlot = async (req: Request, res: Response) => {
   try {
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -443,7 +452,8 @@ export const approveRoadmap = async (req: Request, res: Response) => {
 
 export const generateThankYou = async (req: Request, res: Response) => {
   try {
-    const { userId, customerName, itemName, platform } = req.body;
+    const userId = (req as any).userId;
+    const { customerName, itemName, platform } = req.body;
     if (!userId || !customerName || !itemName || !platform) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
