@@ -4,7 +4,8 @@ import { reviewService } from '../services/reviewService.js';
 export class ReviewController {
   async submitReview(req: Request, res: Response) {
     try {
-      const { userId, rating, comment } = req.body;
+      const userId = (req as any).userId;
+      const { rating, comment } = req.body;
       if (!userId || !rating) {
         return res.status(400).json({ error: 'userId and rating are required' });
       }
@@ -30,7 +31,8 @@ export class ReviewController {
 
   async approveReview(req: Request, res: Response) {
     try {
-      const { userId, reviewId } = req.body;
+      const userId = (req as any).userId;
+      const { reviewId } = req.body;
       if (!userId || !reviewId) {
         return res.status(400).json({ error: 'userId and reviewId are required' });
       }
