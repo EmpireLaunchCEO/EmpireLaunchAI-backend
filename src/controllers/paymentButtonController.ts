@@ -3,7 +3,8 @@ import { paymentButtonService } from '../services/paymentButtonService.js';
 
 export const createButton = async (req: Request, res: Response) => {
   try {
-    const { userId, productId, platform, buttonData, buttonType } = req.body;
+    const userId = (req as any).userId;
+    const { productId, platform, buttonData, buttonType } = req.body;
     const buttonId = await paymentButtonService.createButton(userId, productId, platform, buttonData, buttonType);
     res.status(201).json({ status: 'success', buttonId });
   } catch (error: any) {

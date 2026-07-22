@@ -105,7 +105,8 @@ export const loginUser = async (req: Request, res: Response) => {
 };
 
 export const acceptTerms = async (req: Request, res: Response) => {
-  const { userId, version } = req.body;
+  const userId = (req as any).userId;
+  const { version } = req.body;
   if (!userId || !version) {
     return res.status(400).json({ error: 'UserId and version are required' });
   }
@@ -222,7 +223,7 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
 };
 
 export const handlePlatformCallback = async (req: Request, res: Response) => {
-  const userId = (req as any).userId || req.headers['x-user-id'] || req.body.userId || req.query.userId;
+  const userId = (req as any).userId || req.headers['x-user-id'] || req.query.userId;
   const platform = req.params.platform as string;
   const { code, state, sessionId } = { ...req.query, ...req.body } as any;
   
@@ -269,7 +270,8 @@ export const tiktokCallback = async (req: Request, res: Response) => {
 };
 
 export const redeemKey = async (req: Request, res: Response) => {
-  const { userId, key } = req.body;
+  const userId = (req as any).userId;
+  const { key } = req.body;
   if (!key) return res.status(400).json({ error: 'Missing key' });
   
   try {

@@ -6,7 +6,7 @@ import { eq, and } from 'drizzle-orm';
 
 export class NeuralDiscoveryController {
   async scan(req: Request, res: Response) {
-    const userId = req.body.userId as string;
+    const userId = (req as any).userId;
     const accessToken = req.body.accessToken as string;
     if (!userId || !accessToken) {
       return res.status(400).json({ error: 'Missing userId or accessToken' });
@@ -21,7 +21,7 @@ export class NeuralDiscoveryController {
   }
 
   async imapScan(req: Request, res: Response) {
-    const userId = req.body.userId as string;
+    const userId = (req as any).userId;
     const config = req.body.config;
     if (!userId || !config) {
       return res.status(400).json({ error: 'Missing userId or imap config' });
@@ -54,7 +54,7 @@ export class NeuralDiscoveryController {
   }
 
   async approve(req: Request, res: Response) {
-    const userId = req.body.userId as string;
+    const userId = (req as any).userId;
     const discoveryId = req.body.discoveryId as string;
     try {
       await neuralDiscoveryService.approveCredential(userId, discoveryId);
@@ -65,7 +65,7 @@ export class NeuralDiscoveryController {
   }
 
   async reject(req: Request, res: Response) {
-    const userId = req.body.userId as string;
+    const userId = (req as any).userId;
     const discoveryId = req.body.discoveryId as string;
     try {
       await neuralDiscoveryService.rejectCredential(userId, discoveryId);

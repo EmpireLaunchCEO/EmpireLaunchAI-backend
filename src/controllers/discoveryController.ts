@@ -6,7 +6,7 @@ import { eq, and } from 'drizzle-orm';
 
 export const runDiscovery = async (req: Request, res: Response) => {
   try {
-    const { userId } = req.body;
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
     }

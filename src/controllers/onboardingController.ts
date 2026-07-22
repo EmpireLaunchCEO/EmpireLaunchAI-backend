@@ -8,7 +8,8 @@ import { eq } from 'drizzle-orm';
 
 export const startOnboarding = async (req: Request, res: Response) => {
   try {
-    const { userId, platform, credentials } = req.body;
+    const userId = (req as any).userId;
+    const { platform, credentials } = req.body;
     if (!userId || !platform) {
       return res.status(400).json({ error: 'userId and platform are required' });
     }
@@ -69,7 +70,7 @@ export const getOnboardingStatus = async (req: Request, res: Response) => {
 
 export const startTikTokQRLogin = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.body.userId;
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
     }
@@ -94,7 +95,7 @@ export const startTikTokQRLogin = async (req: Request, res: Response) => {
 
 export const submitTikTokCredentials = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.body.userId;
+    const userId = (req as any).userId;
     const { sessionId, email, password } = req.body;
 
     if (!userId) return res.status(400).json({ error: 'userId is required' });
