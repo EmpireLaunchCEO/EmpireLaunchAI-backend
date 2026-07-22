@@ -462,6 +462,21 @@ class UniversalGatewayService {
           extraTokenParams: { grant_type: 'authorization_code' },
           tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },
         },
+
+        // ─── STRIPE ────────────────────────────────────────────────
+        {
+          platform: 'stripe',
+          authUrl: 'https://connect.stripe.com/oauth/authorize',
+          tokenUrl: 'https://connect.stripe.com/oauth/token',
+          scopes: ['read_write'],
+          usePKCE: false,
+          clientId: () => process.env.STRIPE_CLIENT_ID || '',
+          clientSecret: () => process.env.STRIPE_SECRET_KEY || '',
+          redirectUri: () => process.env.STRIPE_REDIRECT_URI || '',
+          extraAuthParams: { response_type: 'code' },
+          extraTokenParams: { grant_type: 'authorization_code' },
+          tokenHeaders: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
         ];
   }
 
