@@ -15,6 +15,7 @@ import {
   updateEmpire,
   getIntelTrends
 } from '../controllers/agentController.js';
+import { decryptGoalFields, encryptGoalFields } from '../controllers/agentController.js';
 import { userSettingsService } from '../services/userSettingsService.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
@@ -25,7 +26,7 @@ router.get('/goal/latest', mobileAuth, async (req, res) => {
   try {
     const [goal] = await db.select().from(schema.goals).orderBy(desc(schema.goals.createdAt)).limit(1);
     if (!goal) return res.status(404).json({ error: 'No goals found' });
-    res.json(goal);
+    res.json(decryptGoalFields(goal));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -34,7 +35,7 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
   try {
     const [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, req.params.id)).limit(1);
     if (!goal) return res.status(404).json({ error: 'Goal not found' });
-    res.json(goal);
+    res.json(decryptGoalFields(goal));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -58,7 +59,7 @@ router.get('/empire/:id', mobileAuth, async (req, res) => {
     }
     
     if (!goal) return res.status(404).json({ error: 'Empire not found' });
-    res.json(goal);
+    res.json(decryptGoalFields(goal));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -79,7 +80,8 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
     
     // If niche/angle are provided, we should update the description as well
     if (niche || angle) {
-      const [existingGoal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+      const [rawGoal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
+      const existingGoal = decryptGoalFields(rawGoal);
       let newDesc = description || existingGoal?.description || '';
       
       if (niche) {
@@ -102,7 +104,7 @@ router.patch('/goal/:id', mobileAuth, async (req, res) => {
     }
 
     await db.update(schema.goals)
-      .set(updateData)
+      .set(encryptGoalFields(updateData))
       .where(eq(schema.goals.id, goalId));
 
     // 2. Persist to Global User Settings for "Memory"

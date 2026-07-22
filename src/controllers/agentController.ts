@@ -7,7 +7,36 @@ import { inboxAssistantService } from '../services/inboxAssistantService.js';
 import { intelService } from '../services/intelService.js';
 import { eq, and, count, inArray, sql } from 'drizzle-orm';
 import { userSettingsService } from '../services/userSettingsService.js';
+import { encrypt, decrypt } from '../utils/encryption.js';
 const { goals, users, approvals, tasks } = schema;
+
+// ─── Encryption helpers ─────────────────────────────────────────────────
+const SENSITIVE_FIELDS = ['title', 'description', 'targetCustomers', 'businessGoals'] as const;
+
+export function encryptGoalFields(data: Record<string, any>): Record<string, any> {
+  const result = { ...data };
+  for (const field of SENSITIVE_FIELDS) {
+    if (result[field] && typeof result[field] === 'string') {
+      result[field] = encrypt(result[field]);
+    }
+  }
+  return result;
+}
+
+export function decryptGoalFields(goal: Record<string, any> | null): typeof goal {
+  if (!goal) return goal;
+  const result = { ...goal };
+  for (const field of SENSITIVE_FIELDS) {
+    if (result[field] && typeof result[field] === 'string' && result[field].includes(':')) {
+      try {
+        result[field] = decrypt(result[field]);
+      } catch {
+        // Leave as-is if decryption fails (legacy unencrypted data)
+      }
+    }
+  }
+  return result;
+}
 
 export const initializeAgent = async (req: Request, res: Response) => {
   try {
@@ -49,14 +78,15 @@ export const initializeAgent = async (req: Request, res: Response) => {
     if (existingGoal) {
       // UPDATE existing goal with new details to ensure sync
       const description = `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`;
+      const updateFields = encryptGoalFields({
+        description,
+        archetype: archetype || existingGoal.archetype,
+        targetCustomers: targetCustomers ?? existingGoal.targetCustomers,
+        businessGoals: businessGoals ?? existingGoal.businessGoals,
+        updatedAt: new Date()
+      });
       await db.update(goals)
-        .set({ 
-          description,
-          archetype: archetype || existingGoal.archetype,
-          targetCustomers: targetCustomers ?? existingGoal.targetCustomers,
-          businessGoals: businessGoals ?? existingGoal.businessGoals,
-          updatedAt: new Date() 
-        })
+        .set(updateFields)
         .where(eq(goals.id, existingGoal.id));
 
       await userSettingsService.saveSettings(userId, {
@@ -66,14 +96,14 @@ export const initializeAgent = async (req: Request, res: Response) => {
 
       return res.json({
         status: 'success',
-        empire: { ...existingGoal, description },
+        empire: { ...decryptGoalFields(existingGoal), description },
         message: 'Empire details updated and synchronized'
       });
     }
 
     // 1. Create the primary goal (The Empire) with PENDING status immediately
     // This allows the frontend to have an ID to track progress
-    const [newGoal] = await db.insert(goals).values({
+    const goalValues = encryptGoalFields({
       userId,
       title: name,
       description: `Empire Niche: ${niche}. Angle: ${angle}. Mode: ${automationMode}`,
@@ -85,7 +115,8 @@ export const initializeAgent = async (req: Request, res: Response) => {
       autoPost: automationMode === 'full_autopilot',
       createdAt: new Date(),
       updatedAt: new Date()
-    }).returning();
+    });
+    const [newGoal] = await db.insert(goals).values(goalValues).returning();
 
     // 1.5 Sync to User Settings for global memory
     await userSettingsService.saveSettings(userId, {
@@ -106,7 +137,7 @@ export const initializeAgent = async (req: Request, res: Response) => {
     res.json({
       status: 'success',
       jobId: job.id,
-      empire: newGoal,
+      empire: decryptGoalFields(newGoal),
       message: 'Empire initialization has been queued'
     });
   } catch (error: any) {
@@ -193,7 +224,7 @@ export const createGoal = async (req: Request, res: Response) => {
     }
 
     // @ts-ignore
-    const [newGoal] = await db.insert(goals).values({
+    const goalValues = encryptGoalFields({
       userId,
       title,
       description,
@@ -202,7 +233,8 @@ export const createGoal = async (req: Request, res: Response) => {
       status: 'active',
       createdAt: new Date(),
       updatedAt: new Date()
-    }).returning();
+    });
+    const [newGoal] = await db.insert(goals).values(goalValues).returning();
 
     // Trigger initial job for the goal
     await aiTaskQueue.add('goal-initial-job', {
@@ -218,7 +250,7 @@ export const createGoal = async (req: Request, res: Response) => {
 
     res.json({
       status: 'success',
-      goal: newGoal,
+      goal: decryptGoalFields(newGoal),
       message: 'Goal created and initial processing queued',
     });
   } catch (error) {
@@ -272,9 +304,10 @@ export const updateEmpire = async (req: Request, res: Response) => {
 
     // If empireId is not a UUID (e.g. '1' from dashboard fallback), resolve to latest goal
     if (!UUID_REGEX.test(empireId)) {
-      const [latestGoal] = await db.select().from(goals)
+      const [rawGoal] = await db.select().from(goals)
         .where(eq(goals.userId, userId))
         .orderBy(sql`created_at DESC`).limit(1);
+      const latestGoal = decryptGoalFields(rawGoal);
       if (!latestGoal) {
         return res.status(404).json({ error: 'No empire found' });
       }
@@ -282,7 +315,8 @@ export const updateEmpire = async (req: Request, res: Response) => {
     }
 
     // Check that the goal exists AND belongs to the authenticated user
-    const [existingGoal] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
+    const [rawGoal] = await db.select().from(goals).where(eq(goals.id, empireId)).limit(1);
+    const existingGoal = decryptGoalFields(rawGoal);
     if (!existingGoal) {
       return res.status(404).json({ error: 'Empire not found' });
     }
@@ -331,9 +365,10 @@ export const updateEmpire = async (req: Request, res: Response) => {
       updateData.description = newDesc;
     }
 
-    // Execute the update
+    // Execute the update with encryption
+    const encryptedUpdate = encryptGoalFields(updateData);
     const [updatedGoal] = await db.update(goals)
-      .set(updateData)
+      .set(encryptedUpdate)
       .where(eq(goals.id, empireId))
       .returning();
 
@@ -347,7 +382,7 @@ export const updateEmpire = async (req: Request, res: Response) => {
 
     res.json({
       status: 'success',
-      empire: updatedGoal || { ...existingGoal, ...updateData },
+      empire: decryptGoalFields(updatedGoal || { ...existingGoal, ...updateData }),
       message: 'Empire updated successfully',
     });
   } catch (error: any) {
