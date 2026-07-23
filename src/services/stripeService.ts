@@ -237,6 +237,26 @@ export class StripeService {
     });
     return session;
   }
+
+  async getRecentCheckoutSessions(limit = 10) {
+    const sessions = await getStripe().checkout.sessions.list({
+      limit,
+      expand: ['data.customer_details'],
+    });
+    return sessions.data;
+  }
+
+  async verifyUserPayment(userId: string): Promise<{ paid: boolean; paidAt: string | null; amount: number | null }> {
+    const sessions = await getStripe().checkout.sessions.list({
+      limit: 50,
+      status: 'complete',
+    });
+    const match = sessions.data.find(s => s.client_reference_id === userId);
+    if (match) {
+      return { paid: true, paidAt: new Date(match.created * 1000).toISOString(), amount: match.amount_total || 0 };
+    }
+    return { paid: false, paidAt: null, amount: null };
+  }
 }
 
 export const stripeService = new StripeService();

@@ -307,6 +307,16 @@ export const styleDna = pgTable('style_dna', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const subscriptions = pgTable('subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  type: text('type').default('subscription').notNull(), // 'subscription' | 'expansion'
+  stripeSessionId: text('stripe_session_id'),
+  amount: integer('amount'),
+  paidAt: timestamp('paid_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const empireHealthLogs = pgTable('empire_health_logs', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
