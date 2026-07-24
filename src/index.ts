@@ -65,18 +65,11 @@ const app = express();
 const httpServer = createServer(app);
 const port = parseInt(process.env.PORT || '3000', 10);
 
-// Auto-run migrations in production if flagged
-if (process.env.RUN_MIGRATIONS === 'true' && !process.env.VERCEL) {
-  console.log('[Database] Running migrations...');
+// Auto-run drizzle-kit migrations on PostgreSQL (Railway) — always on non-Vercel deploys
+if (!process.env.VERCEL && process.env.DATABASE_URL && !process.env.DATABASE_URL.startsWith('libsql:') && !process.env.DATABASE_URL.startsWith('file:')) {
+  console.log('[Database] Running drizzle-pg migrations...');
   try {
-    const isSqlite = process.env.DATABASE_URL?.startsWith('file:') || process.env.DATABASE_URL?.startsWith('libsql:');
-    if (isSqlite) {
-      console.log(`[Database] Using LibSQL migration folder: ./drizzle`);
-      await migrateLibsql(db, { migrationsFolder: './drizzle' });
-    } else {
-      console.log(`[Database] Using Postgres migration folder: ./drizzle-pg`);
-      await migratePg(db, { migrationsFolder: './drizzle-pg' });
-    }
+    await migratePg(db, { migrationsFolder: './drizzle-pg' });
     console.log('[Database] Migrations complete.');
   } catch (err) {
     console.error('[Database] Migration failed:', err);
