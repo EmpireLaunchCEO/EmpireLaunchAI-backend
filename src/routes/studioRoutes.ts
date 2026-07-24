@@ -5,7 +5,7 @@ import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { eq, and, gte, count } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
@@ -126,6 +126,22 @@ router.post('/process', async (req: Request, res: Response) => {
       }
 
       case 'video_creation': {
+        // Quota check — 7 videos per 168-hour rolling window
+        const weekAgo = new Date(Date.now() - 168 * 60 * 60 * 1000);
+        const [{ count: videoCount }] = await db.select({ count: count() })
+          .from(schema.creations)
+          .where(and(
+            eq(schema.creations.userId, uid),
+            eq(schema.creations.type, 'video_creation'),
+            gte(schema.creations.createdAt, weekAgo)
+          ));
+        if (Number(videoCount) >= 7) {
+          return res.status(429).json({
+            status: 'error',
+            error: 'Weekly video limit reached. You have used 7/7 videos this week. Your quota resets in less than 7 days.',
+          } as StudioResponse);
+        }
+
         // Generate source images if needed
         let sourceImages: string[] = [];
         if (decision.requiresSourceImages) {
