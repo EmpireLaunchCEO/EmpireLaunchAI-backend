@@ -4,7 +4,7 @@ import { paymentButtonService } from '../services/paymentButtonService.js';
 import { protectedButtonService } from '../services/protectedButtonService.js';
 import { vaultService } from '../services/vaultService.js';
 import { db, schema } from '../db/index.js';
-const { users, products, paymentLinks } = schema;
+const { users, products, paymentLinks, subscriptions } = schema;
 import { eq, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -244,6 +244,15 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
         } else {
            await db.update(users).set({ tier: 'STANDARD_USER', updatedAt: new Date() }).where(eq(users.id, userId));
         }
+        // Record the subscription for dashboard verification
+        await db.insert(subscriptions).values({
+          userId,
+          type: session.metadata?.type || 'subscription',
+          stripeSessionId: sessionId as string,
+          amount: session.amount_total ?? 5000,
+          paidAt: new Date(),
+          createdAt: new Date(),
+        });
       }
       return res.json({ status: 'paid' });
     }
