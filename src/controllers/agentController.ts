@@ -183,7 +183,8 @@ export const startAgent = async (req: Request, res: Response) => {
 export const createGoal = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
-    const { title, description, approvalRequired, autoPost } = req.body;
+    const { title, description, approvalRequired, autoPost, slotIndex: bodySlotIndex } = req.body;
+    const slotIndex = typeof bodySlotIndex === 'number' ? bodySlotIndex : 0;
     
     if (!userId || !title) {
       return res.status(400).json({ error: 'UserId and title are required' });
@@ -230,6 +231,7 @@ export const createGoal = async (req: Request, res: Response) => {
       description,
       approvalRequired: approvalRequired ?? true,
       autoPost: autoPost ?? false,
+      slotIndex,
       status: 'active',
       createdAt: new Date(),
       updatedAt: new Date()
@@ -302,10 +304,12 @@ export const updateEmpire = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Empire ID is required' });
     }
 
-    // If empireId is not a UUID (e.g. '1' from dashboard fallback), resolve to latest goal
+    // If empireId is not a UUID, resolve via slot-based lookup
+    // '1','2','3' map to slotIndex 0,1,2; for other non-UUID values default to slot 0
     if (!UUID_REGEX.test(empireId)) {
+      const slotIndex = /^[123]$/.test(empireId) ? parseInt(empireId, 10) - 1 : 0;
       const [rawGoal] = await db.select().from(goals)
-        .where(eq(goals.userId, userId))
+        .where(and(eq(goals.userId, userId), eq(goals.slotIndex, slotIndex)))
         .orderBy(sql`created_at DESC`).limit(1);
       const latestGoal = decryptGoalFields(rawGoal);
       if (!latestGoal) {

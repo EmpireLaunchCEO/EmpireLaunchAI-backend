@@ -1,6 +1,6 @@
 import { Router, json } from 'express';
 import { db, schema } from '../db/index.js';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, and } from 'drizzle-orm';
 import { 
   startAgent, 
   createGoal, 
@@ -24,7 +24,14 @@ const router = Router();
 router.post('/initialize', mobileAuth, initializeAgent);
 router.get('/goal/latest', mobileAuth, async (req, res) => {
   try {
-    const [goal] = await db.select().from(schema.goals).orderBy(desc(schema.goals.createdAt)).limit(1);
+    const slot = req.query.slot !== undefined ? parseInt(req.query.slot as string, 10) : 0;
+    const userId = (req as any).userId;
+    const [goal] = await db.select().from(schema.goals)
+      .where(and(
+        eq(schema.goals.userId, userId),
+        eq(schema.goals.slotIndex, slot)
+      ))
+      .orderBy(desc(schema.goals.createdAt)).limit(1);
     if (!goal) return res.status(404).json({ error: 'No goals found' });
     res.json(decryptGoalFields(goal));
   } catch (error: any) {
@@ -44,6 +51,7 @@ router.get('/goal/:id', mobileAuth, async (req, res) => {
 // Alias for frontend compatibility
 router.get('/empire/:id', mobileAuth, async (req, res) => {
   try {
+    const userId = (req as any).userId;
     let goalId = String(req.params.id);
     let goal = null;
     
@@ -53,9 +61,26 @@ router.get('/empire/:id', mobileAuth, async (req, res) => {
       [goal] = await db.select().from(schema.goals).where(eq(schema.goals.id, goalId)).limit(1);
     }
     
-    // If not found (or not a UUID), fall back to the latest goal
+    // If not found (or not a UUID), fall back to slot-based lookup
+    // '1','2','3' map to slotIndex 0,1,2
+    if (!goal && /^[123]$/.test(goalId)) {
+      const slotIndex = parseInt(goalId, 10) - 1;
+      [goal] = await db.select().from(schema.goals)
+        .where(and(
+          eq(schema.goals.userId, userId),
+          eq(schema.goals.slotIndex, slotIndex)
+        ))
+        .orderBy(desc(schema.goals.createdAt)).limit(1);
+    }
+    
+    // Final fallback — latest goal for slot 0
     if (!goal) {
-      [goal] = await db.select().from(schema.goals).orderBy(desc(schema.goals.createdAt)).limit(1);
+      [goal] = await db.select().from(schema.goals)
+        .where(and(
+          eq(schema.goals.userId, userId),
+          eq(schema.goals.slotIndex, 0)
+        ))
+        .orderBy(desc(schema.goals.createdAt)).limit(1);
     }
     
     if (!goal) return res.status(404).json({ error: 'Empire not found' });

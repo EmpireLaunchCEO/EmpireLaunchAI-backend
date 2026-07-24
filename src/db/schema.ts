@@ -76,6 +76,7 @@ export const goals = pgTable('goals', {
   businessGoals: text('business_goals'),
   approvalRequired: boolean('approval_required').default(true).notNull(),
   autoPost: boolean('auto_post').default(false).notNull(),
+  slotIndex: integer('slot_index').default(0).notNull(), // 0=Brand1, 1=Brand2, 2=Brand3
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
