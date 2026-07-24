@@ -53,6 +53,7 @@ import { startAIWorker } from './services/queueService.js';
 import { webSocketService } from './services/websocketService.js';
 import { globalRateLimiter } from './middleware/rateLimiter.js';
 import { schedulerService } from './services/schedulerService.js';
+import { dnaVaultService } from './utils/dnaVaultService.js';
 
 import { migrate as migratePg } from 'drizzle-orm/node-postgres/migrator';
 import { migrate as migrateLibsql } from 'drizzle-orm/libsql/migrator';
@@ -98,6 +99,18 @@ if (!process.env.VERCEL) {
   
   // Start the weekly Canva gallery DNA harvest scheduler (Playwright-based)
   schedulerService.start();
+
+  // DNA Vault daily pruning — caps at 100k strands, removes lowest-scoring 1%
+  setInterval(async () => {
+    try {
+      const result = await dnaVaultService.pruneIfNeeded(100000);
+      if (result.removed > 0) {
+        console.log(`[VaultPrune] Removed ${result.removed} strands. ${result.remaining} remaining.`);
+      }
+    } catch (e: any) {
+      console.error('[VaultPrune] Failed:', e.message);
+    }
+  }, 24 * 60 * 60 * 1000); // Daily
   
   // Note: onboardingWorker starts automatically upon import
   console.log('[Worker] Onboarding Surge Guard & Neural Browser Active');

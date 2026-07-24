@@ -268,6 +268,29 @@ export class DnaVaultService {
   }
 
   /**
+   * Prune lowest-scoring strands to stay under cap.
+   * Removes the bottom 1% when vault exceeds MAX_STRANDS.
+   */
+  async pruneIfNeeded(MAX_STRANDS: number = 100000): Promise<{ removed: number; remaining: number }> {
+    const rows = await db.select().from(dnaStrands);
+    if (rows.length <= MAX_STRANDS) return { removed: 0, remaining: rows.length };
+
+    // Sort by performanceScore ascending (worst first)
+    const sorted = rows.sort((a: any, b: any) => (a.performanceScore || 0) - (b.performanceScore || 0));
+    const toRemove = Math.max(1, Math.ceil(rows.length * 0.01)); // 1% worst
+    const strandsToDelete = sorted.slice(0, toRemove);
+
+    for (const s of strandsToDelete) {
+      try {
+        await db.delete(dnaStrands).where(eq(dnaStrands.id, s.id));
+      } catch (e) { /* skip if already deleted */ }
+    }
+
+    console.log(`[DnaVault] Pruned ${strandsToDelete.length} low-score strands. ${rows.length - strandsToDelete.length} remaining.`);
+    return { removed: strandsToDelete.length, remaining: rows.length - strandsToDelete.length };
+  }
+
+  /**
    * Search strands by niche/tags in metadata or category.
    */
   async searchStrands(query: string, limit: number = 10): Promise<DnaStrand[]> {
