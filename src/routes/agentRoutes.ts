@@ -1,6 +1,6 @@
 import { Router, json } from 'express';
 import { db, schema } from '../db/index.js';
-import { eq, desc, and } from 'drizzle-orm';
+import { eq, desc, and, sql } from 'drizzle-orm';
 import { 
   startAgent, 
   createGoal, 
@@ -173,6 +173,17 @@ router.get('/debug/canva-status', async (req, res) => {
   try {
     const rows = await db.select().from(schema.integrations).where(eq(schema.integrations.platform, 'canva'));
     res.json({ count: rows.length, integrations: rows.map((r: any) => ({ id: r.id, userId: r.userId, isActive: r.isActive, hasCredentials: !!r.credentials })) });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Emergency migration endpoint — applies missing columns directly
+router.get('/admin/apply-migrations', async (req, res) => {
+  try {
+    await db.execute(sql`ALTER TABLE goals ADD COLUMN IF NOT EXISTS slot_index INTEGER DEFAULT 0`);
+    await db.execute(sql`CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), type TEXT DEFAULT 'subscription', stripe_session_id TEXT, amount INTEGER, paid_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())`);
+    res.json({ status: 'migrations applied', columns: ['slot_index'], tables: ['subscriptions'] });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
