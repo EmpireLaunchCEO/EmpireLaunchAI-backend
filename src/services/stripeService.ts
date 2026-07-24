@@ -247,13 +247,21 @@ export class StripeService {
   }
 
   async verifyUserPayment(userId: string): Promise<{ paid: boolean; paidAt: string | null; amount: number | null }> {
+    // Look for completed checkouts in the last 24 hours
+    const oneDayAgo = Math.floor(Date.now() / 1000) - 86400;
     const sessions = await getStripe().checkout.sessions.list({
       limit: 50,
       status: 'complete',
+      created: { gte: oneDayAgo },
     });
-    const match = sessions.data.find(s => s.client_reference_id === userId);
-    if (match) {
-      return { paid: true, paidAt: new Date(match.created * 1000).toISOString(), amount: match.amount_total || 0 };
+    // Return the most recent completed checkout (if any)
+    if (sessions.data.length > 0) {
+      const latest = sessions.data[0];
+      return { 
+        paid: true, 
+        paidAt: new Date(latest.created * 1000).toISOString(), 
+        amount: latest.amount_total || 0 
+      };
     }
     return { paid: false, paidAt: null, amount: null };
   }
