@@ -6,7 +6,6 @@ import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
-import { conversationalChat } from '../controllers/conversationalStudioController.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
@@ -256,8 +255,5 @@ router.post('/process', async (req: Request, res: Response) => {
     return res.status(500).json({ status: 'error', error: error.message } as StudioResponse);
   }
 });
-
-// Conversational AI pipeline with DNA vault integration
-router.post('/conversation', mobileAuth, conversationalChat);
 
 export default router;
