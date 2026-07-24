@@ -41,9 +41,13 @@ function createDb() {
 
 async function runMigrations(pool: Pool) {
   try {
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const migrationsDir = path.join(__dirname, 'migrations');
-    if (!fs.existsSync(migrationsDir)) return;
+    // Use drizzle-pg/ at project root — this is the canonical migration directory
+    // (__dirname/migrations doesn't work in production because tsc doesn't copy .sql files to dist/)
+    const migrationsDir = path.resolve(process.cwd(), 'drizzle-pg');
+    if (!fs.existsSync(migrationsDir)) {
+      console.log(`[Migration] No migration directory at ${migrationsDir}, skipping`);
+      return;
+    }
 
     const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
     if (files.length === 0) return;
