@@ -78,3 +78,27 @@ export const getUserSubscriptions = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+/**
+ * POST /api/stripe/create-checkout-session
+ * Creates a dynamic Stripe Checkout Session tagged with the user's ID.
+ */
+export const createCheckoutSession = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { type } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Authentication required' });
+    }
+    if (!type || !['subscription', 'expansion'].includes(type)) {
+      return res.status(400).json({ error: 'Type must be "subscription" or "expansion"' });
+    }
+
+    const url = await stripeService.createCheckoutSession(userId, type);
+    res.json({ url });
+  } catch (error: any) {
+    console.error('[Subscription] Checkout session error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

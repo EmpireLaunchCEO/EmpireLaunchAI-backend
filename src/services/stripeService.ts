@@ -257,6 +257,25 @@ export class StripeService {
     }
     return { paid: false, paidAt: null, amount: null };
   }
+
+  async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {
+    const prices: Record<string, string> = {
+      subscription: process.env.STRIPE_SUBSCRIPTION_PRICE_ID || '',
+      expansion: process.env.STRIPE_EXPANSION_PRICE_ID || '',
+    };
+    const modes: Record<string, 'subscription' | 'payment'> = {
+      subscription: 'subscription',
+      expansion: 'payment',
+    };
+    const session = await getStripe().checkout.sessions.create({
+      mode: modes[type],
+      line_items: [{ price: prices[type], quantity: 1 }],
+      client_reference_id: userId,
+      success_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/dashboard?paid=true`,
+      cancel_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/onboarding`,
+    });
+    return session.url!;
+  }
 }
 
 export const stripeService = new StripeService();
