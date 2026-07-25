@@ -276,22 +276,46 @@ export const reactivateSubscription = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     if (!userId) return res.status(400).json({ error: 'Authentication required' });
 
+    // First, check Stripe status to determine if the subscription is still revivable
+    const stripeStatus = await stripeService.getSubscriptionStatus(userId);
+
+    // Scenario 1: Subscription exists and is still in active period (cancel_at_period_end)
+    if (stripeStatus.subscriptionId && stripeStatus.status !== 'canceled' && stripeStatus.status !== 'unpaid') {
+      const result = await stripeService.reactivateSubscription(stripeStatus.subscriptionId);
+      return res.json({
+        status: 'reactivated',
+        renewsAt: result.currentPeriodEnd,
+        message: 'Subscription reactivated. You will be billed at the end of the current period.',
+      });
+    }
+
+    // Also check our DB for a stored subscription ID
     const [latest] = await db.select()
       .from(subscriptions)
       .where(eq(subscriptions.userId, userId))
       .orderBy(desc(subscriptions.paidAt))
       .limit(1);
 
-    if (!latest?.stripeSubscriptionId) {
-      return res.status(404).json({ error: 'No cancellable subscription found' });
+    // Try reactivating from DB record if it has a subscription ID
+    if (latest?.stripeSubscriptionId) {
+      try {
+        const result = await stripeService.reactivateSubscription(latest.stripeSubscriptionId);
+        return res.json({
+          status: 'reactivated',
+          renewsAt: result.currentPeriodEnd,
+          message: 'Subscription reactivated. You will be billed at the end of the current period.',
+        });
+      } catch {
+        // Reactivation failed — fall through to new checkout
+      }
     }
 
-    const result = await stripeService.reactivateSubscription(latest.stripeSubscriptionId);
-
-    res.json({
-      status: 'reactivated',
-      renewsAt: result.currentPeriodEnd,
-      message: 'Subscription reactivated. You will be billed at the end of the current period.',
+    // Scenario 2: Fully canceled — create new checkout session
+    const checkoutUrl = await stripeService.createCheckoutSession(userId, 'subscription');
+    return res.json({
+      status: 'requires_payment',
+      checkoutUrl,
+      message: 'Your previous subscription has ended. Please start a new subscription.',
     });
   } catch (error: any) {
     console.error('[Subscription] Reactivate error:', error);
