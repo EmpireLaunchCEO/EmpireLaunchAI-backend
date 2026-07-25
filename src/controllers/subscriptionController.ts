@@ -201,6 +201,11 @@ export const pollRenewal = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     if (!userId) return res.status(400).json({ error: 'Authentication required' });
 
+    // Admin bypass
+    if (userId === '00000000-0000-0000-0000-000000000000') {
+      return res.json({ status: 'active', renewsAt: null, message: 'Admin — bypassing payment check' });
+    }
+
     const stripeStatus = await stripeService.getSubscriptionStatus(userId);
 
     if (stripeStatus.status === 'active') {
