@@ -263,6 +263,29 @@ export class StripeService {
     return { paid: false, paidAt: null, amount: null };
   }
 
+  async getSubscriptionStatus(userId: string): Promise<{
+    status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null;
+  }> {
+    const sessions = await getStripe().checkout.sessions.list({
+      limit: 5,
+      status: 'complete',
+    });
+    const match = sessions.data.find(s => s.client_reference_id === userId);
+    if (match?.subscription) {
+      const sub = await getStripe().subscriptions.retrieve(match.subscription as string);
+      return {
+        status: sub.status,
+        currentPeriodStart: sub.current_period_start
+          ? new Date(sub.current_period_start * 1000).toISOString()
+          : null,
+        currentPeriodEnd: sub.current_period_end
+          ? new Date(sub.current_period_end * 1000).toISOString()
+          : null,
+      };
+    }
+    return { status: 'unknown', currentPeriodStart: null, currentPeriodEnd: null };
+  }
+
   async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {
     const session = await getStripe().checkout.sessions.create({
       mode: 'subscription',

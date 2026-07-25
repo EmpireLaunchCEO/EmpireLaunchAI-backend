@@ -137,7 +137,6 @@ export const checkRenewal = async (req: Request, res: Response) => {
 
     const paidAt = new Date(latest.paidAt!);
     const renewsAt = addCalendarMonth(paidAt);
-    const graceEndsAt = new Date(renewsAt.getTime() + 2 * 24 * 60 * 60 * 1000);
     const now = new Date();
 
     // Still active
@@ -145,30 +144,37 @@ export const checkRenewal = async (req: Request, res: Response) => {
       return res.json({ status: 'active', renewsAt: renewsAt.toISOString(), paidAt: paidAt.toISOString() });
     }
 
-    // Grace period — check Stripe for recent payment
-    if (now >= renewsAt && now < graceEndsAt) {
-      const payment = await stripeService.verifyUserPayment(userId);
-      if (payment.paid && payment.paidAt && new Date(payment.paidAt) > paidAt) {
+    // Past renewal — check Stripe's actual subscription status
+    const stripeStatus = await stripeService.getSubscriptionStatus(userId);
+
+    if (stripeStatus.status === 'active') {
+      // Stripe says active — update our record
+      if (stripeStatus.currentPeriodStart) {
         await db.update(subscriptions)
-          .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
+          .set({ paidAt: new Date(stripeStatus.currentPeriodStart) })
           .where(eq(subscriptions.id, latest.id));
-        // Anchor to original cycle: renewal advances by 30d from previous renewal date, NOT from payment date
-        const newRenewsAt = addCalendarMonth(renewsAt);
-        return res.json({ status: 'active', renewsAt: newRenewsAt.toISOString(), paidAt: payment.paidAt });
       }
       return res.json({
-        status: 'grace_period',
-        renewsAt: renewsAt.toISOString(),
-        graceEndsAt: graceEndsAt.toISOString(),
-        message: 'Payment processing. 2-day grace period.',
+        status: 'active',
+        renewsAt: stripeStatus.currentPeriodEnd || renewsAt.toISOString(),
+        paidAt: stripeStatus.currentPeriodStart || paidAt.toISOString(),
       });
     }
 
-    // Past due
+    if (stripeStatus.status === 'past_due' || stripeStatus.status === 'incomplete') {
+      return res.json({
+        status: 'grace_period',
+        renewsAt: renewsAt.toISOString(),
+        stripeStatus: stripeStatus.status,
+        message: 'Payment processing. Waiting for Stripe to retry.',
+      });
+    }
+
+    // unpaid, canceled, unknown → block
     return res.json({
       status: 'past_due',
       renewsAt: renewsAt.toISOString(),
-      message: 'Payment failed. Please update payment method.',
+      message: 'Payment failed. Please update your payment method.',
     });
   } catch (error: any) {
     console.error('[Subscription] Renewal check error:', error);
@@ -185,21 +191,27 @@ export const pollRenewal = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     if (!userId) return res.status(400).json({ error: 'Authentication required' });
 
-    const payment = await stripeService.verifyUserPayment(userId);
-    if (payment.paid && payment.paidAt) {
+    const stripeStatus = await stripeService.getSubscriptionStatus(userId);
+
+    if (stripeStatus.status === 'active') {
       const [latest] = await db.select()
         .from(subscriptions)
         .where(eq(subscriptions.userId, userId))
         .orderBy(desc(subscriptions.paidAt))
         .limit(1);
-      if (latest && new Date(payment.paidAt) > new Date(latest.paidAt!)) {
+      if (latest && stripeStatus.currentPeriodStart) {
         await db.update(subscriptions)
-          .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
+          .set({ paidAt: new Date(stripeStatus.currentPeriodStart) })
           .where(eq(subscriptions.id, latest.id));
       }
-      return res.json({ status: 'paid', paidAt: payment.paidAt, amount: payment.amount });
+      return res.json({ status: 'active', renewsAt: stripeStatus.currentPeriodEnd });
     }
-    res.json({ status: 'pending' });
+
+    if (stripeStatus.status === 'past_due' || stripeStatus.status === 'incomplete') {
+      return res.json({ status: 'pending', stripeStatus: stripeStatus.status });
+    }
+
+    res.json({ status: 'failed', stripeStatus: stripeStatus.status });
   } catch (error: any) {
     console.error('[Subscription] Poll error:', error);
     res.status(500).json({ error: error.message });
