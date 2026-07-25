@@ -145,7 +145,8 @@ export const checkRenewal = async (req: Request, res: Response) => {
         await db.update(subscriptions)
           .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
           .where(eq(subscriptions.id, latest.id));
-        const newRenewsAt = new Date(new Date(payment.paidAt).getTime() + 30 * 24 * 60 * 60 * 1000);
+        // Anchor to original cycle: renewal advances by 30d from previous renewal date, NOT from payment date
+        const newRenewsAt = new Date(renewsAt.getTime() + 30 * 24 * 60 * 60 * 1000);
         return res.json({ status: 'active', renewsAt: newRenewsAt.toISOString(), paidAt: payment.paidAt });
       }
       return res.json({
