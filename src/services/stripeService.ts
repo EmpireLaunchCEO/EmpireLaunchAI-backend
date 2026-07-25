@@ -247,11 +247,16 @@ export class StripeService {
   }
 
   async verifyUserPayment(userId: string): Promise<{ paid: boolean; paidAt: string | null; amount: number | null }> {
+    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
     const sessions = await getStripe().checkout.sessions.list({
       limit: 50,
       status: 'complete',
+      created: { gte: thirtyDaysAgo },
     });
-    const match = sessions.data.find(s => s.client_reference_id === userId);
+    const match = sessions.data.find(s =>
+      s.client_reference_id === userId &&
+      (s.mode === 'subscription' || s.metadata?.type === 'subscription')
+    );
     if (match) {
       return { paid: true, paidAt: new Date(match.created * 1000).toISOString(), amount: match.amount_total || 0 };
     }
