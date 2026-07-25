@@ -129,36 +129,71 @@ export const checkRenewal = async (req: Request, res: Response) => {
     }
 
     const paidAt = new Date(latest.paidAt!);
-    const renewsAt = new Date(paidAt.getTime() + 30 * 24 * 60 * 60 * 1000); // +30 days
+    const renewsAt = new Date(paidAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const graceEndsAt = new Date(renewsAt.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const now = new Date();
 
     // Still active
-    if (renewsAt > new Date()) {
+    if (now < renewsAt) {
       return res.json({ status: 'active', renewsAt: renewsAt.toISOString(), paidAt: paidAt.toISOString() });
     }
 
-    // Expired — check Stripe for a new payment
-    const payment = await stripeService.verifyUserPayment(userId);
-
-    if (payment.paid && payment.paidAt) {
-      const newPaidAt = new Date(payment.paidAt);
-      // Only update if the payment is newer than the current record
-      if (newPaidAt > paidAt) {
+    // Grace period — check Stripe for recent payment
+    if (now >= renewsAt && now < graceEndsAt) {
+      const payment = await stripeService.verifyUserPayment(userId);
+      if (payment.paid && payment.paidAt && new Date(payment.paidAt) > paidAt) {
         await db.update(subscriptions)
-          .set({ paidAt: newPaidAt, amount: payment.amount ?? latest.amount })
+          .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
           .where(eq(subscriptions.id, latest.id));
-        const newRenewsAt = new Date(newPaidAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+        const newRenewsAt = new Date(new Date(payment.paidAt).getTime() + 30 * 24 * 60 * 60 * 1000);
         return res.json({ status: 'active', renewsAt: newRenewsAt.toISOString(), paidAt: payment.paidAt });
       }
+      return res.json({
+        status: 'grace_period',
+        renewsAt: renewsAt.toISOString(),
+        graceEndsAt: graceEndsAt.toISOString(),
+        message: 'Payment processing. 2-day grace period.',
+      });
     }
 
-    // Still past due
+    // Past due
     return res.json({
       status: 'past_due',
       renewsAt: renewsAt.toISOString(),
-      message: 'Your monthly payment did not go through. Please process payment to continue using EmpireLaunch AI.',
+      message: 'Payment failed. Please update payment method.',
     });
   } catch (error: any) {
     console.error('[Subscription] Renewal check error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * GET /api/subscriptions/poll-renewal
+ * Lightweight poll for dashboard during grace period to check Stripe for new payment.
+ */
+export const pollRenewal = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    if (!userId) return res.status(400).json({ error: 'Authentication required' });
+
+    const payment = await stripeService.verifyUserPayment(userId);
+    if (payment.paid && payment.paidAt) {
+      const [latest] = await db.select()
+        .from(subscriptions)
+        .where(eq(subscriptions.userId, userId))
+        .orderBy(desc(subscriptions.paidAt))
+        .limit(1);
+      if (latest && new Date(payment.paidAt) > new Date(latest.paidAt!)) {
+        await db.update(subscriptions)
+          .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
+          .where(eq(subscriptions.id, latest.id));
+      }
+      return res.json({ status: 'paid', paidAt: payment.paidAt, amount: payment.amount });
+    }
+    res.json({ status: 'pending' });
+  } catch (error: any) {
+    console.error('[Subscription] Poll error:', error);
     res.status(500).json({ error: error.message });
   }
 };
