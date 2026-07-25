@@ -266,3 +266,35 @@ export const cancelSubscription = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+/**
+ * POST /api/subscriptions/reactivate
+ * Reactivates a subscription set to cancel at period end.
+ */
+export const reactivateSubscription = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    if (!userId) return res.status(400).json({ error: 'Authentication required' });
+
+    const [latest] = await db.select()
+      .from(subscriptions)
+      .where(eq(subscriptions.userId, userId))
+      .orderBy(desc(subscriptions.paidAt))
+      .limit(1);
+
+    if (!latest?.stripeSubscriptionId) {
+      return res.status(404).json({ error: 'No cancellable subscription found' });
+    }
+
+    const result = await stripeService.reactivateSubscription(latest.stripeSubscriptionId);
+
+    res.json({
+      status: 'reactivated',
+      renewsAt: result.currentPeriodEnd,
+      message: 'Subscription reactivated. You will be billed at the end of the current period.',
+    });
+  } catch (error: any) {
+    console.error('[Subscription] Reactivate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

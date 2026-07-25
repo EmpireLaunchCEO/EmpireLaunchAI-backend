@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { mobileAuth } from '../middleware/mobileAuth.js';
-import { verifySubscription, getUserSubscriptions, createCheckoutSession, checkRenewal, pollRenewal, cancelSubscription } from '../controllers/subscriptionController.js';
+import { verifySubscription, getUserSubscriptions, createCheckoutSession, checkRenewal, pollRenewal, cancelSubscription, reactivateSubscription } from '../controllers/subscriptionController.js';
 
 const router = Router();
 
@@ -14,6 +14,7 @@ router.post('/stripe/create-checkout-session', mobileAuth, createCheckoutSession
 router.get('/subscriptions/check-renewal', mobileAuth, checkRenewal);
 router.get('/subscriptions/poll-renewal', mobileAuth, pollRenewal);
 router.post('/subscriptions/cancel', mobileAuth, cancelSubscription);
+router.post('/subscriptions/reactivate', mobileAuth, reactivateSubscription);
 
 // Get all subscriptions for a user
 router.get('/subscriptions/:userId', mobileAuth, getUserSubscriptions);

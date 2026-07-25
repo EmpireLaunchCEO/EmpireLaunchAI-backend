@@ -299,6 +299,18 @@ export class StripeService {
     };
   }
 
+  async reactivateSubscription(stripeSubscriptionId: string): Promise<{ reactivated: boolean; currentPeriodEnd: string }> {
+    const sub = await getStripe().subscriptions.update(stripeSubscriptionId, {
+      cancel_at_period_end: false,
+    });
+    return {
+      reactivated: sub.cancel_at_period_end === false,
+      currentPeriodEnd: sub.current_period_end
+        ? new Date(sub.current_period_end * 1000).toISOString()
+        : '',
+    };
+  }
+
   async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {
     const session = await getStripe().checkout.sessions.create({
       mode: 'subscription',
