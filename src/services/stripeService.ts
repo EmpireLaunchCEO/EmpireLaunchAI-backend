@@ -264,7 +264,7 @@ export class StripeService {
   }
 
   async getSubscriptionStatus(userId: string): Promise<{
-    status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null;
+    status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null; subscriptionId: string | null;
   }> {
     const sessions = await getStripe().checkout.sessions.list({
       limit: 5,
@@ -281,9 +281,22 @@ export class StripeService {
         currentPeriodEnd: sub.current_period_end
           ? new Date(sub.current_period_end * 1000).toISOString()
           : null,
+        subscriptionId: sub.id,
       };
     }
-    return { status: 'unknown', currentPeriodStart: null, currentPeriodEnd: null };
+    return { status: 'unknown', currentPeriodStart: null, currentPeriodEnd: null, subscriptionId: null };
+  }
+
+  async cancelSubscription(stripeSubscriptionId: string): Promise<{ canceled: boolean; currentPeriodEnd: string }> {
+    const sub = await getStripe().subscriptions.update(stripeSubscriptionId, {
+      cancel_at_period_end: true,
+    });
+    return {
+      canceled: sub.cancel_at_period_end === true,
+      currentPeriodEnd: sub.current_period_end
+        ? new Date(sub.current_period_end * 1000).toISOString()
+        : '',
+    };
   }
 
   async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {

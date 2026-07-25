@@ -217,3 +217,52 @@ export const pollRenewal = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+/**
+ * POST /api/subscriptions/cancel
+ * Cancels Stripe subscription at period end.
+ */
+export const cancelSubscription = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    if (!userId) return res.status(400).json({ error: 'Authentication required' });
+
+    const [latest] = await db.select()
+      .from(subscriptions)
+      .where(eq(subscriptions.userId, userId))
+      .orderBy(desc(subscriptions.paidAt))
+      .limit(1);
+
+    if (!latest) {
+      return res.status(404).json({ error: 'No subscription found' });
+    }
+
+    // Find Stripe subscription ID
+    let subId = latest.stripeSubscriptionId;
+    if (!subId) {
+      const status = await stripeService.getSubscriptionStatus(userId);
+      subId = status.subscriptionId;
+      // Store for future use
+      if (subId) {
+        await db.update(subscriptions)
+          .set({ stripeSubscriptionId: subId })
+          .where(eq(subscriptions.id, latest.id));
+      }
+    }
+
+    if (!subId) {
+      return res.status(404).json({ error: 'Could not find Stripe subscription ID' });
+    }
+
+    const result = await stripeService.cancelSubscription(subId);
+
+    res.json({
+      status: 'canceled',
+      activeUntil: result.currentPeriodEnd,
+      message: 'Subscription will be canceled at the end of the current billing period.',
+    });
+  } catch (error: any) {
+    console.error('[Subscription] Cancel error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

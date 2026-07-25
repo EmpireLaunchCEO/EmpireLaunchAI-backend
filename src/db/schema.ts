@@ -315,6 +315,7 @@ export const subscriptions = pgTable('subscriptions', {
   stripeSessionId: text('stripe_session_id'),
   amount: integer('amount'),
   paidAt: timestamp('paid_at'),
+  stripeSubscriptionId: text('stripe_subscription_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
