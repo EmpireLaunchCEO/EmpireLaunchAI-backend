@@ -1,4 +1,5 @@
 import { reasoningEngine } from './reasoningEngine.js';
+import { marketScraperService } from './marketScraperService.js';
 
 export interface IntelTrendsParams {
   niche?: string;
@@ -96,6 +97,20 @@ export class IntelService {
    * Returns structured trend data or a fallback message on failure.
    */
   async researchTrends(params: IntelTrendsParams): Promise<{ data: IntelTrendsResult | null; fallbackMessage?: string }> {
+    const niche = params.niche || 'general';
+
+    // 1. Try real web scraping first
+    try {
+      const scraped = await marketScraperService.scrapeAll(niche);
+      const hasAnyData = Object.values(scraped).some(arr => arr.length > 0);
+      if (hasAnyData) {
+        return { data: scraped };
+      }
+    } catch (err: any) {
+      console.warn('[IntelService] Market scraping failed, falling back to Gemini:', err.message);
+    }
+
+    // 2. Fallback to Gemini
     const prompt = buildIntelPrompt(params);
 
     try {
