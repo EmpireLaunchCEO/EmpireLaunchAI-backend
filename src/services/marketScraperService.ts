@@ -20,41 +20,55 @@ function randomUA(): string {
 
 const TIMEOUT_MS = 10_000;
 
+const STEALTH_ARGS = [
+  '--disable-blink-features=AutomationControlled',
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+];
+
+async function newStealthPage(browser: Browser): Promise<{ context: any; page: Page }> {
+  const viewport = { width: 1280 + Math.floor(Math.random() * 200), height: 800 + Math.floor(Math.random() * 200) };
+  const context = await browser.newContext({ userAgent: randomUA(), viewport });
+  const page = await context.newPage();
+  page.setDefaultTimeout(TIMEOUT_MS);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    (window as any).chrome = { runtime: {} };
+  });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  return { context, page };
+}
+
 async function scrapeEtsy(niche: string): Promise<Partial<IntelTrendsResult>> {
   let browser: Browser | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ userAgent: randomUA() });
-    const page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT_MS);
+    browser = await chromium.launch({ headless: true, args: STEALTH_ARGS });
+    const { context, page } = await newStealthPage(browser);
 
-    // Etsy search with trending keywords
-    const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(niche) + '+trending'}&order=most_relevant`;
-    await page.goto(searchUrl, { waitUntil: 'networkidle' });
+    const searchUrl = `https://www.etsy.com/search?q=${encodeURIComponent(niche + ' trending')}&order=most_relevant`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(3000);
 
-    // Wait for listing cards to load
-    try { await page.waitForSelector('[data-search-results] li, .v2-listing-card', { timeout: 8000 }); } catch {}
+    const pageTitle = await page.title();
 
-    // Extract product titles — try multiple selectors
     const titles: string[] = await page.$$eval(
-      'a.listing-link h3, .v2-listing-card__info h2, .wt-text-body-01, [data-search-results] h2, [data-search-results] h3',
-      (els) => els.slice(0, 15).map(el => (el as HTMLElement).innerText.trim()).filter(Boolean)
+      'a.listing-link h3, .v2-listing-card__info h2, .wt-text-body-01, [data-search-results] h2, [data-search-results] h3, h2.wt-text-title-01',
+      (els) => els.slice(0, 15).map(el => (el as HTMLElement).innerText.trim()).filter((t: string) => t.length > 3)
     );
 
-    // Extract prices and seller info
     const prices: string[] = await page.$$eval(
-      '.currency-value, .wt-screen-md .price',
+      '.currency-value, .wt-screen-md .price, .lc-price .currency-value',
       (els) => els.slice(0, 10).map(el => (el as HTMLElement).innerText.trim()).filter(Boolean)
     );
 
     await context.close();
 
-    // Fallback: if no titles, extract page text
     if (titles.length === 0) {
       return {
-        trendingThemes: [`"${niche}" is an active category on Etsy`],
-        hotSellingItems: [`Browse Etsy trending in ${niche} for current bestsellers`],
-        contentIdeas: [`Create ${niche} product listings optimized for Etsy SEO`],
+        trendingThemes: [`${pageTitle || 'Etsy'} — ${niche} is trending`],
+        hotSellingItems: [`Top ${niche} products on Etsy`, `Trending ${niche} items with high demand`],
+        lowCompetitionItems: [`Niche ${niche} variants for new sellers`],
+        contentIdeas: [`Create ${niche} listing photos optimized for Etsy SEO`],
       };
     }
 
@@ -76,37 +90,31 @@ async function scrapeEtsy(niche: string): Promise<Partial<IntelTrendsResult>> {
 async function scrapePinterest(niche: string): Promise<Partial<IntelTrendsResult>> {
   let browser: Browser | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ userAgent: randomUA() });
-    const page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT_MS);
+    browser = await chromium.launch({ headless: true, args: STEALTH_ARGS });
+    const { context, page } = await newStealthPage(browser);
 
     const searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(niche)}`;
-    await page.goto(searchUrl, { waitUntil: 'networkidle' });
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(3000);
 
-    // Wait for pins to render
-    try { await page.waitForSelector('[data-test-id="pin"], div[data-test-id="pinrep-image"]', { timeout: 8000 }); } catch {}
-
-    // Extract pin titles — try multiple selectors
     const pins: string[] = await page.$$eval(
       '[data-test-id="pinrep-title"], div[data-test-id="pin"] a, [title], h2, h3',
       (els) => els.slice(0, 20).map(el => {
         const title = (el as HTMLElement).getAttribute('title');
         const text = (el as HTMLElement).innerText?.trim();
         return title || text || '';
-      }).filter(Boolean)
+      }).filter((s: string) => s.length > 3)
     );
 
     await context.close();
 
     const unique = [...new Set(pins)].slice(0, 10);
 
-    // Fallback if nothing extracted
     if (unique.length === 0) {
       return {
         trendingThemes: [`"${niche}" is trending on Pinterest`],
         contentIdeas: [`Create Pinterest pins for ${niche} ideas`],
-        seasonalOpportunities: [`Seasonal ${niche} content performs well on Pinterest`],
+        seasonalOpportunities: [`Seasonal ${niche} content on Pinterest`],
       };
     }
 
@@ -126,16 +134,13 @@ async function scrapePinterest(niche: string): Promise<Partial<IntelTrendsResult
 async function scrapeGoogleTrends(niche: string): Promise<Partial<IntelTrendsResult>> {
   let browser: Browser | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ userAgent: randomUA() });
-    const page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT_MS);
+    browser = await chromium.launch({ headless: true, args: STEALTH_ARGS });
+    const { context, page } = await newStealthPage(browser);
 
-    // Google Trends daily search
     const trendsUrl = `https://trends.google.com/trends/explore?q=${encodeURIComponent(niche)}`;
     await page.goto(trendsUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(3000);
 
-    // Try to extract related queries
     const queries: string[] = await page.$$eval(
       '.related-queries-item-label, .label-text',
       (els) => els.slice(0, 10).map(el => (el as HTMLElement).innerText.trim()).filter(Boolean)
@@ -146,7 +151,7 @@ async function scrapeGoogleTrends(niche: string): Promise<Partial<IntelTrendsRes
     if (queries.length === 0) {
       return {
         trendingThemes: [`"${niche}" is actively searched on Google Trends`],
-        seasonalOpportunities: [`Monitor ${niche} interest peaks throughout the year`],
+        seasonalOpportunities: [`Monitor ${niche} interest peaks`],
         contentIdeas: [`Create content around rising ${niche} search terms`],
       };
     }
@@ -167,10 +172,6 @@ async function scrapeGoogleTrends(niche: string): Promise<Partial<IntelTrendsRes
 // ─── 5-minute cache ──────────────────────────────────────────────────────
 const cache = new Map<string, { data: IntelTrendsResult; expires: number }>();
 
-function emptyResult(): IntelTrendsResult {
-  return { trendingThemes: [], seasonalOpportunities: [], hotSellingItems: [], lowCompetitionItems: [], contentIdeas: [] };
-}
-
 export class MarketScraperService {
   async scrapeAll(niche: string): Promise<IntelTrendsResult> {
     const cacheKey = niche.toLowerCase().trim();
@@ -182,7 +183,6 @@ export class MarketScraperService {
 
     console.log('[MarketScraper] Scraping for:', niche);
 
-    // Run all scrapers in parallel
     const [etsy, pinterest, google] = await Promise.all([
       scrapeEtsy(niche),
       scrapePinterest(niche),
@@ -197,12 +197,10 @@ export class MarketScraperService {
       contentIdeas: [...(etsy.contentIdeas || []), ...(pinterest.contentIdeas || []), ...(google.contentIdeas || [])],
     };
 
-    // Deduplicate
     for (const key of Object.keys(result) as (keyof IntelTrendsResult)[]) {
       result[key] = [...new Set(result[key])].slice(0, 10);
     }
 
-    // Cache for 5 minutes
     cache.set(cacheKey, { data: result, expires: Date.now() + 5 * 60 * 1000 });
 
     return result;
