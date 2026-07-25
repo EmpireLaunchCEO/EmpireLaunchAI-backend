@@ -5,7 +5,7 @@ import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
-import { eq, and, gte, count } from 'drizzle-orm';
+import { eq, and, gte, count, desc } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
@@ -126,19 +126,28 @@ router.post('/process', async (req: Request, res: Response) => {
       }
 
       case 'video_creation': {
-        // Quota check — 7 videos per 168-hour rolling window
-        const weekAgo = new Date(Date.now() - 168 * 60 * 60 * 1000);
+        // Quota check — anchored to subscription date, resets same day each week
+        const [sub] = await db.select().from(schema.subscriptions)
+          .where(eq(schema.subscriptions.userId, uid))
+          .orderBy(desc(schema.subscriptions.paidAt))
+          .limit(1);
+        const anchor = sub?.paidAt ? new Date(sub.paidAt) : new Date();
+        const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+        const weeksSinceAnchor = Math.floor((Date.now() - anchor.getTime()) / msPerWeek);
+        const currentWeekStart = new Date(anchor.getTime() + weeksSinceAnchor * msPerWeek);
+        const nextReset = new Date(currentWeekStart.getTime() + msPerWeek);
+
         const [{ count: videoCount }] = await db.select({ count: count() })
           .from(schema.creations)
           .where(and(
             eq(schema.creations.userId, uid),
             eq(schema.creations.type, 'video_creation'),
-            gte(schema.creations.createdAt, weekAgo)
+            gte(schema.creations.createdAt, currentWeekStart)
           ));
         if (Number(videoCount) >= 7) {
           return res.status(429).json({
             status: 'error',
-            error: 'Weekly video limit reached. You have used 7/7 videos this week. Your quota resets in less than 7 days.',
+            error: `You've used 7/7 videos this week. Your quota resets on ${nextReset.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`,
           } as StudioResponse);
         }
 
