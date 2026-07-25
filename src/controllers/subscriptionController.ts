@@ -5,6 +5,13 @@ import { eq, desc, and, gt } from 'drizzle-orm';
 
 const { subscriptions } = schema;
 
+/** Calendar month math — matches Stripe's interval: 'month' billing cycle */
+function addCalendarMonth(date: Date): Date {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + 1);
+  return result;
+}
+
 /**
  * POST /api/stripe/verify-subscription
  * Verifies a user's payment status via Stripe API and records the result.
@@ -129,7 +136,7 @@ export const checkRenewal = async (req: Request, res: Response) => {
     }
 
     const paidAt = new Date(latest.paidAt!);
-    const renewsAt = new Date(paidAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const renewsAt = addCalendarMonth(paidAt);
     const graceEndsAt = new Date(renewsAt.getTime() + 2 * 24 * 60 * 60 * 1000);
     const now = new Date();
 
@@ -146,7 +153,7 @@ export const checkRenewal = async (req: Request, res: Response) => {
           .set({ paidAt: new Date(payment.paidAt), amount: payment.amount ?? latest.amount })
           .where(eq(subscriptions.id, latest.id));
         // Anchor to original cycle: renewal advances by 30d from previous renewal date, NOT from payment date
-        const newRenewsAt = new Date(renewsAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+        const newRenewsAt = addCalendarMonth(renewsAt);
         return res.json({ status: 'active', renewsAt: newRenewsAt.toISOString(), paidAt: payment.paidAt });
       }
       return res.json({
