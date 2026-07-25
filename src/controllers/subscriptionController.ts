@@ -170,7 +170,17 @@ export const checkRenewal = async (req: Request, res: Response) => {
       });
     }
 
-    // unpaid, canceled, unknown → block
+    // unpaid, canceled, unknown → check 30-day retention before blocking
+    if (latest.canceledAt) {
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      if (new Date().getTime() - new Date(latest.canceledAt).getTime() > thirtyDaysMs) {
+        return res.json({
+          status: 'expired',
+          message: 'Your data retention period has expired. Please sign up again.',
+        });
+      }
+    }
+
     return res.json({
       status: 'past_due',
       renewsAt: renewsAt.toISOString(),
@@ -256,6 +266,11 @@ export const cancelSubscription = async (req: Request, res: Response) => {
 
     const result = await stripeService.cancelSubscription(subId);
 
+    // Record cancellation timestamp for 30-day retention tracking
+    await db.update(subscriptions)
+      .set({ canceledAt: new Date() })
+      .where(eq(subscriptions.id, latest.id));
+
     res.json({
       status: 'canceled',
       activeUntil: result.currentPeriodEnd,
@@ -276,7 +291,24 @@ export const reactivateSubscription = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     if (!userId) return res.status(400).json({ error: 'Authentication required' });
 
-    // First, check Stripe status to determine if the subscription is still revivable
+    // First, check if canceled and past 30-day retention
+    const [latest] = await db.select()
+      .from(subscriptions)
+      .where(eq(subscriptions.userId, userId))
+      .orderBy(desc(subscriptions.paidAt))
+      .limit(1);
+
+    if (latest?.canceledAt) {
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      if (new Date().getTime() - new Date(latest.canceledAt).getTime() > thirtyDaysMs) {
+        return res.json({
+          status: 'expired',
+          message: 'Your data retention period has expired. Please sign up again.',
+        });
+      }
+    }
+
+    // Check Stripe status to determine if the subscription is still revivable
     const stripeStatus = await stripeService.getSubscriptionStatus(userId);
 
     // Scenario 1: Subscription exists and is still in active period (cancel_at_period_end)
@@ -288,13 +320,6 @@ export const reactivateSubscription = async (req: Request, res: Response) => {
         message: 'Subscription reactivated. You will be billed at the end of the current period.',
       });
     }
-
-    // Also check our DB for a stored subscription ID
-    const [latest] = await db.select()
-      .from(subscriptions)
-      .where(eq(subscriptions.userId, userId))
-      .orderBy(desc(subscriptions.paidAt))
-      .limit(1);
 
     // Try reactivating from DB record if it has a subscription ID
     if (latest?.stripeSubscriptionId) {

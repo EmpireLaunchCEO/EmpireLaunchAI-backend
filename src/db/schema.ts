@@ -316,6 +316,7 @@ export const subscriptions = pgTable('subscriptions', {
   amount: integer('amount'),
   paidAt: timestamp('paid_at'),
   stripeSubscriptionId: text('stripe_subscription_id'),
+  canceledAt: timestamp('canceled_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
