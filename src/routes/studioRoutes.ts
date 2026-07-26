@@ -172,7 +172,7 @@ router.post('/process', async (req: Request, res: Response) => {
         // Generate video via Sora 2
         try {
           const soraResult = await soraVideoService.generateVideo(decision.prompt, {
-            duration: decision.parameters.duration || 10,
+            duration: decision.parameters.duration || 30,
             size: decision.parameters.aspectRatio === '9:16' ? '1080x1920' : '1024x1024',
           });
 
