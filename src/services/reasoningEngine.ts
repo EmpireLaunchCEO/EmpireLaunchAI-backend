@@ -28,7 +28,8 @@ export class ReasoningEngine {
           const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) return text;
         }
-        console.warn('[ReasoningEngine] Gemini failed, trying OpenAI fallback:', response.status);
+        const errorBody = await response.text().catch(() => '');
+        console.warn('[ReasoningEngine] Gemini failed:', response.status, errorBody.slice(0, 200));
       } catch (err) {
         console.warn('[ReasoningEngine] Gemini error, trying OpenAI fallback:', (err as Error).message);
       }
