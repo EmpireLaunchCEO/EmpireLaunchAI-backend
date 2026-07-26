@@ -183,7 +183,12 @@ router.get('/admin/apply-migrations', async (req, res) => {
   try {
     await db.execute(sql`ALTER TABLE goals ADD COLUMN IF NOT EXISTS slot_index INTEGER DEFAULT 0`);
     await db.execute(sql`CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), type TEXT DEFAULT 'subscription', stripe_session_id TEXT, amount INTEGER, paid_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())`);
-    res.json({ status: 'migrations applied', columns: ['slot_index'], tables: ['subscriptions'] });
+    await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT`);
+    await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMP`);
+    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS style_dna_source TEXT`);
+    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS style_dna_strand_ids JSONB`);
+    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS master_pdf_url TEXT`);
+    res.json({ status: 'migrations applied', columns: ['slot_index','stripe_subscription_id','canceled_at','style_dna_source','style_dna_strand_ids','master_pdf_url'], tables: ['subscriptions'] });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
