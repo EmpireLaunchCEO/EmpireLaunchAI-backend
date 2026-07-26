@@ -185,9 +185,7 @@ router.get('/admin/apply-migrations', async (req, res) => {
     await db.execute(sql`CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), type TEXT DEFAULT 'subscription', stripe_session_id TEXT, amount INTEGER, paid_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())`);
     await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT`);
     await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMP`);
-    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS style_dna_source TEXT`);
-    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS style_dna_strand_ids JSONB`);
-    await db.execute(sql`ALTER TABLE master_assets ADD COLUMN IF NOT EXISTS master_pdf_url TEXT`);
+    await db.execute(sql`CREATE TABLE IF NOT EXISTS master_assets (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), campaign_id UUID, style_dna JSONB, style_dna_source TEXT, style_dna_strand_ids JSONB, asset_type TEXT NOT NULL, status TEXT DEFAULT 'completed', master_video_url TEXT, master_image_url TEXT, master_pdf_url TEXT, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())`);
     res.json({ status: 'migrations applied', columns: ['slot_index','stripe_subscription_id','canceled_at','style_dna_source','style_dna_strand_ids','master_pdf_url'], tables: ['subscriptions'] });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
