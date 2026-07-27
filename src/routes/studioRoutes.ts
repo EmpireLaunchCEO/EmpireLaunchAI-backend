@@ -4,7 +4,6 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
-import { libraryService } from '../services/libraryService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
@@ -113,22 +112,18 @@ router.post('/process', async (req: Request, res: Response) => {
               title: decision.prompt.slice(0, 60), status: 'completed',
               fileUrl: imgUrl,
               metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
-            }).onConflictDoNothing();
+            });
 
-            // Auto-save to library
-            try {
-              await libraryService.create({
-                userId: uid,
-                brandId: brandId || uid,
-                type: assetType,
-                name: decision.prompt.slice(0, 60),
-                filePath: imgUrl,
-                mimeType: 'image/png',
-                metadata: { aiProvider, source: 'studio', creationId },
-              });
-            } catch (libErr: any) {
-              console.warn('[StudioRoute] Library save failed:', libErr.message);
-            }
+            // Create approval for Operations page
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
+              userId: uid,
+              type: assetType,
+              status: 'completed',
+              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'completed' },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
           }
         } catch (imgErr: any) {
           console.error('[StudioRoute] Image generation failed:', imgErr.message);
@@ -215,27 +210,20 @@ router.post('/process', async (req: Request, res: Response) => {
             await db.insert(schema.creations).values({
               id: creationId, userId: uid, type: 'enhanced_video',
               title: decision.prompt.slice(0, 60), status: 'completed',
-              fileUrl: soraResult.videoUrl || soraResult.videoPath,
+              fileUrl: soraResult.videoPath,
               metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
-            }).onConflictDoNothing();
+            });
 
-            // Auto-save each output to library
-            for (const out of renderResult.outputs) {
-              try {
-                await libraryService.create({
-                  userId: uid,
-                  brandId: brandId || uid,
-                  type: 'video',
-                  name: `${decision.prompt.slice(0, 50)} - ${out.platform}`,
-                  filePath: out.videoUrl,
-                  thumbnailPath: out.thumbnailUrl,
-                  mimeType: 'video/mp4',
-                  metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
-                });
-              } catch (libErr: any) {
-                console.warn('[StudioRoute] Library save failed:', libErr.message);
-              }
-            }
+            // Create approval for Operations page
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
+              userId: uid,
+              type: 'video',
+              status: 'completed',
+              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'completed' },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
@@ -263,22 +251,24 @@ router.post('/process', async (req: Request, res: Response) => {
                   thumbnailUrl: out.thumbnailUrl,
                   platform: out.platform,
                 });
-                // Auto-save to library
-                try {
-                  await libraryService.create({
-                    userId: uid,
-                    brandId: brandId || uid,
-                    type: 'edit',
-                    name: `Edited Video - ${out.platform}`,
-                    filePath: out.videoUrl,
-                    thumbnailPath: out.thumbnailUrl,
-                    mimeType: 'video/mp4',
-                    metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
-                  });
-                } catch (libErr: any) {
-                  console.warn('[StudioRoute] Library save failed:', libErr.message);
-                }
               }
+
+              // Create approval for Operations page
+              await db.insert(schema.approvals).values({
+                id: uuidv4(),
+                userId: uid,
+                type: 'edit',
+                status: 'completed',
+                payload: {
+                  assetId: creationId,
+                  title: `Edited Video - ${decision.parameters.platform || 'custom'}`,
+                  videoUrl: renderResult.outputs[0]?.videoUrl,
+                  platforms: decision.parameters.platform ? [decision.parameters.platform] : ['custom'],
+                  status: 'completed',
+                },
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
             }
           } catch (editErr: any) {
             console.error('[StudioRoute] Video editing failed:', editErr.message);
@@ -308,22 +298,23 @@ router.post('/process', async (req: Request, res: Response) => {
                   thumbnailUrl: out.thumbnailUrl,
                   platform: out.platform,
                 });
-                // Auto-save to library
-                try {
-                  await libraryService.create({
-                    userId: uid,
-                    brandId: brandId || uid,
-                    type: 'video',
-                    name: `Rendered - ${out.platform}`,
-                    filePath: out.videoUrl,
-                    thumbnailPath: out.thumbnailUrl,
-                    mimeType: 'video/mp4',
-                    metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
-                  });
-                } catch (libErr: any) {
-                  console.warn('[StudioRoute] Library save failed:', libErr.message);
-                }
               }
+
+              // Create approval for Operations page
+              await db.insert(schema.approvals).values({
+                id: uuidv4(),
+                userId: uid,
+                type: 'render',
+                status: 'completed',
+                payload: {
+                  assetId: creationId,
+                  title: `Final Render - ${decision.prompt.slice(0, 50)}`,
+                  videoUrl: renderResult.outputs[0]?.videoUrl,
+                  status: 'completed',
+                },
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
             }
           } catch (renderErr: any) {
             console.error('[StudioRoute] Final rendering failed:', renderErr.message);
