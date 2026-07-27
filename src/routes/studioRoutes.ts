@@ -268,24 +268,9 @@ router.post('/process', async (req: Request, res: Response) => {
                 console.warn('[StudioRoute] Library save failed:', libErr.message);
               }
             }
-          } else {
-            // Sora failed — return error to user
-            assets = [];
-            return res.json({
-              status: 'error',
-              classification: 'video_creation',
-              response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Try again or rephrase your request.`,
-              error: soraResult.error || 'sora_failed',
-            } as StudioResponse);
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
-          return res.json({
-            status: 'error',
-            classification: 'video_creation',
-            response: `Video generation error: ${(vidErr as Error).message}. Please try again.`,
-            error: (vidErr as Error).message,
-          } as StudioResponse);
         }
         break;
       }
