@@ -58,7 +58,7 @@ export class AiRouterService {
     try {
       const raw = await reasoningEngine.reason(`${systemPrompt}\n\n${userMessage}`, {
         temperature: 0.3,
-        maxTokens: 4096,
+        maxTokens: 1024,
       });
 
       return this.parseDecision(raw);
