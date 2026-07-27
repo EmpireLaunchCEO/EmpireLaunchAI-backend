@@ -5,6 +5,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { ProductionScene, TextOverlay } from './productionDirector.js';
 import { soraVideoService } from './soraVideoService.js';
+import { r2Storage } from './r2StorageService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -13,6 +14,7 @@ export interface RenderParams {
   pacing: 'fast' | 'moderate' | 'slow';
   outputDir?: string;
   backgroundAudioUrl?: string;
+  userId?: string; // For R2 upload
 }
 
 export interface RenderResult {
@@ -67,9 +69,16 @@ export class RenderingEngine {
 
       if (soraResult.success && soraResult.videoPath) {
         console.log(`[RenderingEngine] Sora 2 generated video: ${soraResult.videoPath}`);
+        const vidUrl = soraResult.videoUrl || soraResult.videoPath;
+        // Upload to R2 if configured
+        let finalUrl = vidUrl;
+        if (params.userId && r2Storage.isAvailable) {
+          const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, params.userId, 'renders/sora', 'video/mp4');
+          finalUrl = r2.url || vidUrl;
+        }
         return {
           success: true,
-          videoUrl: soraResult.videoUrl || soraResult.videoPath,
+          videoUrl: finalUrl,
           sceneImages: [soraResult.videoPath],
         };
       }
@@ -92,9 +101,16 @@ export class RenderingEngine {
       console.log(`[RenderingEngine] Composing video from ${sceneImages.length} scenes...`);
       const videoUrl = await this.composeVideo(sceneImages, params.scenes, params.pacing, workingDir, params.backgroundAudioUrl);
 
+      // Upload to R2 if configured
+      let finalUrl = videoUrl;
+      if (params.userId && r2Storage.isAvailable) {
+        const r2 = await r2Storage.uploadLocalFile(videoUrl, params.userId, 'renders/ffmpeg', 'video/mp4');
+        finalUrl = r2.url || videoUrl;
+      }
+
       return {
         success: true,
-        videoUrl,
+        videoUrl: finalUrl,
         sceneImages,
       };
     } catch (error: any) {

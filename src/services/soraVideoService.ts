@@ -1,11 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { r2Storage } from './r2StorageService.js';
 
 export interface SoraGenerationOptions {
   duration?: number;      // seconds, default 10
   size?: string;          // e.g. '1024x1024', '1920x1080'
   style?: string;         // 'natural' | 'cinematic' | 'animated'
+  userId?: string;        // For R2 upload
 }
 
 export interface SoraGenerationResult {
@@ -77,10 +79,11 @@ export class SoraVideoService {
         const directUrl = submitData?.video_url || submitData?.data?.[0]?.video_url;
         if (directUrl) {
           const localPath = await this.downloadVideo(directUrl, taskId);
+          const publicUrl = await this.maybeUploadToR2(localPath, options.userId);
           return {
             success: true,
             videoPath: localPath,
-            videoUrl: `/assets/cinema/sora/${path.basename(localPath)}`,
+            videoUrl: publicUrl,
           };
         }
         return { success: false, error: 'No generation ID or video URL in Sora response' };
@@ -94,17 +97,27 @@ export class SoraVideoService {
 
       // Step 3: Download video locally
       const localPath = await this.downloadVideo(videoUrl, taskId);
+      const publicUrl = await this.maybeUploadToR2(localPath, options.userId);
 
       console.log(`[SoraVideoService] Generated: ${localPath}`);
       return {
         success: true,
         videoPath: localPath,
-        videoUrl: `/assets/cinema/sora/${path.basename(localPath)}`,
+        videoUrl: publicUrl,
       };
     } catch (error: any) {
       console.error('[SoraVideoService] Generation failed:', error.message);
       return { success: false, error: error.message };
     }
+  }
+
+  /** Upload video to R2 if configured, return public URL */
+  private async maybeUploadToR2(localPath: string, userId?: string): Promise<string> {
+    if (userId && r2Storage.isAvailable) {
+      const result = await r2Storage.uploadLocalFile(localPath, userId, 'cinema/sora', 'video/mp4');
+      if (result.url !== localPath) return result.url;
+    }
+    return `/assets/cinema/sora/${path.basename(localPath)}`;
   }
 
   /**

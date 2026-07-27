@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
 import { soraVideoService } from './soraVideoService.js';
+import { r2Storage } from './r2StorageService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -95,11 +96,14 @@ export class CinemaEngineService {
           fs.copyFileSync(soraResult.videoPath, outputPath);
           try { fs.unlinkSync(soraResult.videoPath); } catch {}
 
+          // Upload to R2 if available
+          const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
+
           await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'sora-2' });
 
           return {
             id: assetId,
-            videoUrl: `/assets/cinema/renders/twin_${assetId}.mp4`,
+            videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
             thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
             status: 'completed',
             metadata: {
@@ -121,6 +125,9 @@ export class CinemaEngineService {
       );
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData);
 
+      // Upload to R2 if available
+      const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
+
       await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length });
 
       for (const fp of framePaths) {
@@ -129,7 +136,7 @@ export class CinemaEngineService {
 
       return {
         id: assetId,
-        videoUrl: `/assets/cinema/renders/twin_${assetId}.mp4`,
+        videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
         thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
         status: 'completed',
         metadata: {
@@ -417,10 +424,15 @@ Style: professional, well-lit studio background, natural head movement, ${style}
           .on('error', reject);
       });
 
+      // Upload to R2 if available
+      const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/enhanced', 'video/mp4');
+      const thumbPath = path.join(this.cinemaDir, `thumb_${assetId}.jpg`);
+      const r2Thumb = await r2Storage.uploadLocalFile(thumbPath, userId, 'cinema/thumbs', 'image/jpeg');
+
       return {
         id: assetId,
-        videoUrl: `/assets/cinema/renders/enhanced_${assetId}.mp4`,
-        thumbnailUrl: `/assets/cinema/renders/thumb_${assetId}.jpg`,
+        videoUrl: r2Result.url || `/assets/cinema/renders/enhanced_${assetId}.mp4`,
+        thumbnailUrl: r2Thumb.url || `/assets/cinema/renders/thumb_${assetId}.jpg`,
         status: 'completed',
         metadata: {
           enhancements: ['color_grading', 'saturation_boost', 'noise_reduction'],
