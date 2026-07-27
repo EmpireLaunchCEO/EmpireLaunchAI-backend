@@ -19,7 +19,7 @@ export class ReasoningEngine {
             contents: [
               { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
             ],
-            generationConfig: { temperature: 0.5, maxOutputTokens: 1024 }
+            generationConfig: { temperature: 0.5, maxOutputTokens: 8192 }
           })
         });
 
@@ -54,7 +54,7 @@ export class ReasoningEngine {
           { role: 'user', content: userMessage }
         ],
         temperature: 0.5,
-        max_tokens: 1024
+        max_tokens: 8192
       })
     });
 
@@ -117,7 +117,7 @@ export class ReasoningEngine {
   async reason(prompt: string, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
     try {
       const temp = options?.temperature ?? 0.5;
-      const maxTokens = options?.maxTokens ?? 1024;
+      const maxTokens = options?.maxTokens ?? 8192;
 
       // Try Gemini first
       const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
