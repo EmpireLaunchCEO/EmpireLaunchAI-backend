@@ -28,7 +28,7 @@ router.post('/create-twin', (req, res) =>
   cinemaController.createNeuralTwin(req, res)
 );
 
-// Generate video from text idea (Gemini → DALL-E/Sharp/FFmpeg pipeline)
+// Generate video from text idea (Gemini → Sora 2 / GPT Image 2 + FFmpeg pipeline)
 router.post('/generate-video', mobileAuth, (req, res) =>
   cinemaController.generateVideo(req, res)
 );

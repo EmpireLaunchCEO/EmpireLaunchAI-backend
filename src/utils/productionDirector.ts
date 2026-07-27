@@ -50,7 +50,7 @@ export interface ProductionScriptData {
 /**
  * Production Director — THE STRATEGIST.
  * Uses Gemini 1.5 Flash to create complete Production Scripts
- * scene-by-scene with DALL-E prompts, text overlays, and transitions.
+ * scene-by-scene with image generation prompts, text overlays, and transitions.
  *
  * Implements:
  * - Zero-Source-Image: No competitor images are referenced or stored
@@ -79,7 +79,7 @@ export class ProductionDirector {
     const systemPrompt = `You are the EMPIRE STUDIO PRODUCTION DIRECTOR. Your job is to create a complete, scene-by-scene Production Script for a social media video promoting a digital product.
 
 CRITICAL RULES:
-1. Each scene MUST have a detailed DALL-E image generation prompt — describe the scene visually (lighting, colors, composition, mood)
+1. Each scene MUST have a detailed image generation prompt — describe the scene visually (lighting, colors, composition, mood)
 2. NEVER include text, logos, or product names in the image prompt
 3. Text overlays are specified SEPARATELY — the image prompt must be text-free
 4. Scene transitions must create a smooth visual narrative
@@ -112,7 +112,7 @@ Return JSON with:
       "sceneId": "scene_01_hook",
       "durationSeconds": number (2-5),
       "transition": "fade|slide_left|slide_right|zoom_in|none",
-      "imagePrompt": "Detailed DALL-E prompt with lighting, colors, composition, NO TEXT",
+      "imagePrompt": "Detailed image generation prompt with lighting, colors, composition, NO TEXT",
       "textOverlays": [
         {
           "text": "string",

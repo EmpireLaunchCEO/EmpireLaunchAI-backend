@@ -34,8 +34,7 @@ export interface CreationRequest {
 
 export class CreationEngine {
   /**
-   * Main entry point — generates master asset using native pipeline (DALL-E + FFmpeg).
-   * Bypasses Canva/CapCut completely. Zero external subscriptions.
+   * Main entry point — generates master asset using native pipeline (Sora 2 / GPT Image 2 + FFmpeg).
    */
   async generateMasterAsset(request: CreationRequest) {
     const { userId, campaignId, niche, productName, platforms, archetype } = request;
@@ -70,8 +69,8 @@ export class CreationEngine {
       archetype,
     });
 
-    // 4. Render the video using native RenderingEngine (DALL-E 3 + Sharp + FFmpeg)
-    webSocketService.notifyUser(userId, 'ai-log', { message: `🎨 [STUDIO] Rendering Engine: Generating scenes via DALL-E 3...` });
+    // 4. Render the video using native RenderingEngine (Sora 2 / GPT Image 2 + FFmpeg)
+    webSocketService.notifyUser(userId, 'ai-log', { message: `🎨 [STUDIO] Rendering Engine: Generating scenes via GPT Image 2...` });
 
     const renderResult = await renderingEngine.render({
       scenes: prodScriptData.scenes,

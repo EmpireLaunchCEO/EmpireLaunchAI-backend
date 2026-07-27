@@ -28,11 +28,7 @@ export interface RenderResult {
 
 /**
  * Rendering Engine — takes a Production Script and renders it into a video.
- * Pipeline: DALL-E 3 → Sharp (text overlays) → FFmpeg (video composition)
- *
- * 100% FREE, no external API calls:
- * - Sharp: FREE open-source image processing
- * - FFmpeg: FREE open-source video encoding
+ * Pipeline: Sora 2 (attempted first) → GPT Image 2 + Sharp → FFmpeg (fallback)
  */
 export class RenderingEngine {
   private tempDir: string;

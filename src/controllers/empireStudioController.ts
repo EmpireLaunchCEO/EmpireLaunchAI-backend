@@ -87,7 +87,7 @@ export class EmpireStudioController {
 
   /**
    * POST /api/studio/create
-   * Create a master asset using DALL-E + FFmpeg native pipeline.
+   * Create a master asset using Sora 2 / GPT Image 2 + FFmpeg native pipeline.
    */
   async create(req: Request, res: Response) {
     const userId = (req as any).userId;
