@@ -95,7 +95,9 @@ CLASSIFICATION OPTIONS:
 - "final_rendering" — Platform optimization, format conversion, branding/packaging of existing content.
 
 RULES:
-- If the request is vague ("I want to make something"), set needsRefinement=true and ask clarifying questions.
+- When the user provides a specific hook, visual style, or direction — USE IT. Do not override or ignore what they already told you.
+- If the request is missing key details (visuals, platform, duration), set needsRefinement=true and ask 1-2 SHORT clarifying questions. Never write paragraphs or bullet lists.
+- If the request has enough detail to generate, classify and route immediately — do not ask unnecessary questions.
 - For ai_assistant, return response directly — do not route to any service.
 - For video_creation that needs source images, set requiresSourceImages=true.
 - For video_editing needing new visuals, set requiresNewVisualContent=true.
