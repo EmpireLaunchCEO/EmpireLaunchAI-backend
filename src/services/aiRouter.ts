@@ -96,12 +96,12 @@ CLASSIFICATION OPTIONS:
 
 RULES:
 - When the user provides a specific hook, visual style, or direction — USE IT. Do not override or ignore what they already told you.
-- If the request is missing key details (visuals, duration, tone), set needsRefinement=true and ask 1-2 SHORT clarifying questions. Never write paragraphs or bullet lists.
-- NEVER ask about platforms or aspect ratios. Always infer the platform from context, or default to generating for all platforms (TikTok, Instagram Reels, YouTube Shorts, Pinterest).
+- If the request is missing key details (visuals, platform, duration), set needsRefinement=true and ask 1-2 SHORT clarifying questions. Never write paragraphs or bullet lists.
 - If the request has enough detail to generate, classify and route immediately — do not ask unnecessary questions.
 - For ai_assistant, return response directly — do not route to any service.
 - For video_creation that needs source images, set requiresSourceImages=true.
 - For video_editing needing new visuals, set requiresNewVisualContent=true.
+- Always infer platform from context ("TikTok", "Instagram", "Etsy").
 - Output MUST be valid JSON only — no markdown, no explanation.`;
   }
 
