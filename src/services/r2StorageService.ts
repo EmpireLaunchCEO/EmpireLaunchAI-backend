@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import fs from 'fs';
 import path from 'path';
@@ -146,6 +146,25 @@ export class R2StorageService {
     } catch (error: any) {
       console.error('[R2Storage] Delete failed:', error.message);
       return false;
+    }
+  }
+
+  /** Copy an object within the same R2 bucket. Returns the destination key. */
+  async copyObject(sourceKey: string, destKey: string): Promise<R2UploadResult> {
+    const client = getClient();
+    if (!client) return { success: false, error: 'R2 not configured' };
+
+    try {
+      const copySource = `${BUCKET}/${sourceKey}`;
+      await client.send(new CopyObjectCommand({
+        Bucket: BUCKET,
+        CopySource: copySource,
+        Key: destKey,
+      }));
+      return { success: true, key: destKey };
+    } catch (error: any) {
+      console.error('[R2Storage] Copy failed:', error.message);
+      return { success: false, error: error.message };
     }
   }
 

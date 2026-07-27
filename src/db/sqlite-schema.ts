@@ -651,3 +651,23 @@ export const inboxDrafts = sqliteTable('inbox_drafts', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   });
+
+/**
+ * Client Asset Library — stores R2 keys for all generated assets.
+ * Assets auto-expire 90 days from creation.
+ */
+export const libraryAssets = sqliteTable('library_assets', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  brandId: text('brand_id'),
+  type: text('type').notNull(), // 'video', 'twin_video', 'edit', 'faceless', 'design'
+  name: text('name').notNull(),
+  filePath: text('file_path').notNull(),    // R2 object key
+  thumbnailPath: text('thumbnail_path'),     // R2 object key for thumbnail
+  mimeType: text('mime_type'),
+  fileSize: integer('file_size'),
+  metadata: text('metadata', { mode: 'json' }).default('{}').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});

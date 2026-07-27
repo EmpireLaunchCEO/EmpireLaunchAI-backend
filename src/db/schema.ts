@@ -528,3 +528,23 @@ export const libraryItems = pgTable('library_items', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+/**
+ * Client Asset Library — stores R2 keys for all generated assets.
+ * Assets auto-expire 90 days from creation.
+ */
+export const libraryAssets = pgTable('library_assets', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  brandId: text('brand_id'),
+  type: text('type').notNull(), // 'video', 'twin_video', 'edit', 'faceless', 'design'
+  name: text('name').notNull(),
+  filePath: text('file_path').notNull(),    // R2 object key
+  thumbnailPath: text('thumbnail_path'),     // R2 object key for thumbnail
+  mimeType: text('mime_type'),
+  fileSize: integer('file_size'),
+  metadata: jsonb('metadata').default({}).notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
