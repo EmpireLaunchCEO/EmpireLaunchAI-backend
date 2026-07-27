@@ -85,7 +85,7 @@ export const respondToApproval = async (req: Request, res: Response) => {
     }
     const result = await approvalService.respondToRequest(requestId, status);
 
-    // ── R2 Cleanup on Rejection ─────────────────────────────────────────────
+    // ── Full Delete on Rejection (R2 files + DB record) ────────────────────
     if (status === 'rejected' && result.payload) {
       const payload = result.payload as any;
       // Delete the video file from R2 if it's stored there
@@ -104,6 +104,9 @@ export const respondToApproval = async (req: Request, res: Response) => {
           console.warn(`[Approval] Failed to delete R2 image for ${requestId}:`, err.message)
         );
       }
+      // Delete the approval record entirely — no trace left
+      await db.delete(approvals).where(eq(approvals.id, requestId));
+      console.log(`[Approval] Deleted approval record ${requestId}`);
     }
 
     // 1. Handle Content Approvals
