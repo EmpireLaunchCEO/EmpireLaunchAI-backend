@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { approvalService } from '../services/approvalService.js';
 import { db, schema } from '../db/index.js';
-import { eq, sql, and } from 'drizzle-orm';
+import { eq, sql, and, inArray } from 'drizzle-orm';
 const { scheduledPosts, users, approvals } = schema;
 
 export const getPendingApprovals = async (req: Request, res: Response) => {
@@ -10,13 +10,13 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    // Fetch pending approvals for this user
+    // Fetch all non-failed approvals for this user (pending + completed)
     const pendingItems = await db.select()
       .from(approvals)
       .where(
         and(
           eq(approvals.userId, userId),
-          eq(approvals.status, 'pending')
+          inArray(approvals.status, ['pending', 'completed'])
         )
       )
       .orderBy(approvals.createdAt)

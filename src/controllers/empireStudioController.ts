@@ -169,6 +169,7 @@ export class EmpireStudioController {
       res.json({ status: 'processing', assetId, message: 'Video generation started' });
 
       // Run pipeline in background (don't await — let it complete asynchronously)
+      console.log('[EmpireStudioController] Starting background pipeline for approval:', approvalId);
       creationEngine.generateMasterAsset({
         userId,
         campaignId: campaignIdValue,
@@ -177,6 +178,7 @@ export class EmpireStudioController {
         platforms: safePlatforms,
         archetype: archetype || 'creator',
       }).then(async (result) => {
+        console.log('[EmpireStudioController] Pipeline completed, result:', JSON.stringify({ masterAssetUrl: result.masterAssetUrl, success: result.success }));
         // Update the approval with the video URL
         if (result.masterAssetUrl) {
           await db.update(schema.approvals)
