@@ -64,15 +64,10 @@ export const clearApprovals = async (req: Request, res: Response) => {
     }
 
     const result = await db.delete(approvals)
-      .where(
-        and(
-          eq(approvals.userId, userId),
-          eq(approvals.status, 'pending')
-        )
-      );
+      .where(eq(approvals.userId, userId));
 
-    console.log(`Cleared pending approvals for user ${userId}`);
-    res.json({ status: 'success', message: 'Pending approvals cleared' });
+    console.log(`Cleared all approvals for user ${userId}`);
+    res.json({ status: 'success', message: 'All approvals cleared' });
   } catch (error: any) {
     console.error('Error clearing approvals:', error);
     res.status(500).json({ status: 'error', error: error.message });
