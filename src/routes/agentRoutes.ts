@@ -186,7 +186,10 @@ router.get('/admin/apply-migrations', async (req, res) => {
     await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT`);
     await db.execute(sql`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMP`);
     await db.execute(sql`CREATE TABLE IF NOT EXISTS master_assets (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), campaign_id UUID, style_dna JSONB, style_dna_source TEXT, style_dna_strand_ids JSONB, asset_type TEXT NOT NULL, status TEXT DEFAULT 'completed', master_video_url TEXT, master_image_url TEXT, master_pdf_url TEXT, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())`);
-    res.json({ status: 'migrations applied', columns: ['slot_index','stripe_subscription_id','canceled_at','style_dna_source','style_dna_strand_ids','master_pdf_url'], tables: ['subscriptions'] });
+    // Clean up old stuck approvals with no video
+    await db.delete(schema.approvals).where(eq(schema.approvals.id, '0ce84455-51ee-4342-864c-2b9d090b8acc'));
+    await db.delete(schema.approvals).where(eq(schema.approvals.id, '8b06f2fd-c182-4a82-bc71-008a991ada86'));
+    res.json({ status: 'migrations applied + cleaned 2 stuck approvals' });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
