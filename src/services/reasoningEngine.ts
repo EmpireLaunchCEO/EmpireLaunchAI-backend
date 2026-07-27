@@ -172,7 +172,7 @@ export class ReasoningEngine {
     }
   }
 
-  async consult(userId: string, message: string, niche?: string): Promise<{ message: string; stylePreviews?: any[] }> {
+  async consult(userId: string, message: string, niche?: string, history?: Array<{ role: string; content: string }>): Promise<{ message: string; stylePreviews?: any[] }> {
     // Fetch user's archetype from active goal — gracefully handle missing/invalid userId
     let archetype = 'creator';
     let businessName = '';
@@ -193,11 +193,15 @@ export class ReasoningEngine {
       console.warn('[ReasoningEngine] Could not fetch user settings:', (err as Error).message);
     }
 
+    const conversationContext = history && history.length > 0
+      ? '\n\nCONVERSATION SO FAR:\n' + history.map(m => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`).join('\n')
+      : '';
+
     const systemPrompt = `You are a sharp, no-fluff creative director for short-form video. You know what performs on TikTok, YouTube Shorts, and Instagram Reels — hooks, pacing, colors, trending transitions.
 
-USER'S BUSINESS:${businessName ? `\n- Business name/purpose: ${businessName}` : ''}${businessNiche ? `\n- Their niche: ${businessNiche}` : ''}${niche ? `\n- Current topic: ${niche}` : ''}
+USER'S BUSINESS:${businessName ? `\n- Business name/purpose: ${businessName}` : ''}${businessNiche ? `\n- Their niche: ${businessNiche}` : ''}${niche ? `\n- Current topic: ${niche}` : ''}${conversationContext}
 
-Be conversational and helpful — offer creative direction, ask questions when you need clarity, and guide them toward a great final concept. Be yourself.`;
+Be conversational and helpful — offer creative direction, ask questions when you need clarity, and guide them toward a great final concept. Remember what's already been discussed — don't re-ask about things they've already told you. Be yourself.`;
 
     let content: string;
     try {

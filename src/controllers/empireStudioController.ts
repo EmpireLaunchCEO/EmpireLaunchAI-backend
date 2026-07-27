@@ -18,14 +18,14 @@ export class EmpireStudioController {
    */
   async chat(req: Request, res: Response) {
     const userId = (req as any).userId;
-    const { message, niche } = req.body;
+    const { message, niche, history } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
     }
 
     try {
-      const result = await reasoningEngine.consult(userId, message, niche);
+      const result = await reasoningEngine.consult(userId, message, niche, history);
 
       // Check if the consultant wants to generate
       if (result.message.includes('[GENERATE]')) {
