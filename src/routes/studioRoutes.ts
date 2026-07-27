@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { aiRouter, RouterDecision } from '../services/aiRouter.js';
+import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { libraryService } from '../services/libraryService.js';
@@ -200,44 +201,121 @@ router.post('/process', async (req: Request, res: Response) => {
           } catch {}
         }
 
-        // Generate video via RenderingEngine (Sora 2 first, GPT Image 2 + FFmpeg fallback)
+        // Generate video via Sora 2
         try {
-          const renderResult = await renderingEngine.render({
-            scenes: [{
-              sceneId: uuidv4().slice(0, 8),
-              imagePrompt: decision.prompt,
-              textOverlays: [],
-              durationSeconds: 0,
-              transition: 'none',
-            }],
-            pacing: 'moderate',
-            userId: uid,
+          const soraResult = await soraVideoService.generateVideo(decision.prompt, {
+            duration: decision.parameters.duration || 60,
+            size: decision.parameters.aspectRatio === '9:16' ? '1080x1920' : '1024x1024',
           });
 
-          if (renderResult.success && renderResult.videoUrl) {
-            assets.push({ type: 'video', url: renderResult.videoUrl });
+          if (soraResult.success && soraResult.videoPath) {
+            // Package for platforms via FFmpeg Render
+            const platforms = decision.parameters.platform
+              ? [decision.parameters.platform]
+              : ['tiktok', 'instagram_reel', 'youtube_shorts'];
 
+            const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
+              platforms,
+              enableWatermark: !!decision.parameters.brandName,
+            });
+
+            if (renderResult.success) {
+              for (const out of renderResult.outputs) {
+                assets.push({
+                  type: 'video',
+                  url: out.videoUrl,
+                  thumbnailUrl: out.thumbnailUrl,
+                  platform: out.platform,
+                });
+              }
+            }
+
+            // Store in creations table with AI provider tag
             const creationId = uuidv4();
-            const aiProvider = 'Sora 2';
+            const aiProvider = 'Sora 2 + FFmpeg';
             await db.insert(schema.creations).values({
               id: creationId, userId: uid, type: 'enhanced_video',
               title: decision.prompt.slice(0, 60), status: 'completed',
-              fileUrl: renderResult.videoUrl,
-              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms: ['tiktok'], aiProvider },
+              fileUrl: soraResult.videoUrl || soraResult.videoPath,
+              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
             }).onConflictDoNothing();
 
+            // Also create approval for Operations page
             await db.insert(schema.approvals).values({
-              id: uuidv4(), userId: uid, type: 'video', status: 'completed',
-              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: renderResult.videoUrl, platforms: ['tiktok'], status: 'completed' },
-              createdAt: new Date(), updatedAt: new Date(),
+              id: uuidv4(),
+              userId: uid,
+              type: 'video',
+              status: 'completed',
+              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'completed' },
+              createdAt: new Date(),
+              updatedAt: new Date(),
             });
+
+            // Auto-save each output to library
+            for (const out of renderResult.outputs) {
+              try {
+                await libraryService.create({
+                  userId: uid,
+                  brandId: brandId || uid,
+                  type: 'video',
+                  name: `${decision.prompt.slice(0, 50)} - ${out.platform}`,
+                  filePath: out.videoUrl,
+                  thumbnailPath: out.thumbnailUrl,
+                  mimeType: 'video/mp4',
+                  metadata: { aiProvider, source: 'studio', creationId, platform: out.platform },
+                });
+              } catch (libErr: any) {
+                console.warn('[StudioRoute] Library save failed:', libErr.message);
+              }
+            }
           } else {
-            return res.json({
-              status: 'error',
-              classification: 'video_creation',
-              response: `Video generation failed: ${renderResult.error || 'Rendering engine returned no video'}. Please try again.`,
-              error: renderResult.error || 'render_failed',
-            } as StudioResponse);
+            // Sora 2 failed — fall back to GPT Image 2 + FFmpeg via rendering engine
+            console.log('[StudioRoute] Sora 2 failed, falling back to GPT Image 2 + FFmpeg');
+            try {
+              const fallbackResult = await renderingEngine.render({
+                scenes: [{
+                  sceneId: uuidv4().slice(0, 8),
+                  imagePrompt: decision.prompt,
+                  textOverlays: [],
+                  durationSeconds: 0,
+                  transition: 'none',
+                }],
+                pacing: 'moderate',
+                userId: uid,
+              });
+              if (fallbackResult.success && fallbackResult.videoUrl) {
+                const creationId = uuidv4();
+                const aiProvider = 'GPT Image 2 + FFmpeg';
+                assets.push({ type: 'video', url: fallbackResult.videoUrl });
+
+                await db.insert(schema.creations).values({
+                  id: creationId, userId: uid, type: 'enhanced_video',
+                  title: decision.prompt.slice(0, 60), status: 'completed',
+                  fileUrl: fallbackResult.videoUrl,
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms: ['tiktok'], aiProvider },
+                }).onConflictDoNothing();
+
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(), userId: uid, type: 'video', status: 'completed',
+                  payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: fallbackResult.videoUrl, platforms: ['tiktok'], status: 'completed' },
+                  createdAt: new Date(), updatedAt: new Date(),
+                });
+              } else {
+                return res.json({
+                  status: 'error',
+                  classification: 'video_creation',
+                  response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Fallback also failed: ${fallbackResult.error || 'unknown'}.`,
+                  error: 'all_pipelines_failed',
+                } as StudioResponse);
+              }
+            } catch (fallbackErr: any) {
+              return res.json({
+                status: 'error',
+                classification: 'video_creation',
+                response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Fallback error: ${fallbackErr.message}.`,
+                error: 'all_pipelines_failed',
+              } as StudioResponse);
+            }
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
