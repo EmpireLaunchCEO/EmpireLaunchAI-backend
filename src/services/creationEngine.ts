@@ -76,6 +76,7 @@ export class CreationEngine {
     const renderResult = await renderingEngine.render({
       scenes: prodScriptData.scenes,
       pacing: prodScriptData.pacing,
+      userId,
     });
 
     if (!renderResult.success || !renderResult.videoUrl) {
