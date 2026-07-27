@@ -269,14 +269,53 @@ router.post('/process', async (req: Request, res: Response) => {
               }
             }
           } else {
-            // Sora failed — return error to user
-            assets = [];
-            return res.json({
-              status: 'error',
-              classification: 'video_creation',
-              response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Try again or rephrase your request.`,
-              error: soraResult.error || 'sora_failed',
-            } as StudioResponse);
+            // Sora 2 failed — fall back to GPT Image 2 + FFmpeg via rendering engine
+            console.log('[StudioRoute] Sora 2 failed, falling back to GPT Image 2 + FFmpeg');
+            try {
+              const fallbackResult = await renderingEngine.render({
+                scenes: [{
+                  sceneId: uuidv4().slice(0, 8),
+                  imagePrompt: decision.prompt,
+                  textOverlays: [],
+                  durationSeconds: 0,
+                  transition: 'none',
+                }],
+                pacing: 'moderate',
+                userId: uid,
+              });
+              if (fallbackResult.success && fallbackResult.videoUrl) {
+                const creationId = uuidv4();
+                const aiProvider = 'GPT Image 2 + FFmpeg';
+                assets.push({ type: 'video', url: fallbackResult.videoUrl });
+
+                await db.insert(schema.creations).values({
+                  id: creationId, userId: uid, type: 'enhanced_video',
+                  title: decision.prompt.slice(0, 60), status: 'completed',
+                  fileUrl: fallbackResult.videoUrl,
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms: ['tiktok'], aiProvider },
+                }).onConflictDoNothing();
+
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(), userId: uid, type: 'video', status: 'completed',
+                  payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: fallbackResult.videoUrl, platforms: ['tiktok'], status: 'completed' },
+                  createdAt: new Date(), updatedAt: new Date(),
+                });
+              } else {
+                return res.json({
+                  status: 'error',
+                  classification: 'video_creation',
+                  response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Fallback also failed: ${fallbackResult.error || 'unknown'}.`,
+                  error: 'all_pipelines_failed',
+                } as StudioResponse);
+              }
+            } catch (fallbackErr: any) {
+              return res.json({
+                status: 'error',
+                classification: 'video_creation',
+                response: `Video generation failed: ${soraResult.error || 'Sora 2 unavailable'}. Fallback error: ${fallbackErr.message}.`,
+                error: 'all_pipelines_failed',
+              } as StudioResponse);
+            }
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
