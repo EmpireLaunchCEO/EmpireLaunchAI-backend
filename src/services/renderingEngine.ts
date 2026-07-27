@@ -231,11 +231,6 @@ export class RenderingEngine {
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const outputPath = path.join(outputDir, `final_render.mp4`);
-      const relativePath = path.relative(
-        path.join(process.cwd(), 'temp', 'renders'),
-        outputPath
-      );
-      const publicUrl = `/renders/${relativePath}`;
 
       // Calculate frames per scene based on duration (30fps)
       const frameRates = scenes.map(s => `-framerate 1/${s.durationSeconds}`);
@@ -287,7 +282,7 @@ export class RenderingEngine {
       command
         .on('end', () => {
           console.log(`[RenderingEngine] Video rendered: ${outputPath}`);
-          resolve(publicUrl);
+          resolve(outputPath);
         })
         .on('error', (err) => {
           console.error('[RenderingEngine] FFmpeg error:', err.message);

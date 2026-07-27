@@ -183,6 +183,7 @@ export class EmpireStudioController {
         if (result.masterAssetUrl) {
           await db.update(schema.approvals)
             .set({
+              status: 'completed',
               payload: {
                 assetId,
                 title: title || angle,
@@ -218,6 +219,7 @@ export class EmpireStudioController {
         try {
           await db.update(schema.approvals)
             .set({
+              status: 'failed',
               payload: {
                 assetId,
                 title: title || angle,
