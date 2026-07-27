@@ -311,23 +311,6 @@ router.post('/process', async (req: Request, res: Response) => {
                   console.warn('[StudioRoute] Library save failed:', libErr.message);
                 }
               }
-
-              // Create approval record for Operations page
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: uid,
-                type: 'edit',
-                status: 'completed',
-                payload: {
-                  assetId: creationId,
-                  title: `Edited Video - ${decision.parameters.platform || 'custom'}`,
-                  videoUrl: renderResult.outputs[0]?.videoUrl,
-                  platforms: decision.parameters.platform ? [decision.parameters.platform] : ['custom'],
-                  status: 'completed',
-                },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              }).onConflictDoNothing();
             }
           } catch (editErr: any) {
             console.error('[StudioRoute] Video editing failed:', editErr.message);
@@ -373,22 +356,6 @@ router.post('/process', async (req: Request, res: Response) => {
                   console.warn('[StudioRoute] Library save failed:', libErr.message);
                 }
               }
-
-              // Create approval record for Operations page
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: uid,
-                type: 'render',
-                status: 'completed',
-                payload: {
-                  assetId: creationId,
-                  title: `Final Render - ${decision.prompt.slice(0, 50)}`,
-                  videoUrl: renderResult.outputs[0]?.videoUrl,
-                  status: 'completed',
-                },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              }).onConflictDoNothing();
             }
           } catch (renderErr: any) {
             console.error('[StudioRoute] Final rendering failed:', renderErr.message);
