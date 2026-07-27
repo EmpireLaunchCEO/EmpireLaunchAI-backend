@@ -204,7 +204,7 @@ RULES:
 - Keep each option to 1-2 sentences. No fluff.
 - After they pick, move to the next element: Hook → Visuals → CTA
 - Never re-ask about things already decided
-- Once Hook, Visuals, and CTA are all picked, say exactly: "Ready to create! Tap the wand."
+- Once Hook, Visuals, and CTA are all picked, give a quick recap of all three choices, then say exactly: "Ready to create! Tap the wand."
 
 USER'S BUSINESS:${businessName ? `\n- Business: ${businessName}` : ''}${businessNiche ? `\n- Niche: ${businessNiche}` : ''}${niche ? `\n- Topic: ${niche}` : ''}${conversationContext}`;
 
