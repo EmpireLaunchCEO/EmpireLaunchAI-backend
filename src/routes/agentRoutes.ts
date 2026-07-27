@@ -192,4 +192,27 @@ router.get('/admin/apply-migrations', async (req, res) => {
   }
 });
 
+// Debug: Look up user by email to diagnose cross-browser identity issues
+router.get('/debug/user-by-email', async (req, res) => {
+  try {
+    const email = req.query.email as string;
+    if (!email) return res.status(400).json({ error: 'email query param required' });
+    const [user] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    // Also check if there are goals for this user
+    const goals = await db.select({ id: schema.goals.id, name: schema.goals.name, slotIndex: schema.goals.slotIndex })
+      .from(schema.goals).where(eq(schema.goals.userId, user.id)).limit(10);
+    // Also check for auto-provisioned users with similar ID pattern
+    const [autoUser] = await db.select().from(schema.users)
+      .where(eq(schema.users.email, `${user.id}@user.empirelaunch.ai`)).limit(1);
+    res.json({ 
+      user: { id: user.id, email: user.email, tier: user.tier },
+      goals: goals.map((g: any) => ({ id: g.id, name: g.name, slot: g.slotIndex })),
+      autoProvisionedMatch: autoUser ? { id: autoUser.id, email: autoUser.email } : null
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;
