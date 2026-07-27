@@ -55,9 +55,9 @@ export class RenderingEngine {
       .map((s, i) => `Scene ${i + 1}: ${s.imagePrompt}`)
       .join('\n');
 
-    // Try Sora 2 first
+    // Sora 2 is the only video generation path — no GPT Image 2 fallback for video
     try {
-      console.log(`[RenderingEngine] Attempting Sora 2 generation...`);
+      console.log(`[RenderingEngine] Generating video via Sora 2...`);
       const soraResult = await soraVideoService.generateVideo(soraPrompt, {
         duration: Math.min(params.scenes.length * 5, 30),
         size: '1024x1024',
@@ -66,7 +66,6 @@ export class RenderingEngine {
       if (soraResult.success && soraResult.videoPath) {
         console.log(`[RenderingEngine] Sora 2 generated video: ${soraResult.videoPath}`);
         const vidUrl = soraResult.videoUrl || soraResult.videoPath;
-        // Upload to R2 if configured
         let finalUrl = vidUrl;
         if (params.userId && r2Storage.isAvailable) {
           const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, params.userId, 'renders/sora', 'video/mp4');
@@ -78,45 +77,42 @@ export class RenderingEngine {
           sceneImages: [soraResult.videoPath],
         };
       }
-      console.warn(`[RenderingEngine] Sora 2 failed: ${soraResult.error}. Falling back to gpt-image-2 + FFmpeg...`);
-    } catch (soraErr: any) {
-      console.warn(`[RenderingEngine] Sora 2 error: ${soraErr.message}. Falling back.`);
-    }
-
-    // Fallback: gpt-image-2 + Sharp + FFmpeg pipeline
-    try {
-      for (let i = 0; i < params.scenes.length; i++) {
-        const scene = params.scenes[i];
-        console.log(`[RenderingEngine] Generating scene ${i + 1}/${params.scenes.length}: "${scene.sceneId}"`);
-
-        const dalleImage = await this.generateSceneImage(scene.imagePrompt, workingDir, i);
-        const imageWithText = await this.applyTextOverlays(dalleImage, scene.textOverlays, workingDir, i);
-        sceneImages.push(imageWithText);
-      }
-
-      console.log(`[RenderingEngine] Composing video from ${sceneImages.length} scenes...`);
-      const videoUrl = await this.composeVideo(sceneImages, params.scenes, params.pacing, workingDir, params.backgroundAudioUrl);
-
-      // Upload to R2 if configured
-      let finalUrl = videoUrl;
-      if (params.userId && r2Storage.isAvailable) {
-        const r2 = await r2Storage.uploadLocalFile(videoUrl, params.userId, 'renders/ffmpeg', 'video/mp4');
-        finalUrl = r2.url || videoUrl;
-      }
-
-      return {
-        success: true,
-        videoUrl: finalUrl,
-        sceneImages,
-      };
-    } catch (error: any) {
-      console.error('[RenderingEngine] Render failed:', error.message);
-      this.cleanupDir(workingDir);
       return {
         success: false,
-        sceneImages,
-        error: error.message,
+        sceneImages: [],
+        error: soraResult.error || 'Sora 2 generation failed',
       };
+    } catch (soraErr: any) {
+      console.error(`[RenderingEngine] Sora 2 error: ${soraErr.message}`);
+      return {
+        success: false,
+        sceneImages: [],
+        error: soraErr.message || 'Sora 2 unavailable',
+      };
+    }
+  }
+
+  /**
+   * Generate a single image using GPT Image 2. For image_creation/image_editing.
+   * Returns the local path to the generated PNG.
+   */
+  async renderImage(prompt: string, userId?: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+    const taskId = uuidv4().slice(0, 8);
+    const workingDir = path.join(this.tempDir, `img_${taskId}`);
+    fs.mkdirSync(workingDir, { recursive: true });
+
+    try {
+      const localPath = await this.generateSceneImage(prompt, workingDir, 0);
+      let finalUrl = localPath;
+      if (userId && r2Storage.isAvailable) {
+        const r2 = await r2Storage.uploadLocalFile(localPath, userId, 'renders/images', 'image/png');
+        finalUrl = r2.url || localPath;
+      }
+      return { success: true, imageUrl: finalUrl };
+    } catch (err: any) {
+      console.error('[RenderingEngine] Image generation failed:', err.message);
+      this.cleanupDir(workingDir);
+      return { success: false, error: err.message };
     }
   }
 

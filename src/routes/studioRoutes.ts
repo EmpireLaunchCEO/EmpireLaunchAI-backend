@@ -98,21 +98,11 @@ router.post('/process', async (req: Request, res: Response) => {
       case 'image_creation':
       case 'image_editing': {
         try {
-          const imageResult = await renderingEngine.render({
-            scenes: [{
-              sceneId: uuidv4().slice(0, 8),
-              imagePrompt: decision.prompt,
-              textOverlays: [],
-              durationSeconds: 0,
-              transition: 'none',
-            }],
-            pacing: 'moderate',
-            userId: uid,
-          });
+          const imageResult = await renderingEngine.renderImage(decision.prompt, uid);
 
-          if (imageResult.success && imageResult.sceneImages.length > 0) {
-            const imgUrl = imageResult.sceneImages[0];
-            const aiProvider = imageResult.videoUrl ? 'Sora 2' : 'GPT Image 2';
+          if (imageResult.success && imageResult.imageUrl) {
+            const imgUrl = imageResult.imageUrl;
+            const aiProvider = 'GPT Image 2';
             const assetType = decision.classification === 'image_editing' ? 'edit' : 'design';
             assets.push({ type: 'image', url: imgUrl });
 
