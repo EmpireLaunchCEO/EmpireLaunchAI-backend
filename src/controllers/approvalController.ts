@@ -66,8 +66,7 @@ export const clearApprovals = async (req: Request, res: Response) => {
     const result = await db.delete(approvals)
       .where(
         and(
-          eq(approvals.userId, userId),
-          eq(approvals.status, 'pending')
+          eq(approvals.userId, userId)
         )
       );
 
