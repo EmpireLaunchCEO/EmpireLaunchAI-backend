@@ -125,6 +125,17 @@ router.post('/process', async (req: Request, res: Response) => {
               metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
             }).onConflictDoNothing();
 
+            // Also create approval for Operations page
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
+              userId: uid,
+              type: assetType,
+              status: 'completed',
+              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'completed' },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+
             // Auto-save to library
             try {
               await libraryService.create({
@@ -228,6 +239,17 @@ router.post('/process', async (req: Request, res: Response) => {
               fileUrl: soraResult.videoUrl || soraResult.videoPath,
               metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
             }).onConflictDoNothing();
+
+            // Also create approval for Operations page
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
+              userId: uid,
+              type: 'video',
+              status: 'completed',
+              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'completed' },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
 
             // Auto-save each output to library
             for (const out of renderResult.outputs) {
