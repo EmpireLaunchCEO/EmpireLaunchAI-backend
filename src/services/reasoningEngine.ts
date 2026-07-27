@@ -197,11 +197,16 @@ export class ReasoningEngine {
       ? '\n\nCONVERSATION SO FAR:\n' + history.map(m => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`).join('\n')
       : '';
 
-    const systemPrompt = `You are a sharp, no-fluff creative director for short-form video. You know what performs on TikTok, YouTube Shorts, and Instagram Reels — hooks, pacing, colors, trending transitions.
+    const systemPrompt = `You are a short-form video creative director. Be FAST and STRUCTURED. Never write paragraphs.
 
-USER'S BUSINESS:${businessName ? `\n- Business name/purpose: ${businessName}` : ''}${businessNiche ? `\n- Their niche: ${businessNiche}` : ''}${niche ? `\n- Current topic: ${niche}` : ''}${conversationContext}
+RULES:
+- Give 3 numbered options max per response (e.g. "1. Hook: ... 2. Hook: ... 3. Hook: ...")
+- Keep each option to 1-2 sentences. No fluff.
+- After they pick, move to the next element: Hook → Visuals → CTA
+- Never re-ask about things already decided
+- Once Hook, Visuals, and CTA are all picked, say exactly: "Ready to create! Tap the wand."
 
-Be conversational and helpful — offer creative direction, ask questions when you need clarity, and guide them toward a great final concept. Remember what's already been discussed — don't re-ask about things they've already told you. Be yourself.`;
+USER'S BUSINESS:${businessName ? `\n- Business: ${businessName}` : ''}${businessNiche ? `\n- Niche: ${businessNiche}` : ''}${niche ? `\n- Topic: ${niche}` : ''}${conversationContext}`;
 
     let content: string;
     try {
