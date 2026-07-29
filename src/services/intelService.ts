@@ -1,5 +1,6 @@
 import { reasoningEngine } from './reasoningEngine.js';
 import { marketScraperService } from './marketScraperService.js';
+import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
 
 export interface IntelTrendsParams {
   niche?: string;
@@ -16,18 +17,20 @@ export interface IntelTrendsResult {
   contentIdeas: string[];
 }
 
-function buildIntelPrompt(params: IntelTrendsParams): string {
+function buildIntelPrompt(params: IntelTrendsParams, etsyContext?: string): string {
   const context: string[] = [];
   if (params.niche) context.push(`Business niche: ${params.niche}`);
   if (params.angle) context.push(`Business angle/approach: ${params.angle}`);
   if (params.targetCustomers) context.push(`Target customers: ${params.targetCustomers}`);
   if (params.businessGoals) context.push(`Business goals: ${params.businessGoals}`);
 
-  return `You are a real-time market intelligence analyst. Search the web for CURRENT, up-to-date trends, data, and opportunities. Do NOT use stale training data — find what is actually trending RIGHT NOW on platforms like Etsy, TikTok, Instagram, Pinterest, Amazon, and Google Trends.
+  const etsyBlock = etsyContext ? `\n\nRECENT ETSY MARKET DATA for ${params.niche || 'this niche'}:\n${etsyContext}\nUse this real Etsy data to ground your analysis.` : '';
 
+  return `You are a real-time market intelligence analyst. Search the web for CURRENT, up-to-date trends, data, and opportunities. Do NOT use stale training data — find what is actually trending RIGHT NOW on platforms like Etsy, TikTok, Instagram, Pinterest, Amazon, and Google Trends.
+${etsyBlock}
 ${context.join('\n')}
 
-Based on your web research, return a single valid JSON object (no markdown, no code fences, no surrounding text) with exactly these five keys. Each key must be an array of strings:
+Based on your web research${etsyContext ? ' and the Etsy data above' : ''}, return a single valid JSON object (no markdown, no code fences, no surrounding text) with exactly these five keys. Each key must be an array of strings:
 
 {
   "trendingThemes": ["exact trending theme 1", "exact trending theme 2", ...],
@@ -40,7 +43,7 @@ Based on your web research, return a single valid JSON object (no markdown, no c
 RULES:
 - Every array must have at least 3 items. Aim for 5-7 items each.
 - Each item must be specific and actionable, not generic.
-- Focus on what is ACTUALLY selling/performing right now based on your web search.
+- Focus on what is ACTUALLY selling/performing right now based on your web search${etsyContext ? ' and the real Etsy listing data provided' : ''}.
 - Include numbers, stats, or platform names where relevant.
 - Return ONLY the JSON object — no explanation, no markdown formatting.`;
 }
@@ -110,8 +113,52 @@ export class IntelService {
       console.warn('[IntelService] Market scraping failed, falling back to Gemini:', err.message);
     }
 
-    // 2. Fallback to Gemini
-    const prompt = buildIntelPrompt(params);
+    // 2. Fetch Etsy DNA strands for this niche to ground Gemini analysis
+    let etsyContext: string | undefined;
+    try {
+      const etsyStrands = await dnaVaultService.findBySource('etsy', undefined, 30);
+      const nicheLower = niche.toLowerCase();
+
+      // Filter strands relevant to this niche
+      const relevantStrands = etsyStrands.filter(s => {
+        const subcat = (s.subCategory || '').toLowerCase();
+        const tags: string[] = s.metadata?.tags || [];
+        const manifestNiche = s.manifest?.niche || '';
+        return subcat.includes(nicheLower) ||
+          tags.some(t => t.toLowerCase().includes(nicheLower)) ||
+          manifestNiche.toLowerCase().includes(nicheLower) ||
+          nicheLower === 'general';
+      });
+
+      if (relevantStrands.length > 0) {
+        const keywords = new Set<string>();
+        const titles: string[] = [];
+        const prices: string[] = [];
+
+        for (const strand of relevantStrands.slice(0, 15)) {
+          if (strand.manifest?.keyword) keywords.add(strand.manifest.keyword as string);
+          if (strand.manifest?.titlePattern) titles.push(strand.manifest.titlePattern as string);
+          if (strand.manifest?.priceRange) prices.push(strand.manifest.priceRange as string);
+          if (strand.metadata?.tags) {
+            for (const t of strand.metadata.tags as string[]) {
+              if (t.length > 2 && t !== nicheLower) keywords.add(t);
+            }
+          }
+        }
+
+        const lines: string[] = [];
+        if (keywords.size > 0) lines.push(`Trending keywords: ${[...keywords].slice(0, 20).join(', ')}`);
+        if (titles.length > 0) lines.push(`Top listing titles: ${titles.slice(0, 5).join(' | ')}`);
+        if (prices.length > 0) lines.push(`Common price points: ${prices.slice(0, 5).join(', ')}`);
+        etsyContext = lines.join('\n');
+        console.log(`[IntelService] Injected ${relevantStrands.length} Etsy DNA strands for "${niche}"`);
+      }
+    } catch (etsyErr: any) {
+      console.warn('[IntelService] Etsy DNA fetch failed:', etsyErr.message);
+    }
+
+    // 3. Fallback to Gemini (with Etsy context if available)
+    const prompt = buildIntelPrompt(params, etsyContext);
 
     try {
       const raw = await reasoningEngine.reason(prompt, {

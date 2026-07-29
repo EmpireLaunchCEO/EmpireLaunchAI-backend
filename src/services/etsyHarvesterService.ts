@@ -332,6 +332,148 @@ export class EtsyHarvesterService {
     };
   }
 
+  /**
+   * Global harvest — same as runHarvest but skips user integration check.
+   * Used by the 2x daily scheduler for populating the Global DNA Pool.
+   */
+  async runGlobalHarvest(niche: string): Promise<HarvestResult> {
+    return this.harvestCore(niche, undefined);
+  }
+
+  /**
+   * Core harvest logic shared by runHarvest and runGlobalHarvest.
+   */
+  private async harvestCore(niche: string, userId?: string): Promise<HarvestResult> {
+    const errors: string[] = [];
+    let strandsStored = 0;
+    let keywords: string[] = [];
+    let listingsFound = 0;
+
+    if (!this.isConfigured) {
+      return { success: false, strandsStored: 0, keywords: [], listingsFound: 0, errors: ['ETSY_CLIENT_ID not configured'] };
+    }
+
+    // 1. Harvest trending searches
+    try {
+      const trending = await this.harvestTrendingSearches(niche);
+      keywords = trending.keywords;
+      listingsFound = trending.listings.length;
+
+      for (const kw of keywords.slice(0, 20)) {
+        const strand: DnaStrand = {
+          userId,
+          category: 'niche_pattern',
+          subCategory: niche.toLowerCase(),
+          performanceScore: 60,
+          sourcePlatform: 'etsy',
+          externalId: `etsy_trend_${kw.replace(/\s+/g, '_')}`,
+          manifest: {
+            keyword: kw,
+            niche,
+            source: 'etsy_trending',
+            harvestedAt: new Date().toISOString(),
+          },
+          metadata: {
+            tags: [kw, niche],
+            brandTrait: 'trend_alignment',
+            isSynthesized: true,
+          },
+          isSynthesized: true,
+          isGlobal: true,
+        };
+        await dnaVaultService.storeStrand(strand);
+        strandsStored++;
+      }
+    } catch (err: any) {
+      errors.push(`Trending harvest failed: ${err.message}`);
+    }
+
+    // 2. Harvest top listings
+    try {
+      const topListings = await this.harvestTopListings(niche);
+      for (const listing of topListings) {
+        const titleLength = listing.title.length;
+        const layoutCategory = titleLength < 30 ? 'minimal' :
+          titleLength < 60 ? 'descriptive' : 'keyword_rich';
+
+        const layoutStrand: DnaStrand = {
+          userId,
+          category: 'layout',
+          subCategory: layoutCategory,
+          performanceScore: Math.min(95, (listing.num_favorers || 0) + (listing.views || 0) / 10),
+          sourcePlatform: 'etsy',
+          externalId: `etsy_listing_${listing.listing_id}`,
+          manifest: {
+            titlePattern: listing.title,
+            estimatedLayout: layoutCategory,
+            priceRange: listing.price ? `${listing.price.amount / listing.price.divisor} ${listing.price.currency_code}` : 'unknown',
+            listingUrl: listing.url,
+            tags: listing.tags || [],
+          },
+          metadata: {
+            tags: listing.tags || [],
+            brandTrait: 'layout_inspiration',
+            isSynthesized: true,
+            views: listing.views,
+            favorers: listing.num_favorers,
+          },
+          isSynthesized: true,
+          isGlobal: true,
+        };
+        await dnaVaultService.storeStrand(layoutStrand);
+        strandsStored++;
+      }
+    } catch (err: any) {
+      errors.push(`Top listings harvest failed: ${err.message}`);
+    }
+
+    // 3. Palette extraction
+    try {
+      const topListings = await this.harvestTopListings(niche);
+      const colorKeywords = new Set<string>();
+      for (const listing of topListings.slice(0, 10)) {
+        const text = `${listing.title} ${listing.description || ''} ${(listing.tags || []).join(' ')}`;
+        const colors = this.extractColorKeywords(text);
+        for (const c of colors) colorKeywords.add(c);
+      }
+      for (const color of [...colorKeywords].slice(0, 10)) {
+        const strand: DnaStrand = {
+          userId,
+          category: 'palette',
+          subCategory: color,
+          performanceScore: 55,
+          sourcePlatform: 'etsy',
+          externalId: `etsy_color_${color}`,
+          manifest: {
+            colorTheme: color,
+            niche,
+            source: 'etsy_trending',
+            harvestedAt: new Date().toISOString(),
+          },
+          metadata: {
+            tags: [color, niche, 'color_trend'],
+            brandTrait: 'color_inspiration',
+            isSynthesized: true,
+          },
+          isSynthesized: true,
+          isGlobal: true,
+        };
+        await dnaVaultService.storeStrand(strand);
+        strandsStored++;
+      }
+    } catch (err: any) {
+      errors.push(`Palette harvest failed: ${err.message}`);
+    }
+
+    return {
+      success: errors.length === 0,
+      strandsStored,
+      keywords,
+      listingsFound,
+      errors,
+    };
+  }
+
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   /** Expand niche into related search terms */
