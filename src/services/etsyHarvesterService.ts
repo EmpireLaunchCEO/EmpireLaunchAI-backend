@@ -61,7 +61,7 @@ const NICHE_CATEGORIES: Record<string, string> = {
 
 class EtsyRateLimiter {
   private lastCall: number = 0;
-  private minInterval: number = 1000; // 1 request per second for public API
+  private minInterval: number = 200; // 5 QPS limit (5K QPD)
 
   async wait(): Promise<void> {
     const now = Date.now();
