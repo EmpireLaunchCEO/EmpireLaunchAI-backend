@@ -1,9 +1,5 @@
 import axios from 'axios';
-import { db, schema } from '../db/index.js';
-import { and, eq, desc, gte } from 'drizzle-orm';
 import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
-
-const { integrations } = schema;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -210,13 +206,7 @@ export class EtsyHarvesterService {
       return { success: false, strandsStored: 0, keywords: [], listingsFound: 0, errors: ['ETSY_CLIENT_ID not configured'] };
     }
 
-    // 1. Verify the user has Etsy connected
-    const hasEtsy = await this.userHasEtsyConnected(userId);
-    if (!hasEtsy) {
-      return { success: false, strandsStored: 0, keywords: [], listingsFound: 0, errors: ['No Etsy integration found for this user'] };
-    }
-
-    // 2. Harvest trending searches → niche_pattern strands
+    // Harvest trending searches → niche_pattern strands
     try {
       const trending = await this.harvestTrendingSearches(niche);
       keywords = trending.keywords;
@@ -343,23 +333,6 @@ export class EtsyHarvesterService {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
-
-  /** Check if user has an active Etsy integration */
-  private async userHasEtsyConnected(userId: string): Promise<boolean> {
-    try {
-      const [integration] = await db.select()
-        .from(integrations)
-        .where(and(
-          eq(integrations.userId, userId),
-          eq(integrations.platform, 'etsy'),
-          eq(integrations.isActive, true),
-        ))
-        .limit(1);
-      return !!integration;
-    } catch {
-      return false;
-    }
-  }
 
   /** Expand niche into related search terms */
   private expandNiche(niche: string): string[] {
