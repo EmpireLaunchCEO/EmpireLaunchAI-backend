@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { transcriptionService, WordTimestamp } from './transcriptionService.js';
-import { audioAnalyzer, SilenceRegion } from './audioAnalyzer.js';
+import { audioAnalyzer, SilenceRegion, NoiseSpike } from './audioAnalyzer.js';
 import { r2Storage } from './r2StorageService.js';
 import { reasoningEngine } from './reasoningEngine.js';
 
@@ -84,10 +84,10 @@ export class SpeechCleanupService {
     // 3. Detect silences
     const silences = await audioAnalyzer.detectSilences(audioPath, 1.5);
 
-    // 4. Build Edit Decision List
-    const edits = await this.buildEditDecisionList(transcription.words, silences);
+    // 4. Build Edit Decision List (needs audioPath for Pass D: noise detection)
+    const edits = await this.buildEditDecisionList(transcription.words, silences, audioPath);
 
-    // Clean up temp audio
+    // Clean up temp audio AFTER EDL is built (Pass D needs it)
     audioAnalyzer.cleanup(audioPath);
 
     console.log(`[SpeechCleanup] Analysis complete: ${edits.length} edit decisions`);
@@ -98,12 +98,13 @@ export class SpeechCleanupService {
   /**
    * Build an Edit Decision List from transcription + silence data.
    *
-   * Three cleanup passes:
+   * Four cleanup passes:
    *   A. Long pauses — trim >2s silences to 0.5s, cut >5s entirely
-   *   B. Filler words — remove known filler words
+   *   B. Filler words — context-aware removal via Gemini classification
    *   C. False starts — detect restarted phrases
+   *   D. Background noise — volume-spike + speech-gap cross-reference
    */
-  async buildEditDecisionList(words: WordTimestamp[], silences: SilenceRegion[]): Promise<EditDecision[]> {
+  async buildEditDecisionList(words: WordTimestamp[], silences: SilenceRegion[], audioPath: string): Promise<EditDecision[]> {
     const edits: EditDecision[] = [];
 
     // ── Pass A: Long pauses ──────────────────────────────────────────
@@ -238,6 +239,44 @@ export class SpeechCleanupService {
           }
         }
       }
+    }
+
+    // ── Pass D: Background Noise ──────────────────────────────────────
+    // Volume-spike + speech-gap cross-reference: detect screams, barks, slams, sirens
+    try {
+      const noiseSpikes = await audioAnalyzer.detectNoiseSpikes(audioPath, words);
+
+      // Safety check: if >30% of video duration is flagged as noise, skip entirely
+      // (probably an outdoor recording — cutting everything would destroy it)
+      const duration = words.length > 0 ? words[words.length - 1].end : 60;
+      const totalNoiseTime = noiseSpikes.reduce((sum, s) => sum + (s.end - s.start), 0);
+      const noisePercent = duration > 0 ? (totalNoiseTime / duration) * 100 : 0;
+
+      if (noisePercent > 30) {
+        console.warn(`[SpeechCleanup] Skipping noise removal — ${noisePercent.toFixed(0)}% of audio flagged (likely outdoor recording)`);
+      } else {
+        for (const spike of noiseSpikes) {
+          const padding = 0.1;
+          if (spike.probableCause === 'no-speech') {
+            edits.push({
+              type: 'cut',
+              cutStart: Math.max(0, spike.start - padding),
+              cutEnd: spike.end + padding,
+              reason: `Background noise: no speech detected (+${spike.peakDb}dB)`,
+            });
+          } else {
+            // drowned-speech: cut noise + the garbled word
+            edits.push({
+              type: 'cut',
+              cutStart: Math.max(0, spike.start - padding),
+              cutEnd: spike.end + padding,
+              reason: `Background noise: drowned speech (+${spike.peakDb}dB)`,
+            });
+          }
+        }
+      }
+    } catch (noiseErr: any) {
+      console.warn('[SpeechCleanup] Noise detection failed, skipping Pass D:', noiseErr.message);
     }
 
     // Deduplicate overlapping cuts and sort by start time
