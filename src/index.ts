@@ -42,6 +42,7 @@ import cinemaRoutes from './routes/cinemaRoutes.js';
 import setupRoutes from './routes/setupRoutes.js';
 import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
+import etsyRoutes from './routes/etsyRoutes.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -163,6 +164,7 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/cinema', cinemaRoutes);
 app.use('/api/setup', setupRoutes);
 app.use('/api/actions', actionRoutes);
+app.use('/api/etsy', etsyRoutes);
 app.use('/api', subscriptionRoutes);
 
 app.get('/health', (req, res) => {
