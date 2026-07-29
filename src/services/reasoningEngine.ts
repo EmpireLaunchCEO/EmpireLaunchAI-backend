@@ -136,6 +136,10 @@ export class ReasoningEngine {
             const data = await response.json();
             const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (text) return text;
+            console.warn('[ReasoningEngine] Gemini returned OK but no text — raw:', JSON.stringify(data).slice(0, 300));
+          } else {
+            const errBody = await response.text().catch(() => '');
+            console.warn('[ReasoningEngine] Gemini HTTP', response.status, '—', errBody.slice(0, 300));
           }
         } catch (err) {
           console.warn('[ReasoningEngine] Gemini reason failed:', (err as Error).message);
@@ -165,10 +169,12 @@ export class ReasoningEngine {
         }
       }
 
-      return 'UNKNOWN';
+      // Both Gemini and OpenAI failed
+      console.error('[ReasoningEngine] Both AI providers failed');
+      throw new Error('AI services temporarily unavailable — please try again in a moment.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);
-      return 'UNKNOWN';
+      throw err;
     }
   }
 
