@@ -107,23 +107,31 @@ router.post('/process', async (req: Request, res: Response) => {
 
             // Store in creations table with AI provider tag
             const creationId = uuidv4();
-            await db.insert(schema.creations).values({
-              id: creationId, userId: uid, type: 'design',
-              title: decision.prompt.slice(0, 60), status: 'completed',
-              fileUrl: imgUrl,
-              metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
-            });
+            try {
+              await db.insert(schema.creations).values({
+                id: creationId, userId: uid, type: 'design',
+                title: decision.prompt.slice(0, 60), status: 'completed',
+                fileUrl: imgUrl,
+                metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
+              });
+            } catch (creationErr: any) {
+              console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
+            }
 
             // Create approval for Operations page
-            await db.insert(schema.approvals).values({
-              id: uuidv4(),
-              userId: uid,
-              type: assetType,
-              status: 'completed',
-              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'completed' },
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            });
+            try {
+              await db.insert(schema.approvals).values({
+                id: uuidv4(),
+                userId: uid,
+                type: assetType,
+                status: 'completed',
+                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'completed' },
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
+            } catch (approvalErr: any) {
+              console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+            }
           }
         } catch (imgErr: any) {
           console.error('[StudioRoute] Image generation failed:', imgErr.message);
@@ -138,27 +146,35 @@ router.post('/process', async (req: Request, res: Response) => {
 
       case 'video_creation': {
         // Quota check — anchored to subscription date, resets same day each week
-        const [sub] = await db.select().from(schema.subscriptions)
-          .where(eq(schema.subscriptions.userId, uid))
-          .orderBy(desc(schema.subscriptions.paidAt))
-          .limit(1);
-        const anchor = sub?.paidAt ? new Date(sub.paidAt) : new Date();
-        const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-        const weeksSinceAnchor = Math.floor((Date.now() - anchor.getTime()) / msPerWeek);
-        const currentWeekStart = new Date(anchor.getTime() + weeksSinceAnchor * msPerWeek);
-        const nextReset = new Date(currentWeekStart.getTime() + msPerWeek);
+        let videoCount = 0;
+        let nextReset: Date | null = null;
+        try {
+          const [sub] = await db.select().from(schema.subscriptions)
+            .where(eq(schema.subscriptions.userId, uid))
+            .orderBy(desc(schema.subscriptions.paidAt))
+            .limit(1);
+          const anchor = sub?.paidAt ? new Date(sub.paidAt) : new Date();
+          const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+          const weeksSinceAnchor = Math.floor((Date.now() - anchor.getTime()) / msPerWeek);
+          const currentWeekStart = new Date(anchor.getTime() + weeksSinceAnchor * msPerWeek);
+          nextReset = new Date(currentWeekStart.getTime() + msPerWeek);
 
-        const [{ count: videoCount }] = await db.select({ count: count() })
-          .from(schema.creations)
-          .where(and(
-            eq(schema.creations.userId, uid),
-            eq(schema.creations.type, 'video_creation'),
-            gte(schema.creations.createdAt, currentWeekStart)
-          ));
+          const [countResult] = await db.select({ count: count() })
+            .from(schema.creations)
+            .where(and(
+              eq(schema.creations.userId, uid),
+              eq(schema.creations.type, 'video_creation'),
+              gte(schema.creations.createdAt, currentWeekStart)
+            ));
+          videoCount = Number(countResult?.count ?? 0);
+        } catch (quotaErr: any) {
+          console.warn('[StudioRoute] Quota check failed, allowing video creation:', quotaErr.message);
+          // Skip quota — let the user create the video despite DB issues
+        }
         if (Number(videoCount) >= 7) {
           return res.status(429).json({
             status: 'error',
-            error: `You've used 7/7 videos this week. Your quota resets on ${nextReset.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`,
+            error: `You've used 7/7 videos this week. Your quota resets on ${nextReset?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) ?? 'next week'}.`,
           } as StudioResponse);
         }
 
@@ -212,23 +228,31 @@ router.post('/process', async (req: Request, res: Response) => {
             // Store in creations table with AI provider tag
             const creationId = uuidv4();
             const aiProvider = 'Sora 2 + FFmpeg';
-            await db.insert(schema.creations).values({
-              id: creationId, userId: uid, type: 'enhanced_video',
-              title: decision.prompt.slice(0, 60), status: 'completed',
-              fileUrl: soraResult.videoPath,
-              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
-            });
+            try {
+              await db.insert(schema.creations).values({
+                id: creationId, userId: uid, type: 'enhanced_video',
+                title: decision.prompt.slice(0, 60), status: 'completed',
+                fileUrl: soraResult.videoPath,
+                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
+              });
+            } catch (creationErr: any) {
+              console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
+            }
 
             // Create approval for Operations page
-            await db.insert(schema.approvals).values({
-              id: uuidv4(),
-              userId: uid,
-              type: 'video',
-              status: 'completed',
-              payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'completed' },
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            });
+            try {
+              await db.insert(schema.approvals).values({
+                id: uuidv4(),
+                userId: uid,
+                type: 'video',
+                status: 'completed',
+                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'completed' },
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
+            } catch (approvalErr: any) {
+              console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+            }
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
@@ -292,24 +316,28 @@ router.post('/process', async (req: Request, res: Response) => {
               }
 
               // Create approval for Operations page
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: uid,
-                type: 'edit',
-                status: 'completed',
-                payload: {
-                  assetId: creationId,
-                  title: cleanupEdits > 0
-                    ? `Cleaned & Edited Video - ${decision.parameters.platform || 'custom'}`
-                    : `Edited Video - ${decision.parameters.platform || 'custom'}`,
-                  videoUrl: renderResult.outputs[0]?.videoUrl,
-                  platforms: decision.parameters.platform ? [decision.parameters.platform] : ['custom'],
+              try {
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(),
+                  userId: uid,
+                  type: 'edit',
                   status: 'completed',
-                  cleanupEdits,
-                },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
+                  payload: {
+                    assetId: creationId,
+                    title: cleanupEdits > 0
+                      ? `Cleaned & Edited Video - ${decision.parameters.platform || 'custom'}`
+                      : `Edited Video - ${decision.parameters.platform || 'custom'}`,
+                    videoUrl: renderResult.outputs[0]?.videoUrl,
+                    platforms: decision.parameters.platform ? [decision.parameters.platform] : ['custom'],
+                    status: 'completed',
+                    cleanupEdits,
+                  },
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+              } catch (approvalErr: any) {
+                console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+              }
             }
           } catch (editErr: any) {
             console.error('[StudioRoute] Video editing failed:', editErr.message);
@@ -347,20 +375,24 @@ router.post('/process', async (req: Request, res: Response) => {
               }
 
               // Create approval for Operations page
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: uid,
-                type: 'render',
-                status: 'completed',
-                payload: {
-                  assetId: creationId,
-                  title: `Final Render - ${decision.prompt.slice(0, 50)}`,
-                  videoUrl: renderResult.outputs[0]?.videoUrl,
+              try {
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(),
+                  userId: uid,
+                  type: 'render',
                   status: 'completed',
-                },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
+                  payload: {
+                    assetId: creationId,
+                    title: `Final Render - ${decision.prompt.slice(0, 50)}`,
+                    videoUrl: renderResult.outputs[0]?.videoUrl,
+                    status: 'completed',
+                  },
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+              } catch (approvalErr: any) {
+                console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+              }
             }
           } catch (renderErr: any) {
             console.error('[StudioRoute] Final rendering failed:', renderErr.message);

@@ -7,7 +7,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   user_id UUID NOT NULL REFERENCES users(id),
   type TEXT NOT NULL DEFAULT 'subscription', -- 'subscription' or 'expansion'
   stripe_session_id TEXT,
+  stripe_subscription_id TEXT,
   amount INTEGER, -- in cents
   paid_at TIMESTAMP,
+  canceled_at TIMESTAMP,
+  customer_name TEXT,
   created_at TIMESTAMP DEFAULT NOW() NOT NULL
 );
