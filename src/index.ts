@@ -43,7 +43,6 @@ import setupRoutes from './routes/setupRoutes.js';
 import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
-import { etsyHarvesterService } from './services/etsyHarvesterService.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -189,49 +188,6 @@ app.use((err: any, req: any, res: any, next: any) => {
   console.error('[GlobalErrorHandler]', err?.message || err);
   res.status(err?.status || 500).json({ error: err?.message || 'Internal server error' });
 });
-
-// ── Etsy DNA Harvester — Scheduled 2x Daily ────────────────────────────────
-const POPULAR_NICHES = [
-  'digital downloads', 'wall art', 'planner', 'SVG',
-  'template', 'sticker', 'home decor', 'jewelry',
-];
-
-async function runScheduledHarvests() {
-  if (!etsyHarvesterService.isConfigured) {
-    console.log('[EtsyScheduler] ETSY_CLIENT_ID not set — skipping scheduled harvests');
-    return;
-  }
-
-  for (const niche of POPULAR_NICHES) {
-    try {
-      // Use a synthetic system userId for background harvests
-      const result = await etsyHarvesterService.runHarvest('00000000-0000-0000-0000-000000000000', niche);
-      console.log(`[EtsyScheduler] Harvested "${niche}": ${result.strandsStored} strands, ${result.listingsFound} listings`);
-      if (result.errors.length > 0) {
-        console.warn(`[EtsyScheduler] "${niche}" errors:`, result.errors);
-      }
-    } catch (err: any) {
-      console.warn(`[EtsyScheduler] Failed to harvest "${niche}":`, err.message);
-    }
-    // Space out harvests to avoid rate limits
-    await new Promise(r => setTimeout(r, 3000));
-  }
-}
-
-// Start first harvest 30s after boot, then every 12 hours
-setTimeout(() => {
-  runScheduledHarvests().catch(err =>
-    console.error('[EtsyScheduler] Initial harvest failed:', err.message)
-  );
-}, 30000);
-
-setInterval(() => {
-  runScheduledHarvests().catch(err =>
-    console.error('[EtsyScheduler] Periodic harvest failed:', err.message)
-  );
-}, 12 * 60 * 60 * 1000); // 12 hours
-
-console.log('[EtsyScheduler] Scheduled 2x daily harvests for:', POPULAR_NICHES.join(', '));
 
 export default app;
 /* Tech Troubleshooter Fix - Sat Jun 27 20:45:00 UTC 2026 */

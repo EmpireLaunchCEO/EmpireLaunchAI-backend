@@ -1,6 +1,7 @@
 import { reasoningEngine } from './reasoningEngine.js';
 import { marketScraperService } from './marketScraperService.js';
 import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
+import { etsyHarvesterService } from './etsyHarvesterService.js';
 
 export interface IntelTrendsParams {
   niche?: string;
@@ -16,6 +17,9 @@ export interface IntelTrendsResult {
   lowCompetitionItems: string[];
   contentIdeas: string[];
 }
+
+// Strands older than this trigger a fresh harvest
+const STRAND_STALENESS_HOURS = 6;
 
 function buildIntelPrompt(params: IntelTrendsParams, etsyContext?: string): string {
   const context: string[] = [];
@@ -87,20 +91,71 @@ function parseIntelResponse(raw: string): IntelTrendsResult | null {
       contentIdeas: extract('contentIdeas'),
     };
 
-    // If we couldn't extract anything at all, return null
     const hasAnyData = Object.values(result).some(arr => arr.length > 0);
     return hasAnyData ? result : null;
   }
 }
 
+/**
+ * Extract a human-readable Etsy context string from a set of DNA strands.
+ */
+function buildEtsyContextFromStrands(strands: DnaStrand[]): string {
+  const keywords = new Set<string>();
+  const titles: string[] = [];
+  const prices: string[] = [];
+
+  for (const strand of strands.slice(0, 15)) {
+    if (strand.manifest?.keyword) keywords.add(strand.manifest.keyword as string);
+    if (strand.manifest?.titlePattern) titles.push(strand.manifest.titlePattern as string);
+    if (strand.manifest?.priceRange) prices.push(strand.manifest.priceRange as string);
+    if (strand.metadata?.tags) {
+      for (const t of strand.metadata.tags as string[]) {
+        if (t.length > 2) keywords.add(t);
+      }
+    }
+  }
+
+  const lines: string[] = [];
+  if (keywords.size > 0) lines.push(`Trending keywords: ${[...keywords].slice(0, 20).join(', ')}`);
+  if (titles.length > 0) lines.push(`Top listing titles: ${titles.slice(0, 5).join(' | ')}`);
+  if (prices.length > 0) lines.push(`Common price points: ${prices.slice(0, 5).join(', ')}`);
+  return lines.join('\n');
+}
+
+/**
+ * Check whether a set of DNA strands is stale (oldest strand > STALENESS hours).
+ */
+function areStrandsStale(strands: DnaStrand[]): boolean {
+  if (strands.length === 0) return true;
+  const cutoff = Date.now() - STRAND_STALENESS_HOURS * 60 * 60 * 1000;
+
+  // Consider strands stale if the majority were harvested before the cutoff
+  let staleCount = 0;
+  for (const s of strands) {
+    const harvestedAt = s.manifest?.harvestedAt as string;
+    if (harvestedAt) {
+      if (new Date(harvestedAt).getTime() < cutoff) staleCount++;
+    } else {
+      // Strands without a timestamp are considered stale
+      staleCount++;
+    }
+  }
+  return staleCount > strands.length / 2;
+}
+
 export class IntelService {
   /**
    * Researches current market trends for the given business parameters.
-   * Uses the existing ReasoningEngine (Gemini 2.5 Flash) for research.
-   * Returns structured trend data or a fallback message on failure.
+   *
+   * Flow:
+   * 1. Try real web scraping first (marketScraperService)
+   * 2. Fetch cached Etsy DNA strands from the vault
+   * 3. If strands are stale/missing, trigger on-demand Etsy harvest
+   * 4. Inject real Etsy data into the Gemini prompt for grounded analysis
    */
   async researchTrends(params: IntelTrendsParams): Promise<{ data: IntelTrendsResult | null; fallbackMessage?: string }> {
     const niche = params.niche || 'general';
+    const nicheLower = niche.toLowerCase();
 
     // 1. Try real web scraping first
     try {
@@ -113,14 +168,13 @@ export class IntelService {
       console.warn('[IntelService] Market scraping failed, falling back to Gemini:', err.message);
     }
 
-    // 2. Fetch Etsy DNA strands for this niche to ground Gemini analysis
+    // 2. Fetch cached Etsy DNA strands for this niche
     let etsyContext: string | undefined;
     try {
-      const etsyStrands = await dnaVaultService.findBySource('etsy', undefined, 30);
-      const nicheLower = niche.toLowerCase();
+      const allEtsyStrands = await dnaVaultService.findBySource('etsy', undefined, 50);
 
       // Filter strands relevant to this niche
-      const relevantStrands = etsyStrands.filter(s => {
+      const relevantStrands = allEtsyStrands.filter(s => {
         const subcat = (s.subCategory || '').toLowerCase();
         const tags: string[] = s.metadata?.tags || [];
         const manifestNiche = s.manifest?.niche || '';
@@ -130,34 +184,48 @@ export class IntelService {
           nicheLower === 'general';
       });
 
-      if (relevantStrands.length > 0) {
-        const keywords = new Set<string>();
-        const titles: string[] = [];
-        const prices: string[] = [];
+      // 3. If strands are stale or missing, trigger on-demand harvest
+      if (areStrandsStale(relevantStrands) && nicheLower !== 'general' && etsyHarvesterService.isConfigured) {
+        console.log(`[IntelService] Etsy strands stale/missing for "${niche}" — triggering on-demand harvest`);
 
-        for (const strand of relevantStrands.slice(0, 15)) {
-          if (strand.manifest?.keyword) keywords.add(strand.manifest.keyword as string);
-          if (strand.manifest?.titlePattern) titles.push(strand.manifest.titlePattern as string);
-          if (strand.manifest?.priceRange) prices.push(strand.manifest.priceRange as string);
-          if (strand.metadata?.tags) {
-            for (const t of strand.metadata.tags as string[]) {
-              if (t.length > 2 && t !== nicheLower) keywords.add(t);
-            }
-          }
+        const harvestResult = await etsyHarvesterService.runHarvest(
+          '00000000-0000-0000-0000-000000000000', // system user
+          niche,
+        );
+
+        if (harvestResult.rateLimited) {
+          console.warn(`[IntelService] Etsy harvest rate-limited — using whatever strands are available (${harvestResult.dailyCallsUsed}/${harvestResult.dailyCallsLimit} calls today)`);
+        } else if (harvestResult.success) {
+          console.log(`[IntelService] On-demand harvest complete: ${harvestResult.strandsStored} strands for "${niche}"`);
         }
 
-        const lines: string[] = [];
-        if (keywords.size > 0) lines.push(`Trending keywords: ${[...keywords].slice(0, 20).join(', ')}`);
-        if (titles.length > 0) lines.push(`Top listing titles: ${titles.slice(0, 5).join(' | ')}`);
-        if (prices.length > 0) lines.push(`Common price points: ${prices.slice(0, 5).join(', ')}`);
-        etsyContext = lines.join('\n');
-        console.log(`[IntelService] Injected ${relevantStrands.length} Etsy DNA strands for "${niche}"`);
+        // Re-fetch strands to include the fresh harvest
+        const updatedStrands = await dnaVaultService.findBySource('etsy', undefined, 50);
+        const updatedRelevant = updatedStrands.filter(s => {
+          const subcat = (s.subCategory || '').toLowerCase();
+          const tags: string[] = s.metadata?.tags || [];
+          const manifestNiche = s.manifest?.niche || '';
+          return subcat.includes(nicheLower) ||
+            tags.some(t => t.toLowerCase().includes(nicheLower)) ||
+            manifestNiche.toLowerCase().includes(nicheLower) ||
+            nicheLower === 'general';
+        });
+
+        if (updatedRelevant.length > 0) {
+          etsyContext = buildEtsyContextFromStrands(updatedRelevant);
+          console.log(`[IntelService] Injected ${updatedRelevant.length} Etsy DNA strands for "${niche}" (fresh harvest)`);
+        }
+      } else if (relevantStrands.length > 0) {
+        etsyContext = buildEtsyContextFromStrands(relevantStrands);
+        console.log(`[IntelService] Injected ${relevantStrands.length} cached Etsy DNA strands for "${niche}"`);
+      } else {
+        console.log(`[IntelService] No Etsy DNA strands available for "${niche}"`);
       }
     } catch (etsyErr: any) {
-      console.warn('[IntelService] Etsy DNA fetch failed:', etsyErr.message);
+      console.warn('[IntelService] Etsy DNA pipeline failed:', etsyErr.message);
     }
 
-    // 3. Fallback to Gemini (with Etsy context if available)
+    // 4. Fallback to Gemini (with Etsy context if available)
     const prompt = buildIntelPrompt(params, etsyContext);
 
     try {
