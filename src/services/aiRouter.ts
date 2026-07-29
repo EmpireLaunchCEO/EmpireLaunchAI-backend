@@ -65,12 +65,12 @@ export class AiRouterService {
       return this.parseDecision(raw);
     } catch (err: any) {
       console.error('[AiRouter] Gemini routing failed:', err.message);
-      // Fallback: classify as ai_assistant and return error message
+      // Fallback: classify as ai_assistant and return the actual error
       return {
         classification: 'ai_assistant',
         prompt: '',
         parameters: {},
-        response: "I'm sorry, I had trouble understanding that. Could you rephrase what you'd like to create?",
+        response: `AI router error: ${err.message}`,
         needsRefinement: true,
       };
     }
