@@ -396,3 +396,37 @@ router.post('/process', async (req: Request, res: Response) => {
 });
 
 export default router;
+
+// Diagnostic: test API connectivity
+router.get('/diag', async (_req: Request, res: Response) => {
+  const results: any = {};
+  
+  // Test Gemini
+  const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    try {
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ contents: [{ parts: [{ text: 'Say OK' }] }] }),
+          signal: AbortSignal.timeout(10000) }
+      );
+      results.gemini = { status: r.status, ok: r.ok };
+      if (!r.ok) results.gemini.body = await r.text().catch(() => '');
+    } catch (e: any) { results.gemini = { error: e.message }; }
+  } else { results.gemini = { error: 'No key configured' }; }
+
+  // Test OpenAI
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    try {
+      const r = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${openaiKey}` },
+        signal: AbortSignal.timeout(10000)
+      });
+      results.openai = { status: r.status, ok: r.ok };
+    } catch (e: any) { results.openai = { error: e.message }; }
+  } else { results.openai = { error: 'No key configured' }; }
+
+  res.json(results);
+});
