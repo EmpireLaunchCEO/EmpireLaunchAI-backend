@@ -58,7 +58,7 @@ export class AiRouterService {
     try {
       const raw = await reasoningEngine.reason(`${systemPrompt}\n\n${userMessage}`, {
         temperature: 0.3,
-        maxTokens: 1024,
+        maxTokens: 4096,
       });
 
       console.log('[AiRouter] Raw Gemini response:', raw.slice(0, 300));
