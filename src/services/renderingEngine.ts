@@ -354,6 +354,46 @@ export class RenderingEngine {
       // Silently ignore cleanup errors
     }
   }
+
+  /**
+   * Render a video with intelligent speech cleanup applied.
+   * Runs the cleanup pipeline BEFORE standard FFmpeg edits:
+   *   1. Analyze audio (Whisper transcription + silence detection)
+   *   2. Build Edit Decision List (pauses, fillers, false starts)
+   *   3. Apply cuts via FFmpeg trim+concat
+   *   4. Output to R2
+   */
+  async renderWithCleanup(
+    inputPath: string,
+    outputPath: string,
+    userId?: string,
+  ): Promise<{ success: boolean; outputPath?: string; r2Key?: string; editsApplied: number; error?: string }> {
+    // Dynamic import to avoid circular dependency
+    const { speechCleanupService } = await import('./speechCleanupService.js');
+
+    const result = await speechCleanupService.processVideo(inputPath, userId);
+
+    if (result.success && result.outputPath) {
+      // Copy to the requested output path if different from the cleanup output
+      if (result.outputPath !== outputPath) {
+        try {
+          fs.copyFileSync(result.outputPath, outputPath);
+        } catch {}
+      }
+      return {
+        success: true,
+        outputPath,
+        r2Key: result.r2Key,
+        editsApplied: result.editsApplied,
+      };
+    }
+
+    return {
+      success: false,
+      error: result.error || 'Cleanup pipeline failed',
+      editsApplied: 0,
+    };
+  }
 }
 
 // ─── Singleton ──────────────────────────────────────────────────────────────

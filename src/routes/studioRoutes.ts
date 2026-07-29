@@ -235,7 +235,36 @@ router.post('/process', async (req: Request, res: Response) => {
         const sourceVideo = attachments?.[0] || decision.parameters.sourceVideo;
         if (sourceVideo) {
           try {
-            const renderResult = await ffmpegRenderService.render(sourceVideo, {
+            // ── Cleanup intent detection ────────────────────────────
+            const cleanupKeywords = ['edit', 'clean up', 'cleanup', 'fix', 'trim', 'cut out pauses',
+              'remove mistakes', 'remove filler', 'tighten', 'polish', 'refine'];
+            const wantsCleanup = cleanupKeywords.some(kw =>
+              request.toLowerCase().includes(kw.toLowerCase()),
+            );
+
+            let cleanedSource = sourceVideo;
+            let cleanupEdits = 0;
+
+            if (wantsCleanup) {
+              console.log('[StudioRoute] Cleanup intent detected — running speech cleanup pipeline');
+              try {
+                const cleanupResult = await renderingEngine.renderWithCleanup(
+                  sourceVideo,
+                  sourceVideo, // overwrite in place
+                  uid,
+                );
+                if (cleanupResult.success) {
+                  cleanedSource = cleanupResult.outputPath || sourceVideo;
+                  cleanupEdits = cleanupResult.editsApplied;
+                  console.log(`[StudioRoute] Cleanup applied: ${cleanupEdits} edits`);
+                }
+              } catch (cleanupErr: any) {
+                console.warn('[StudioRoute] Cleanup failed, proceeding with original:', cleanupErr.message);
+              }
+            }
+
+            const aiProvider = cleanupEdits > 0 ? 'Whisper + FFmpeg' : 'FFmpeg';
+            const renderResult = await ffmpegRenderService.render(cleanedSource, {
               platforms: decision.parameters.platform ? [decision.parameters.platform] : undefined,
               enableWatermark: !!decision.parameters.brandName,
               callToAction: decision.parameters.callToAction,
@@ -243,7 +272,6 @@ router.post('/process', async (req: Request, res: Response) => {
 
             if (renderResult.success) {
               const creationId = uuidv4();
-              const aiProvider = 'FFmpeg';
               for (const out of renderResult.outputs) {
                 assets.push({
                   type: 'video',
@@ -261,10 +289,13 @@ router.post('/process', async (req: Request, res: Response) => {
                 status: 'completed',
                 payload: {
                   assetId: creationId,
-                  title: `Edited Video - ${decision.parameters.platform || 'custom'}`,
+                  title: cleanupEdits > 0
+                    ? `Cleaned & Edited Video - ${decision.parameters.platform || 'custom'}`
+                    : `Edited Video - ${decision.parameters.platform || 'custom'}`,
                   videoUrl: renderResult.outputs[0]?.videoUrl,
                   platforms: decision.parameters.platform ? [decision.parameters.platform] : ['custom'],
                   status: 'completed',
+                  cleanupEdits,
                 },
                 createdAt: new Date(),
                 updatedAt: new Date(),
