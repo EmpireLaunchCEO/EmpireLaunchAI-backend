@@ -317,6 +317,7 @@ export const subscriptions = pgTable('subscriptions', {
   paidAt: timestamp('paid_at'),
   stripeSubscriptionId: text('stripe_subscription_id'),
   canceledAt: timestamp('canceled_at'),
+  customerName: text('customer_name'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

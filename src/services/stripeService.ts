@@ -224,7 +224,9 @@ export class StripeService {
   }
 
   async getSession(sessionId: string) {
-    return await getStripe().checkout.sessions.retrieve(sessionId);
+    return await getStripe().checkout.sessions.retrieve(sessionId, {
+      expand: ['customer_details'],
+    });
   }
 
   async createFinancialConnectionsSession(accountId: string, userId: string) {

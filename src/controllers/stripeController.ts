@@ -232,6 +232,7 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
     if (!sessionId) return res.status(400).json({ error: 'Session ID required' });
 
     const session = await stripeService.getSession(sessionId as string);
+    const customerName = (session as any).customer_details?.name || null;
     if (session.payment_status === 'paid') {
       const userId = session.client_reference_id;
       if (userId) {
@@ -251,6 +252,7 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
           stripeSessionId: sessionId as string,
           amount: session.amount_total ?? 5000,
           paidAt: new Date(),
+          customerName,
           createdAt: new Date(),
         });
       }
