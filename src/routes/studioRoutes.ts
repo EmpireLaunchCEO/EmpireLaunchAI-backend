@@ -127,6 +127,11 @@ router.post('/process', async (req: Request, res: Response) => {
           }
         } catch (imgErr: any) {
           console.error('[StudioRoute] Image generation failed:', imgErr.message);
+          return res.status(500).json({
+            status: 'error',
+            classification: decision.classification,
+            response: `Image generation failed: ${imgErr.message}`,
+          } as StudioResponse);
         }
         break;
       }
@@ -227,6 +232,11 @@ router.post('/process', async (req: Request, res: Response) => {
           }
         } catch (vidErr: any) {
           console.error('[StudioRoute] Video creation failed:', vidErr.message);
+          return res.status(500).json({
+            status: 'error',
+            classification: decision.classification,
+            response: `Video generation failed: ${vidErr.message}`,
+          } as StudioResponse);
         }
         break;
       }
@@ -303,6 +313,11 @@ router.post('/process', async (req: Request, res: Response) => {
             }
           } catch (editErr: any) {
             console.error('[StudioRoute] Video editing failed:', editErr.message);
+            return res.status(500).json({
+              status: 'error',
+              classification: decision.classification,
+              response: `Video editing failed: ${editErr.message}`,
+            } as StudioResponse);
           }
         }
         break;
@@ -349,10 +364,23 @@ router.post('/process', async (req: Request, res: Response) => {
             }
           } catch (renderErr: any) {
             console.error('[StudioRoute] Final rendering failed:', renderErr.message);
+            return res.status(500).json({
+              status: 'error',
+              classification: decision.classification,
+              response: `Final rendering failed: ${renderErr.message}`,
+            } as StudioResponse);
           }
         }
         break;
       }
+    }
+
+    if (assets.length === 0) {
+      return res.status(500).json({
+        status: 'error',
+        classification: decision.classification,
+        response: 'No assets were generated — the pipeline produced no output.',
+      } as StudioResponse);
     }
 
     return res.json({
