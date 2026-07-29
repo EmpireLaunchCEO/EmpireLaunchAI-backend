@@ -2,6 +2,7 @@ import { reasoningEngine } from './reasoningEngine.js';
 import { marketScraperService } from './marketScraperService.js';
 import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
 import { etsyHarvesterService } from './etsyHarvesterService.js';
+import { r2Storage } from './r2StorageService.js';
 
 export interface IntelTrendsParams {
   niche?: string;
@@ -219,7 +220,11 @@ export class IntelService {
         etsyContext = buildEtsyContextFromStrands(relevantStrands);
         console.log(`[IntelService] Injected ${relevantStrands.length} cached Etsy DNA strands for "${niche}"`);
       } else {
-        console.log(`[IntelService] No Etsy DNA strands available for "${niche}"`);
+        console.log(`[IntelService] No Etsy DNA strands for "${niche}" in PG — trying R2 fallback`);
+        etsyContext = await this.tryR2Fallback(niche);
+        if (etsyContext) {
+          console.log(`[IntelService] Loaded Etsy data from R2 cold storage for "${niche}"`);
+        }
       }
     } catch (etsyErr: any) {
       console.warn('[IntelService] Etsy DNA pipeline failed:', etsyErr.message);
@@ -248,6 +253,50 @@ export class IntelService {
       data: null,
       fallbackMessage: 'Unable to research trends at this time. Please try again later.',
     };
+  }
+
+  /**
+   * Try to load today's Etsy harvest from R2 cold storage when PG has no strands.
+   * Returns a human-readable context string, or undefined if nothing is found.
+   */
+  private async tryR2Fallback(niche: string): Promise<string | undefined> {
+    if (!r2Storage.isAvailable) return undefined;
+    const today = new Date().toISOString().slice(0, 10);
+    const key = `dna-harvests/${today}/${niche.replace(/\s+/g, '_')}.json`;
+
+    try {
+      const buffer = await r2Storage.downloadBuffer(key);
+      if (!buffer) {
+        // Try yesterday's as well — maybe harvest ran late
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        const altKey = `dna-harvests/${yesterday}/${niche.replace(/\s+/g, '_')}.json`;
+        const altBuffer = await r2Storage.downloadBuffer(altKey);
+        if (!altBuffer) return undefined;
+        const data = JSON.parse(altBuffer.toString('utf-8'));
+        return this.buildFallbackContext(data);
+      }
+
+      const data = JSON.parse(buffer.toString('utf-8'));
+      return this.buildFallbackContext(data);
+    } catch (err: any) {
+      console.warn(`[IntelService] R2 fallback failed for "${niche}":`, err.message);
+      return undefined;
+    }
+  }
+
+  /** Build a simple context string from R2 harvest JSON. */
+  private buildFallbackContext(data: any): string {
+    const lines: string[] = [];
+    if (data.keywords?.length > 0) {
+      lines.push(`Trending keywords: ${data.keywords.slice(0, 20).join(', ')}`);
+    }
+    if (data.listingsFound) {
+      lines.push(`Listings analyzed: ${data.listingsFound}`);
+    }
+    if (data.harvestedAt) {
+      lines.push(`Harvested: ${data.harvestedAt}`);
+    }
+    return lines.length > 0 ? lines.join('\n') : `Etsy harvest data for ${data.niche || 'this niche'}.`;
   }
 }
 

@@ -296,6 +296,21 @@ export class DnaVaultService {
   }
 
   /**
+   * Delete Etsy DNA strands older than 7 days from PostgreSQL.
+   * Keeps the PG table lean — cold storage is handled by R2.
+   */
+  async deleteStaleEtsyStrands(): Promise<number> {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const result = await db.delete(dnaStrands)
+      .where(and(
+        eq(dnaStrands.sourcePlatform, 'etsy'),
+        sql`${dnaStrands.createdAt} < ${cutoff.toISOString()}`,
+      ));
+    console.log(`[DnaVault] Cleaned ${(result as any).rowCount ?? 0} stale Etsy strands (>7 days)`);
+    return (result as any).rowCount ?? 0;
+  }
+
+  /**
    * Delete a strand by ID.
    */
   async deleteStrand(id: string) {

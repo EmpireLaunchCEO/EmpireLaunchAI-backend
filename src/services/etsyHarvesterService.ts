@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
+import { r2Storage } from './r2StorageService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -428,6 +429,16 @@ export class EtsyHarvesterService {
       strandsStored++;
     }
 
+    // ── 3. Persist harvest snapshot to R2 for durable storage ────────────
+    this.persistToR2(niche, { keywords, listingsFound, strandsStored, errors }).catch(err =>
+      console.warn('[EtsyHarvester] R2 persist failed:', err.message),
+    );
+
+    // ── 4. Clean up PG strands older than 7 days for Etsy ───────────────
+    dnaVaultService.deleteStaleEtsyStrands().catch(err =>
+      console.warn('[EtsyHarvester] PG cleanup failed:', err.message),
+    );
+
     const usage = this.getDailyUsage();
     return {
       success: errors.length === 0,
@@ -442,6 +453,22 @@ export class EtsyHarvesterService {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
+
+  /** Persist harvest snapshot to R2 as JSON for durable cold storage. */
+  private async persistToR2(niche: string, data: any): Promise<void> {
+    if (!r2Storage.isAvailable) return;
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const key = `dna-harvests/${today}/${niche.replace(/\s+/g, '_')}.json`;
+    const json = JSON.stringify({
+      niche,
+      harvestedAt: new Date().toISOString(),
+      ...data,
+    });
+    const result = await r2Storage.uploadBuffer(Buffer.from(json, 'utf-8'), key, 'application/json');
+    if (result.success) {
+      console.log(`[EtsyHarvester] Persisted harvest to R2: ${key}`);
+    }
+  }
 
   /** Expand niche into related search terms */
   private expandNiche(niche: string): string[] {

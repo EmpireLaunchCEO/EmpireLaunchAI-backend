@@ -188,6 +188,30 @@ export class R2StorageService {
     }
     return { url: localPath };
   }
+
+  /** Download an object from R2 as a Buffer. */
+  async downloadBuffer(key: string): Promise<Buffer | null> {
+    const client = getClient();
+    if (!client) return null;
+
+    try {
+      const response = await client.send(new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+      }));
+      const chunks: Buffer[] = [];
+      if (response.Body) {
+        const stream = response.Body as any;
+        for await (const chunk of stream) {
+          chunks.push(Buffer.from(chunk));
+        }
+      }
+      return Buffer.concat(chunks);
+    } catch (error: any) {
+      console.error('[R2Storage] Download failed:', error.message);
+      return null;
+    }
+  }
 }
 
 export const r2Storage = new R2StorageService();
