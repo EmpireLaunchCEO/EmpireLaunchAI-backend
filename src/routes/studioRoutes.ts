@@ -15,6 +15,7 @@ const router = Router();
 interface StudioRequest {
   userId?: string;
   brandId?: string;
+  mode?: 'consult' | 'generate';            // 'consult' = chat-only, no generation
   request: string;
   attachments?: string[];
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -22,6 +23,7 @@ interface StudioRequest {
 
 interface StudioResponse {
   status: 'completed' | 'needs_refinement' | 'ai_response' | 'error';
+  mode?: 'consult' | 'generate';
   classification?: string;
   response?: string;                         // Natural language for user
   assets?: Array<{
@@ -38,6 +40,7 @@ interface StudioResponse {
 router.post('/process', async (req: Request, res: Response) => {
   try {
     const { userId, brandId, request, attachments, conversationHistory } = req.body as StudioRequest;
+    const mode: 'consult' | 'generate' = (req.body as StudioRequest).mode || 'generate';
 
     if (!request || typeof request !== 'string') {
       return res.status(400).json({ status: 'error', error: 'request is required' });
@@ -72,6 +75,15 @@ router.post('/process', async (req: Request, res: Response) => {
     });
 
     console.log(`[StudioRoute] Routed: ${decision.classification} ${decision.needsRefinement ? '(needs refinement)' : ''}`);
+
+    // Consult mode — chat only, never trigger generation pipeline
+    if (mode === 'consult') {
+      const genTypes = ['video_creation', 'image_creation', 'video_editing', 'image_editing', 'final_rendering'];
+      if (genTypes.includes(decision.classification)) {
+        decision.classification = 'ai_assistant';
+      }
+      // needs_refinement and ai_assistant pass through normally below
+    }
 
     // 3. Handle each classification
     if (decision.needsRefinement) {
