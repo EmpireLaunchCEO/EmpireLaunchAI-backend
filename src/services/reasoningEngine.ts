@@ -6,35 +6,55 @@ import { eq } from 'drizzle-orm';
 
 export class ReasoningEngine {
 
+  /**
+   * Call Gemini with fallback chain: 2.5-flash → 2.0-flash → 2.5-flash-lite → OpenAI
+   * Used by consult() and reasonDesign().
+   */
   private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
+    const combined = `${systemPrompt}\n\n${userMessage}`;
+    
     const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-    if (!geminiKey) {
-      throw new Error('GOOGLE_API_KEY not configured');
+    if (geminiKey) {
+      const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+      for (const model of models) {
+        const result = await this.tryGeminiModel(model, combined, 0.5, 8192, geminiKey);
+        if (result) return result;
+        console.warn(`[ReasoningEngine] callGeminiDirect: ${model} failed, trying next...`);
+      }
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
-        ],
-        generationConfig: { temperature: 0.5, maxOutputTokens: 8192 }
-      })
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(`Gemini API error: ${response.status} ${errorBody.slice(0, 200)}`);
+    // Fallback to OpenAI gpt-4o-mini
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.5,
+          max_tokens: 8192
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data?.choices?.[0]?.message?.content;
+        if (text) {
+          console.log('[ReasoningEngine] callGeminiDirect: OpenAI gpt-4o-mini succeeded');
+          return text;
+        }
+      }
+      const errBody = await response.text().catch(() => '');
+      console.warn(`[ReasoningEngine] callGeminiDirect: OpenAI failed: ${response.status} — ${errBody.slice(0, 200)}`);
     }
 
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error('Gemini returned empty response');
-    }
-    return text;
+    throw new Error('AI services temporarily unavailable — all models exhausted.');
   }
 
   async reasonDesign(userId: string, goal: string, niche?: string): Promise<string> {
@@ -78,32 +98,40 @@ export class ReasoningEngine {
 
   /**
    * Try a single Gemini model. Returns the response text, or null if it failed.
+   * On 429 (rate limit), waits 1s and retries once before giving up.
    */
   private async tryGeminiModel(model: string, prompt: string, temp: number, maxTokens: number, geminiKey: string): Promise<string | null> {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${geminiKey}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
-        })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) {
-          console.log(`[ReasoningEngine] ${model} succeeded`);
-          return text;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${geminiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
+          })
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            console.log(`[ReasoningEngine] ${model} succeeded`);
+            return text;
+          }
+          console.warn(`[ReasoningEngine] ${model} returned OK but no text — raw:`, JSON.stringify(data).slice(0, 300));
+        } else if (response.status === 429 && attempt === 0) {
+          console.warn(`[ReasoningEngine] ${model} rate limited (429), waiting 1s...`);
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        } else {
+          const errBody = await response.text().catch(() => '');
+          console.warn(`[ReasoningEngine] ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
         }
-        console.warn(`[ReasoningEngine] ${model} returned OK but no text — raw:`, JSON.stringify(data).slice(0, 300));
-      } else {
-        const errBody = await response.text().catch(() => '');
-        console.warn(`[ReasoningEngine] ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
+      } catch (err) {
+        console.warn(`[ReasoningEngine] ${model} error:`, (err as Error).message);
       }
-    } catch (err) {
-      console.warn(`[ReasoningEngine] ${model} error:`, (err as Error).message);
+      return null;
     }
     return null;
   }
@@ -112,7 +140,8 @@ export class ReasoningEngine {
    * Simple reason method — takes a prompt and returns a text response.
    * Used by handle extraction and other lightweight AI tasks.
    *
-   * Fallback chain: gemini-2.5-flash → gemini-1.5-flash → OpenAI → throw
+   * Fallback chain: gemini-2.5-flash → gemini-2.0-flash → gemini-2.5-flash-lite → OpenAI (gpt-4o-mini)
+   * Each Gemini model has its own rate limit; spreading across models avoids 429 exhaustion.
    */
   async reason(prompt: string, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
     try {
@@ -120,24 +149,47 @@ export class ReasoningEngine {
       const maxTokens = options?.maxTokens ?? 8192;
 
       const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-      if (!geminiKey) {
-        throw new Error('GOOGLE_API_KEY not configured');
-      }
-
-      // Try gemini-2.5-flash with one retry on rate limit (wait 5s then retry)
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
-        if (result) return result;
-        
-        if (attempt === 0) {
-          console.warn('[ReasoningEngine] Gemini 2.5 Flash failed, waiting 5s before retry...');
-          await new Promise(r => setTimeout(r, 5000));
+      if (geminiKey) {
+        const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+        for (const model of models) {
+          const result = await this.tryGeminiModel(model, prompt, temp, maxTokens, geminiKey);
+          if (result) return result;
+          console.warn(`[ReasoningEngine] ${model} failed, trying next fallback...`);
         }
       }
 
-      // All attempts exhausted
-      console.error('[ReasoningEngine] Gemini 2.5 Flash unavailable after retry (rate limited or down)');
-      throw new Error('AI services temporarily unavailable — Gemini is at its daily limit. Please try again in a few minutes.');
+      // Fallback to OpenAI gpt-4o-mini if available
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (openaiKey) {
+        try {
+          const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${openaiKey}`
+            },
+            body: JSON.stringify({
+              model: 'gpt-4o-mini',
+              messages: [{ role: 'user', content: prompt }],
+              temperature: temp,
+              max_tokens: maxTokens
+            })
+          });
+          if (response.ok) {
+            const data = await response.json();
+            const text = data?.choices?.[0]?.message?.content;
+            if (text) {
+              console.log('[ReasoningEngine] OpenAI gpt-4o-mini succeeded');
+              return text;
+            }
+          }
+          console.warn(`[ReasoningEngine] OpenAI gpt-4o-mini failed: ${response.status}`);
+        } catch (err) {
+          console.warn('[ReasoningEngine] OpenAI error:', (err as Error).message);
+        }
+      }
+
+      throw new Error('AI services temporarily unavailable — all models exhausted. Please try again in a moment.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);
       throw err;
