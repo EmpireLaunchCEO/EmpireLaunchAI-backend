@@ -4,96 +4,59 @@ import { getMasterBriefing } from './strategicDirective.js';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 
+// Maximum conversation history messages to keep context under 128K tokens
+const MAX_HISTORY_MESSAGES = 12;
+
 export class ReasoningEngine {
 
   /**
-   * Call Gemini with fallback chain: 2.5-flash → 2.0-flash → 2.5-flash-lite → OpenAI
-   * Used by consult() and reasonDesign().
+   * Primary AI call: GPT 5.2 first, Gemini 2.5 Flash fallback.
+   * Used by consult(), reasonDesign(), and synthesizeDNA().
    */
-  private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
-    const combined = `${systemPrompt}\n\n${userMessage}`;
-    
-    const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-    if (geminiKey) {
-      const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
-      for (const model of models) {
-        const result = await this.tryGeminiModel(model, combined, 0.5, 8192, geminiKey);
-        if (result) return result;
-        console.warn(`[ReasoningEngine] callGeminiDirect: ${model} failed, trying next...`);
-      }
-    }
-
-    // Fallback to OpenAI gpt-4o-mini
+  private async callAI(systemPrompt: string, userMessage: string): Promise<string> {
+    // 1. Try GPT 5.2 (primary)
     const openaiKey = process.env.OPENAI_API_KEY;
     if (openaiKey) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${openaiKey}`
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage }
-          ],
-          temperature: 0.5,
-          max_tokens: 8192
-        })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const text = data?.choices?.[0]?.message?.content;
-        if (text) {
-          console.log('[ReasoningEngine] callGeminiDirect: OpenAI gpt-4o-mini succeeded');
-          return text;
+      try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${openaiKey}`
+          },
+          body: JSON.stringify({
+            model: 'gpt-5.2',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage }
+            ],
+            temperature: 0.5,
+            max_completion_tokens: 8192
+          })
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const text = data?.choices?.[0]?.message?.content;
+          if (text) {
+            console.log('[ReasoningEngine] GPT 5.2 succeeded');
+            return text;
+          }
         }
+        const errBody = await response.text().catch(() => '');
+        console.warn(`[ReasoningEngine] GPT 5.2 failed: ${response.status} — ${errBody.slice(0, 200)}`);
+      } catch (err) {
+        console.warn('[ReasoningEngine] GPT 5.2 error, falling back to Gemini:', (err as Error).message);
       }
-      const errBody = await response.text().catch(() => '');
-      console.warn(`[ReasoningEngine] callGeminiDirect: OpenAI failed: ${response.status} — ${errBody.slice(0, 200)}`);
     }
 
-    throw new Error('AI services temporarily unavailable — all models exhausted.');
-  }
-
-  async reasonDesign(userId: string, goal: string, niche?: string): Promise<string> {
-    const config = await getModelConfig(userId);
-
-    const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
-    const archetype = (goalRow as any)?.archetype || 'creator';
-
-    const systemPrompt = getMasterBriefing({
-      userTier: config.modelName,
-      goal,
-      niche,
-      archetype
-    });
-
-    try {
-      return await this.callGeminiDirect(systemPrompt, `You are acting as the Design Reasoner. Create a multi-step execution plan for this specific goal: ${goal}`);
-    } catch (err) {
-      console.error('[ReasoningEngine] reasonDesign Gemini call failed:', (err as Error).message);
-      return 'Unable to generate design reasoning at this time.';
+    // 2. Fallback to Gemini 2.5 Flash
+    const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+    if (geminiKey) {
+      const result = await this.tryGeminiModel('gemini-2.5-flash', `${systemPrompt}\n\n${userMessage}`, 0.5, 8192, geminiKey);
+      if (result) return result;
     }
-  }
 
-  async synthesizeDNA(userId: string, niche: string, dnaStrands: any[]): Promise<any> {
-    const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
-    const archetype = (goalRow as any)?.archetype || 'creator';
-
-    const systemPrompt = getMasterBriefing({
-      niche,
-      goal: `Synthesize DNA for niche: ${niche}`,
-      archetype
-    }) + `\n\nYou are the DNA Synthesis Engine. Take the provided DNA strands and synthesize a NEW style manifest.`;
-
-    try {
-      const text = await this.callGeminiDirect(systemPrompt, JSON.stringify(dnaStrands));
-      return JSON.parse(text);
-    } catch {
-      return dnaStrands;
-    }
+    throw new Error('AI services temporarily unavailable — both GPT 5.2 and Gemini are down.');
   }
 
   /**
@@ -116,49 +79,77 @@ export class ReasoningEngine {
           const data = await response.json();
           const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
-            console.log(`[ReasoningEngine] ${model} succeeded`);
+            console.log(`[ReasoningEngine] Gemini ${model} succeeded`);
             return text;
           }
-          console.warn(`[ReasoningEngine] ${model} returned OK but no text — raw:`, JSON.stringify(data).slice(0, 300));
+          console.warn(`[ReasoningEngine] Gemini ${model} returned OK but no text`);
         } else if (response.status === 429 && attempt === 0) {
-          console.warn(`[ReasoningEngine] ${model} rate limited (429), waiting 1s...`);
+          console.warn(`[ReasoningEngine] Gemini ${model} rate limited (429), waiting 1s...`);
           await new Promise(r => setTimeout(r, 1000));
           continue;
         } else {
           const errBody = await response.text().catch(() => '');
-          console.warn(`[ReasoningEngine] ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
+          console.warn(`[ReasoningEngine] Gemini ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
         }
       } catch (err) {
-        console.warn(`[ReasoningEngine] ${model} error:`, (err as Error).message);
+        console.warn(`[ReasoningEngine] Gemini ${model} error:`, (err as Error).message);
       }
       return null;
     }
     return null;
   }
 
+  async reasonDesign(userId: string, goal: string, niche?: string): Promise<string> {
+    const config = await getModelConfig(userId);
+
+    const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
+    const archetype = (goalRow as any)?.archetype || 'creator';
+
+    const systemPrompt = getMasterBriefing({
+      userTier: config.modelName,
+      goal,
+      niche,
+      archetype
+    });
+
+    try {
+      return await this.callAI(systemPrompt, `You are acting as the Design Reasoner. Create a multi-step execution plan for this specific goal: ${goal}`);
+    } catch (err) {
+      console.error('[ReasoningEngine] reasonDesign AI call failed:', (err as Error).message);
+      return 'Unable to generate design reasoning at this time.';
+    }
+  }
+
+  async synthesizeDNA(userId: string, niche: string, dnaStrands: any[]): Promise<any> {
+    const [goalRow] = await db.select({ archetype: schema.goals.archetype }).from(schema.goals).where(eq(schema.goals.userId, userId)).limit(1);
+    const archetype = (goalRow as any)?.archetype || 'creator';
+
+    const systemPrompt = getMasterBriefing({
+      niche,
+      goal: `Synthesize DNA for niche: ${niche}`,
+      archetype
+    }) + `\n\nYou are the DNA Synthesis Engine. Take the provided DNA strands and synthesize a NEW style manifest.`;
+
+    try {
+      const text = await this.callAI(systemPrompt, JSON.stringify(dnaStrands));
+      return JSON.parse(text);
+    } catch {
+      return dnaStrands;
+    }
+  }
+
   /**
    * Simple reason method — takes a prompt and returns a text response.
    * Used by handle extraction and other lightweight AI tasks.
    *
-   * Fallback chain: gemini-2.5-flash → gemini-2.0-flash → gemini-2.5-flash-lite → OpenAI (gpt-4o-mini)
-   * Each Gemini model has its own rate limit; spreading across models avoids 429 exhaustion.
+   * Primary: GPT 5.2 → Fallback: Gemini 2.5 Flash
    */
   async reason(prompt: string, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
     try {
       const temp = options?.temperature ?? 0.5;
       const maxTokens = options?.maxTokens ?? 8192;
 
-      const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-      if (geminiKey) {
-        const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
-        for (const model of models) {
-          const result = await this.tryGeminiModel(model, prompt, temp, maxTokens, geminiKey);
-          if (result) return result;
-          console.warn(`[ReasoningEngine] ${model} failed, trying next fallback...`);
-        }
-      }
-
-      // Fallback to OpenAI gpt-4o-mini if available
+      // 1. Try GPT 5.2 (primary)
       const openaiKey = process.env.OPENAI_API_KEY;
       if (openaiKey) {
         try {
@@ -169,27 +160,35 @@ export class ReasoningEngine {
               'Authorization': `Bearer ${openaiKey}`
             },
             body: JSON.stringify({
-              model: 'gpt-4o-mini',
+              model: 'gpt-5.2',
               messages: [{ role: 'user', content: prompt }],
               temperature: temp,
-              max_tokens: maxTokens
+              max_completion_tokens: maxTokens
             })
           });
           if (response.ok) {
             const data = await response.json();
             const text = data?.choices?.[0]?.message?.content;
             if (text) {
-              console.log('[ReasoningEngine] OpenAI gpt-4o-mini succeeded');
+              console.log('[ReasoningEngine] GPT 5.2 succeeded (reason)');
               return text;
             }
           }
-          console.warn(`[ReasoningEngine] OpenAI gpt-4o-mini failed: ${response.status}`);
+          const errBody = await response.text().catch(() => '');
+          console.warn(`[ReasoningEngine] GPT 5.2 failed (reason): ${response.status} — ${errBody.slice(0, 200)}`);
         } catch (err) {
-          console.warn('[ReasoningEngine] OpenAI error:', (err as Error).message);
+          console.warn('[ReasoningEngine] GPT 5.2 error (reason), falling back to Gemini:', (err as Error).message);
         }
       }
 
-      throw new Error('AI services temporarily unavailable — all models exhausted. Please try again in a moment.');
+      // 2. Fallback to Gemini
+      const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+      if (geminiKey) {
+        const result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
+        if (result) return result;
+      }
+
+      throw new Error('AI services temporarily unavailable — both GPT 5.2 and Gemini are down.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);
       throw err;
@@ -197,7 +196,7 @@ export class ReasoningEngine {
   }
 
   async consult(userId: string, message: string, niche?: string, history?: Array<{ role: string; content: string }>): Promise<{ message: string; stylePreviews?: any[] }> {
-    // Fetch user's archetype from active goal — gracefully handle missing/invalid userId
+    // Fetch user's archetype from active goal
     let archetype = 'creator';
     let businessName = '';
     let businessNiche = '';
@@ -217,8 +216,15 @@ export class ReasoningEngine {
       console.warn('[ReasoningEngine] Could not fetch user settings:', (err as Error).message);
     }
 
-    const conversationContext = history && history.length > 0
-      ? '\n\nCONVERSATION SO FAR:\n' + history.map(m => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`).join('\n')
+    // Cap conversation history to prevent 128K context threshold (4x cost jump)
+    let recentHistory = history || [];
+    if (recentHistory.length > MAX_HISTORY_MESSAGES) {
+      console.log(`[ReasoningEngine] Truncating history from ${recentHistory.length} to ${MAX_HISTORY_MESSAGES} messages (128K context guard)`);
+      recentHistory = recentHistory.slice(-MAX_HISTORY_MESSAGES);
+    }
+
+    const conversationContext = recentHistory.length > 0
+      ? '\n\nCONVERSATION SO FAR:\n' + recentHistory.map(m => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`).join('\n')
       : '';
 
     const systemPrompt = `You are a short-form video creative director. Be FAST and STRUCTURED. Never write paragraphs.
@@ -234,9 +240,9 @@ USER'S BUSINESS:${businessName ? `\n- Business: ${businessName}` : ''}${business
 
     let content: string;
     try {
-      content = await this.callGeminiDirect(systemPrompt, message);
+      content = await this.callAI(systemPrompt, message);
     } catch (err) {
-      console.error('[ReasoningEngine] Gemini call failed:', (err as Error).message);
+      console.error('[ReasoningEngine] callAI failed:', (err as Error).message);
       return { message: "I'm here to help! Tell me more about what you're looking to create — what niche, visual style, or type of content are you thinking about?" };
     }
     let nicheMatch = content.match(/\[NICHE:\s*([^\]]+)\]/);
