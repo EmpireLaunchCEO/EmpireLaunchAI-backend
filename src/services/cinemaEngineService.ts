@@ -86,10 +86,7 @@ export class CinemaEngineService {
         const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle);
         console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
 
-        const soraResult = await soraVideoService.generateVideo(soraPrompt, {
-          duration: Math.min(Math.ceil(script.split(' ').length / 2), 30),
-          size: '1024x1024',
-        });
+        const soraResult = await soraVideoService.generateVideo(soraPrompt);
 
         if (soraResult.success && soraResult.videoPath) {
           // Copy Sora output to the expected cinema path

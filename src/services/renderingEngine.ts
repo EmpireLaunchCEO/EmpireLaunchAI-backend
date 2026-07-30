@@ -58,10 +58,7 @@ export class RenderingEngine {
     // Sora 2 is the only video generation path — no GPT Image 2 fallback for video
     try {
       console.log(`[RenderingEngine] Generating video via Sora 2...`);
-      const soraResult = await soraVideoService.generateVideo(soraPrompt, {
-        duration: Math.min(params.scenes.length * 5, 30),
-        size: '1024x1024',
-      });
+      const soraResult = await soraVideoService.generateVideo(soraPrompt);
 
       if (soraResult.success && soraResult.videoPath) {
         console.log(`[RenderingEngine] Sora 2 generated video: ${soraResult.videoPath}`);
@@ -102,7 +99,7 @@ export class RenderingEngine {
     fs.mkdirSync(workingDir, { recursive: true });
 
     try {
-      const localPath = await this.generateSceneImage(prompt, workingDir, 0);
+      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high');
       let finalUrl = localPath;
       if (userId && r2Storage.isAvailable) {
         const r2 = await r2Storage.uploadLocalFile(localPath, userId, 'renders/images', 'image/png');
@@ -118,18 +115,18 @@ export class RenderingEngine {
 
   /**
    * Phase 1: Generate a single scene image using OpenAI gpt-image-2.
-   * Uses the scene's image prompt to create a photorealistic background.
+   * Calls POST /v1/images/generations with quality parameter (required).
+   * Response: {data: [{b64_json: '...'}], output_format: 'png', size: '...'}
    */
-  private async generateSceneImage(prompt: string, outputDir: string, index: number): Promise<string> {
+  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high'): Promise<string> {
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
-    // Call OpenAI gpt-image-2 via chat completions API
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error('OPENAI_API_KEY not configured — cannot generate scene images');
     }
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const response = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -137,46 +134,31 @@ export class RenderingEngine {
       },
       body: JSON.stringify({
         model: 'gpt-image-2',
-        messages: [
-          { 
-            role: 'user', 
-            content: [
-              { type: 'text', text: prompt }
-            ]
-          }
-        ],
+        prompt,
         n: 1,
-        size: '1024x1024'
+        quality,
       }),
-      signal: AbortSignal.timeout(30000) // 30 second timeout for image gen
+      signal: AbortSignal.timeout(60000)
     });
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      console.error(`[RenderingEngine] gpt-image-2 error (${response.status}):`, errorBody);
-      // Fallback: generate a solid color placeholder
-      const fallbackSvg = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#2C3E50"/></svg>`;
-      await sharp(Buffer.from(fallbackSvg)).png().toFile(outputPath);
-      return outputPath;
+      throw new Error(`gpt-image-2 API error (${response.status}): ${errorBody.slice(0, 200)}`);
     }
 
     const data = await response.json();
-    const b64Json = data?.choices?.[0]?.message?.content;
+    const b64Json = data?.data?.[0]?.b64_json;
     
     if (!b64Json) {
-      console.warn('[RenderingEngine] No image data in response, using fallback');
-      const fallbackSvg = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#2C3E50"/></svg>`;
-      await sharp(Buffer.from(fallbackSvg)).png().toFile(outputPath);
-      return outputPath;
+      throw new Error('No b64_json in gpt-image-2 response');
     }
 
     // Decode base64 and save as PNG
-    // The response may be plain base64 or a data URL
     const base64Data = b64Json.replace(/^data:image\/png;base64,/, '');
     const imageBuffer = Buffer.from(base64Data, 'base64');
     await sharp(imageBuffer).png().toFile(outputPath);
 
-    console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-2`);
+    console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-2 (quality: ${quality})`);
     return outputPath;
   }
 
