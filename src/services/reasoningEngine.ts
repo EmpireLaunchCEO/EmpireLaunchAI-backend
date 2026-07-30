@@ -7,66 +7,32 @@ import { eq } from 'drizzle-orm';
 export class ReasoningEngine {
 
   private async callGeminiDirect(systemPrompt: string, userMessage: string): Promise<string> {
-    // Try Gemini first
     const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-    if (geminiKey) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
-            ],
-            generationConfig: { temperature: 0.5, maxOutputTokens: 8192 }
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) return text;
-        }
-        const errorBody = await response.text().catch(() => '');
-        console.warn('[ReasoningEngine] Gemini failed:', response.status, errorBody.slice(0, 200));
-      } catch (err) {
-        console.warn('[ReasoningEngine] Gemini error, trying OpenAI fallback:', (err as Error).message);
-      }
+    if (!geminiKey) {
+      throw new Error('GOOGLE_API_KEY not configured');
     }
 
-    // Fallback to OpenAI
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      throw new Error('Neither GOOGLE_API_KEY nor OPENAI_API_KEY configured');
-    }
-
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openaiKey}`
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage }
+        contents: [
+          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }
         ],
-        temperature: 0.5,
-        max_tokens: 8192
+        generationConfig: { temperature: 0.5, maxOutputTokens: 8192 }
       })
     });
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      throw new Error(`OpenAI API error: ${response.status} ${errorBody}`);
+      throw new Error(`Gemini API error: ${response.status} ${errorBody.slice(0, 200)}`);
     }
 
     const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content;
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-      throw new Error('OpenAI returned empty response');
+      throw new Error('Gemini returned empty response');
     }
     return text;
   }
@@ -154,42 +120,24 @@ export class ReasoningEngine {
       const maxTokens = options?.maxTokens ?? 8192;
 
       const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
-      if (geminiKey) {
-        // 1. Try gemini-2.5-flash
-        let result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
-        if (result) return result;
-
-        // 2. Fallback: gemini-1.5-flash (separate rate limit)
-        result = await this.tryGeminiModel('gemini-1.5-flash', prompt, temp, maxTokens, geminiKey);
-        if (result) return result;
+      if (!geminiKey) {
+        throw new Error('GOOGLE_API_KEY not configured');
       }
 
-      // 3. Fallback to OpenAI
-      const openaiKey = process.env.OPENAI_API_KEY;
-      if (openaiKey) {
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${openaiKey}`
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'user', content: prompt }],
-            temperature: temp,
-            max_tokens: maxTokens
-          })
-        });
-        if (response.ok) {
-          const data = await response.json();
-          const text = data?.choices?.[0]?.message?.content;
-          if (text) return text;
+      // Try gemini-2.5-flash with one retry on rate limit (wait 5s then retry)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
+        if (result) return result;
+        
+        if (attempt === 0) {
+          console.warn('[ReasoningEngine] Gemini 2.5 Flash failed, waiting 5s before retry...');
+          await new Promise(r => setTimeout(r, 5000));
         }
       }
 
-      // All providers failed
-      console.error('[ReasoningEngine] All AI providers failed (gemini-2.5-flash, gemini-1.5-flash, OpenAI)');
-      throw new Error('AI services temporarily unavailable — please try again in a moment.');
+      // All attempts exhausted
+      console.error('[ReasoningEngine] Gemini 2.5 Flash unavailable after retry (rate limited or down)');
+      throw new Error('AI services temporarily unavailable — Gemini is at its daily limit. Please try again in a few minutes.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);
       throw err;
