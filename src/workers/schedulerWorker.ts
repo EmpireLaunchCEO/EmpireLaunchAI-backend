@@ -79,11 +79,11 @@ export class SchedulerWorker {
 
     // Gemini Creative Loop — generate scripts from trends every 2 hours
     cron.schedule('0 */2 * * *', async () => {
-      console.log('[SchedulerWorker] Running Gemini Creative Loop...');
+      console.log('[SchedulerWorker] Running Creative Loop...');
       try {
         await creativeLoopService.tick();
       } catch (error) {
-        console.error('[SchedulerWorker] Error in Gemini Creative Loop:', error);
+        console.error('[SchedulerWorker] Error in Creative Loop:', error);
       }
     });
 

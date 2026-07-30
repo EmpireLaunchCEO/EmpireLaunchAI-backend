@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 
 /**
  * Model providers and tiers.
+ * Primary: GPT 5.2 (OpenAI). Fallback: Gemini 2.5 Flash (Google).
  */
 export interface ModelConfig {
   provider: 'openai' | 'google';
@@ -14,9 +15,9 @@ export interface ModelConfig {
 }
 
 const MODEL_MAP: Record<string, ModelConfig> = {
-  EMPIRE_MASTER: { provider: 'google', modelName: 'gemini-2.5-pro', temperature: 0.3 },
-  STANDARD_USER: { provider: 'google', modelName: 'gemini-2.5-flash', temperature: 0.5 },
-  STUDIO_INTEL: { provider: 'google', modelName: 'gemini-2.5-flash', temperature: 0.2 },
+  EMPIRE_MASTER:  { provider: 'openai', modelName: 'gpt-5.2', temperature: 0.3 },
+  STANDARD_USER: { provider: 'openai', modelName: 'gpt-5.2', temperature: 0.5 },
+  STUDIO_INTEL:  { provider: 'openai', modelName: 'gpt-5.2', temperature: 0.2 },
 };
 
 const DEFAULT_MODEL = MODEL_MAP.STANDARD_USER;
@@ -59,18 +60,18 @@ export async function resolveModelForUser(userId?: string): Promise<BaseChatMode
 
 export async function resolveStudioReasoner(): Promise<BaseChatModel> {
   const config = MODEL_MAP.STUDIO_INTEL;
-  return new ChatGoogleGenerativeAI({
-    model: config.modelName,
+  return new ChatOpenAI({
+    modelName: config.modelName,
     temperature: config.temperature,
-    apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
+    openAIApiKey: process.env.OPENAI_API_KEY,
   });
 }
 
 export function getDefaultModel(): BaseChatModel {
-  return new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash',
+  return new ChatOpenAI({
+    modelName: 'gpt-5.2',
     temperature: 0.5,
-    apiKey: process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY || 'DUMMY_KEY',
+    openAIApiKey: process.env.OPENAI_API_KEY,
   });
 }
 

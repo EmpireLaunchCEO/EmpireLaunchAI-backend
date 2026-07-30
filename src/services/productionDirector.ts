@@ -163,7 +163,7 @@ Return JSON with:
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      console.error('[ProductionDirector] Gemini API error:', response.status, errorBody);
+      console.error('[ProductionDirector] AI API error:', response.status, errorBody);
       // Fall back to template script
       return this.createFallbackScript(params.niche, params.angle);
     }
@@ -271,7 +271,7 @@ Return JSON with:
         dnaStrandIds: params.dnaStrandIds,
       };
     } catch (err) {
-      console.error('[ProductionDirector] Failed to parse Gemini response:', err);
+      console.error('[ProductionDirector] Failed to parse AI response:', err);
       // Return a fallback script
       return this.createFallbackScript(params.niche, params.angle);
     }

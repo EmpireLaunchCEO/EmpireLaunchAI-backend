@@ -364,7 +364,7 @@ export class EmpireStudioService {
     const archetype = params.archetype || 'creator';
 
     webSocketService.notifyUser(userId, 'ai-log', {
-      message: `🧠 Studio Intelligence: High-Reasoning Layer Activated (Gemini 3 Flash logic)`
+      message: `🧠 Studio Intelligence: High-Reasoning Layer Activated (AI logic)`
     });
 
     // Query the vault for relevant strands to provide as context

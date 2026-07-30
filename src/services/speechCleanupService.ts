@@ -481,11 +481,11 @@ Return ONLY the JSON array — no other text.`;
         const indices: number[] = JSON.parse(match[0]);
         const validIndices = indices.filter(i => i >= 0 && i < candidates.length);
         const skipped = candidates.length - validIndices.length;
-        console.log(`[SpeechCleanup] Gemini classified ${validIndices.length}/${candidates.length} as FILLER (${skipped} kept as grammatical)`);
+        console.log(`[SpeechCleanup] AI classified ${validIndices.length}/${candidates.length} as FILLER (${skipped} kept as grammatical)`);
         return validIndices;
       }
 
-      console.warn('[SpeechCleanup] Could not parse Gemini filler classification response:', trimmed.slice(0, 100));
+      console.warn('[SpeechCleanup] Could not parse AI filler classification response:', trimmed.slice(0, 100));
       return [];
     } catch (err: any) {
       console.warn('[SpeechCleanup] Filler classification failed, skipping all candidates:', err.message);

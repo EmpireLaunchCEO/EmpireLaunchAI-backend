@@ -61,10 +61,10 @@ export class AiRouterService {
         maxTokens: 4096,
       });
 
-      console.log('[AiRouter] Raw Gemini response:', raw.slice(0, 300));
+      console.log('[AiRouter] Raw AI response:', raw.slice(0, 300));
       return this.parseDecision(raw);
     } catch (err: any) {
-      console.error('[AiRouter] Gemini routing failed:', err.message);
+      console.error('[AiRouter] AI routing failed:', err.message);
       // Fallback: classify as ai_assistant and return the actual error
       return {
         classification: 'ai_assistant',
@@ -148,7 +148,7 @@ Return ONLY a JSON object with this exact structure:
         needsRefinement: parsed.needsRefinement || false,
       };
     } catch {
-      console.warn('[AiRouter] Failed to parse Gemini JSON. Raw text:', cleaned.slice(0, 200));
+      console.warn('[AiRouter] Failed to parse AI JSON. Raw text:', cleaned.slice(0, 200));
       return {
         classification: 'ai_assistant',
         prompt: '',

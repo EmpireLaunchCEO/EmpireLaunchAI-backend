@@ -235,7 +235,7 @@ Return JSON with:
         dnaStrandIds: params.dnaStrandIds,
       };
     } catch (err) {
-      console.error('[ProductionDirector] Failed to parse Gemini response:', err);
+      console.error('[ProductionDirector] Failed to parse AI response:', err);
       // Return a fallback script
       return this.createFallbackScript(params.niche, params.angle);
     }

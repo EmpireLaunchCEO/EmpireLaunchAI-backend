@@ -166,7 +166,7 @@ export class IntelService {
         return { data: scraped };
       }
     } catch (err: any) {
-      console.warn('[IntelService] Market scraping failed, falling back to Gemini:', err.message);
+      console.warn('[IntelService] Market scraping failed, falling back to AI:', err.message);
     }
 
     // 2. Fetch cached Etsy DNA strands for this niche
