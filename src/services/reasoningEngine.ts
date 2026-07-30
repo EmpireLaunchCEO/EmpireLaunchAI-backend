@@ -111,42 +111,60 @@ export class ReasoningEngine {
   }
 
   /**
+   * Try a single Gemini model. Returns the response text, or null if it failed.
+   */
+  private async tryGeminiModel(model: string, prompt: string, temp: number, maxTokens: number, geminiKey: string): Promise<string | null> {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${geminiKey}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          console.log(`[ReasoningEngine] ${model} succeeded`);
+          return text;
+        }
+        console.warn(`[ReasoningEngine] ${model} returned OK but no text — raw:`, JSON.stringify(data).slice(0, 300));
+      } else {
+        const errBody = await response.text().catch(() => '');
+        console.warn(`[ReasoningEngine] ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
+      }
+    } catch (err) {
+      console.warn(`[ReasoningEngine] ${model} error:`, (err as Error).message);
+    }
+    return null;
+  }
+
+  /**
    * Simple reason method — takes a prompt and returns a text response.
    * Used by handle extraction and other lightweight AI tasks.
+   *
+   * Fallback chain: gemini-2.5-flash → gemini-1.5-flash → OpenAI → throw
    */
   async reason(prompt: string, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
     try {
       const temp = options?.temperature ?? 0.5;
       const maxTokens = options?.maxTokens ?? 8192;
 
-      // Try Gemini first
       const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
       if (geminiKey) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
-            })
-          });
-          if (response.ok) {
-            const data = await response.json();
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) return text;
-            console.warn('[ReasoningEngine] Gemini returned OK but no text — raw:', JSON.stringify(data).slice(0, 300));
-          } else {
-            const errBody = await response.text().catch(() => '');
-            console.warn('[ReasoningEngine] Gemini HTTP', response.status, '—', errBody.slice(0, 300));
-          }
-        } catch (err) {
-          console.warn('[ReasoningEngine] Gemini reason failed:', (err as Error).message);
-        }
+        // 1. Try gemini-2.5-flash
+        let result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
+        if (result) return result;
+
+        // 2. Fallback: gemini-1.5-flash (separate rate limit)
+        result = await this.tryGeminiModel('gemini-1.5-flash', prompt, temp, maxTokens, geminiKey);
+        if (result) return result;
       }
 
-      // Fallback to OpenAI
+      // 3. Fallback to OpenAI
       const openaiKey = process.env.OPENAI_API_KEY;
       if (openaiKey) {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -169,8 +187,8 @@ export class ReasoningEngine {
         }
       }
 
-      // Both Gemini and OpenAI failed
-      console.error('[ReasoningEngine] Both AI providers failed');
+      // All providers failed
+      console.error('[ReasoningEngine] All AI providers failed (gemini-2.5-flash, gemini-1.5-flash, OpenAI)');
       throw new Error('AI services temporarily unavailable — please try again in a moment.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);

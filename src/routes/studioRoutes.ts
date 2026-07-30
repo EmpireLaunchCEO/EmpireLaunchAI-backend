@@ -145,26 +145,16 @@ router.post('/process', async (req: Request, res: Response) => {
       }
 
       case 'video_creation': {
-        // Quota check — anchored to subscription date, resets same day each week
+        // Quota check — rolling 7-day window, no subscription table needed
         let videoCount = 0;
-        let nextReset: Date | null = null;
         try {
-          const [sub] = await db.select().from(schema.subscriptions)
-            .where(eq(schema.subscriptions.userId, uid))
-            .orderBy(desc(schema.subscriptions.paidAt))
-            .limit(1);
-          const anchor = sub?.paidAt ? new Date(sub.paidAt) : new Date();
-          const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-          const weeksSinceAnchor = Math.floor((Date.now() - anchor.getTime()) / msPerWeek);
-          const currentWeekStart = new Date(anchor.getTime() + weeksSinceAnchor * msPerWeek);
-          nextReset = new Date(currentWeekStart.getTime() + msPerWeek);
-
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
           const [countResult] = await db.select({ count: count() })
             .from(schema.creations)
             .where(and(
               eq(schema.creations.userId, uid),
               eq(schema.creations.type, 'video_creation'),
-              gte(schema.creations.createdAt, currentWeekStart)
+              gte(schema.creations.createdAt, sevenDaysAgo)
             ));
           videoCount = Number(countResult?.count ?? 0);
         } catch (quotaErr: any) {
@@ -174,7 +164,7 @@ router.post('/process', async (req: Request, res: Response) => {
         if (Number(videoCount) >= 7) {
           return res.status(429).json({
             status: 'error',
-            error: `You've used 7/7 videos this week. Your quota resets on ${nextReset?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) ?? 'next week'}.`,
+            error: 'You\'ve used 7/7 videos this week. Try again later when a slot frees up (rolling 7-day window).',
           } as StudioResponse);
         }
 
