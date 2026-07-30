@@ -99,7 +99,15 @@ router.post('/process', async (req: Request, res: Response) => {
         try {
           const imageResult = await renderingEngine.renderImage(decision.prompt, uid);
 
-          if (imageResult.success && imageResult.imageUrl) {
+          if (!imageResult.success) {
+            return res.status(500).json({
+              status: 'error',
+              classification: decision.classification,
+              response: `Image generation failed: ${imageResult.error || 'Unknown error'}`,
+            } as StudioResponse);
+          }
+
+          if (imageResult.imageUrl) {
             const imgUrl = imageResult.imageUrl;
             const aiProvider = 'GPT Image 2';
             const assetType = decision.classification === 'image_editing' ? 'edit' : 'design';
@@ -193,7 +201,15 @@ router.post('/process', async (req: Request, res: Response) => {
             size: decision.parameters.aspectRatio === '9:16' ? '1080x1920' : '1024x1024',
           });
 
-          if (soraResult.success && soraResult.videoPath) {
+          if (!soraResult.success) {
+            return res.status(500).json({
+              status: 'error',
+              classification: decision.classification,
+              response: `Video generation failed: ${soraResult.error || 'Sora returned no video'}`,
+            } as StudioResponse);
+          }
+
+          if (soraResult.videoPath) {
             // Package for platforms via FFmpeg Render
             const platforms = decision.parameters.platform
               ? [decision.parameters.platform]
@@ -204,15 +220,21 @@ router.post('/process', async (req: Request, res: Response) => {
               enableWatermark: !!decision.parameters.brandName,
             });
 
-            if (renderResult.success) {
-              for (const out of renderResult.outputs) {
-                assets.push({
-                  type: 'video',
-                  url: out.videoUrl,
-                  thumbnailUrl: out.thumbnailUrl,
-                  platform: out.platform,
-                });
-              }
+            if (!renderResult.success) {
+              return res.status(500).json({
+                status: 'error',
+                classification: decision.classification,
+                response: `Video rendering failed: ${(renderResult as any).error || 'FFmpeg render returned no output'}`,
+              } as StudioResponse);
+            }
+
+            for (const out of renderResult.outputs) {
+              assets.push({
+                type: 'video',
+                url: out.videoUrl,
+                thumbnailUrl: out.thumbnailUrl,
+                platform: out.platform,
+              });
             }
 
             // Store in creations table with AI provider tag
@@ -294,16 +316,23 @@ router.post('/process', async (req: Request, res: Response) => {
               callToAction: decision.parameters.callToAction,
             });
 
-            if (renderResult.success) {
-              const creationId = uuidv4();
-              for (const out of renderResult.outputs) {
-                assets.push({
-                  type: 'video',
-                  url: out.videoUrl,
-                  thumbnailUrl: out.thumbnailUrl,
-                  platform: out.platform,
-                });
-              }
+            if (!renderResult.success) {
+              return res.status(500).json({
+                status: 'error',
+                classification: decision.classification,
+                response: `Video editing failed: ${(renderResult as any).error || 'FFmpeg render returned no output'}`,
+              } as StudioResponse);
+            }
+
+            const creationId = uuidv4();
+            for (const out of renderResult.outputs) {
+              assets.push({
+                type: 'video',
+                url: out.videoUrl,
+                thumbnailUrl: out.thumbnailUrl,
+                platform: out.platform,
+              });
+            }
 
               // Create approval for Operations page
               try {
@@ -328,7 +357,6 @@ router.post('/process', async (req: Request, res: Response) => {
               } catch (approvalErr: any) {
                 console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
               }
-            }
           } catch (editErr: any) {
             console.error('[StudioRoute] Video editing failed:', editErr.message);
             return res.status(500).json({
@@ -352,17 +380,24 @@ router.post('/process', async (req: Request, res: Response) => {
               callToAction: decision.parameters.callToAction,
             });
 
-            if (renderResult.success) {
-              const creationId = uuidv4();
-              const aiProvider = 'FFmpeg';
-              for (const out of renderResult.outputs) {
-                assets.push({
-                  type: 'video',
-                  url: out.videoUrl,
-                  thumbnailUrl: out.thumbnailUrl,
-                  platform: out.platform,
-                });
-              }
+            if (!renderResult.success) {
+              return res.status(500).json({
+                status: 'error',
+                classification: decision.classification,
+                response: `Final rendering failed: ${(renderResult as any).error || 'FFmpeg render returned no output'}`,
+              } as StudioResponse);
+            }
+
+            const creationId = uuidv4();
+            const aiProvider = 'FFmpeg';
+            for (const out of renderResult.outputs) {
+              assets.push({
+                type: 'video',
+                url: out.videoUrl,
+                thumbnailUrl: out.thumbnailUrl,
+                platform: out.platform,
+              });
+            }
 
               // Create approval for Operations page
               try {
@@ -383,7 +418,6 @@ router.post('/process', async (req: Request, res: Response) => {
               } catch (approvalErr: any) {
                 console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
               }
-            }
           } catch (renderErr: any) {
             console.error('[StudioRoute] Final rendering failed:', renderErr.message);
             return res.status(500).json({
