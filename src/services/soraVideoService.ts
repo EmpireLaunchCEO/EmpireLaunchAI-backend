@@ -70,13 +70,14 @@ export class SoraVideoService {
       console.log(`[SoraVideoService] Video ${videoId} created — status: ${createData.status}`);
 
       // Step 2: Poll until complete
-      const videoUrl = await this.pollVideo(videoId, apiKey);
-      if (!videoUrl) {
+      const completed = await this.pollVideo(videoId, apiKey);
+      if (!completed) {
         return { success: false, error: 'Sora generation failed or timed out' };
       }
 
-      // Step 3: Download video locally
-      const localPath = await this.downloadVideo(videoUrl, taskId);
+      // Step 3: Download video from /v1/videos/{id}/content
+      const downloadUrl = `https://api.openai.com/v1/videos/${videoId}/content`;
+      const localPath = await this.downloadVideo(downloadUrl, taskId, apiKey);
       const publicUrl = await this.maybeUploadToR2(localPath, options.userId);
 
       console.log(`[SoraVideoService] Generated: ${localPath}`);
@@ -102,15 +103,15 @@ export class SoraVideoService {
 
   /**
    * Poll GET /v1/videos/{id} until status is "completed" or "failed".
-   * Returns the download URL on completion, null on failure/timeout.
+   * Returns true on completion, false on failure/timeout.
    */
   private async pollVideo(
     videoId: string,
     apiKey: string,
     maxAttempts = 30,
-  ): Promise<string | null> {
+  ): Promise<boolean> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise(r => setTimeout(r, 2000)); // 2s between polls
+      await new Promise(r => setTimeout(r, 2000));
 
       try {
         const response = await fetch(
@@ -127,39 +128,37 @@ export class SoraVideoService {
         const status = data?.status;
 
         if (status === 'completed') {
-          const url = data?.video_url || data?.download_url || data?.url;
-          if (url) {
-            console.log(`[SoraVideoService] Video ${videoId} completed`);
-            return url;
-          }
-          console.warn(`[SoraVideoService] Video ${videoId} completed but no download URL in response`);
-          return null;
+          console.log(`[SoraVideoService] Video ${videoId} completed`);
+          return true;
         }
 
         if (status === 'failed') {
           console.error(`[SoraVideoService] Video ${videoId} failed`);
-          return null;
+          return false;
         }
 
-        console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt + 1}, status=${status}`);
+        console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt + 1}, status=${status}, progress=${data?.progress ?? '?'}%`);
       } catch (err) {
         console.warn(`[SoraVideoService] Poll attempt ${attempt + 1} failed:`, (err as Error).message);
       }
     }
 
     console.error(`[SoraVideoService] Video ${videoId} timed out after ${maxAttempts} attempts`);
-    return null;
+    return false;
   }
 
   /**
-   * Download a video from a URL and save to local storage.
+   * Download a video from /v1/videos/{id}/content with API key auth.
    */
-  private async downloadVideo(url: string, taskId: string): Promise<string> {
+  private async downloadVideo(url: string, taskId: string, apiKey: string): Promise<string> {
     const ext = '.mp4';
     const filename = `sora_${taskId}${ext}`;
     const outputPath = path.join(this.outputDir, filename);
 
-    const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(120000),
+    });
     if (!response.ok) {
       throw new Error(`Failed to download video: ${response.status}`);
     }
