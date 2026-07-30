@@ -19,7 +19,7 @@ export interface TierConfig {
 
 const TIER_CONFIGS: Record<string, TierConfig> = {
   EMPIRE_MASTER: {
-    modelName: 'gemini-2.5-pro',
+    modelName: 'gpt-5.2',
     temperature: 0.3,
     maxConcurrency: 10,
     autoApproveListings: true,
@@ -28,7 +28,7 @@ const TIER_CONFIGS: Record<string, TierConfig> = {
     maxBusinessSlots: 5,
   },
   STANDARD_USER: {
-    modelName: 'gemini-2.5-flash',
+    modelName: 'gpt-5.2',
     temperature: 0.5,
     maxConcurrency: 2,
     autoApproveListings: false,

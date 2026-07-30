@@ -81,7 +81,7 @@ const planNode = async (state: typeof OrchestratorState.State) => {
   
   if (!(process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY)) {
     console.warn("[Orchestrator/Plan] GOOGLE_API_KEY missing, using static fallback plan.");
-    webSocketService.notifyUser(state.userId, 'ai-log', { message: "[PLANNER] Gemini API key not configured. Using safe static plan (no AI capability matching)." });
+    webSocketService.notifyUser(state.userId, 'ai-log', { message: "[PLANNER] AI API key not configured. Using safe static plan (no AI capability matching)." });
     return {
       plan: [
         "Research trends", 
