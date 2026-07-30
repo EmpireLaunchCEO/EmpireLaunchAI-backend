@@ -196,10 +196,7 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // Generate video via Sora 2
         try {
-          const soraResult = await soraVideoService.generateVideo(decision.prompt, {
-            duration: decision.parameters.duration || 60,
-            size: decision.parameters.aspectRatio === '9:16' ? '1080x1920' : '1024x1024',
-          });
+          const soraResult = await soraVideoService.generateVideo(decision.prompt);
 
           if (!soraResult.success) {
             return res.status(500).json({
