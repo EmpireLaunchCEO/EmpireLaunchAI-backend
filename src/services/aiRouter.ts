@@ -97,6 +97,7 @@ CLASSIFICATION OPTIONS:
 
 RULES:
 - If the request is vague ("I want to make something"), set needsRefinement=true and ask clarifying questions.
+- **Keep responses SHORT**: ai_assistant and refinement responses must be 1-3 concise sentences. Ask one question at a time. Never write paragraphs or multi-question lists.
 - For ai_assistant, return response directly — do not route to any service.
 - For video_creation that needs source images, set requiresSourceImages=true.
 - For video_editing needing new visuals, set requiresNewVisualContent=true.
