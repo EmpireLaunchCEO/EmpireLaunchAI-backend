@@ -22,10 +22,11 @@ interface StudioRequest {
 }
 
 interface StudioResponse {
-  status: 'completed' | 'needs_refinement' | 'ai_response' | 'error';
+  status: 'completed' | 'needs_refinement' | 'ai_response' | 'error' | 'processing';
   mode?: 'consult' | 'generate';
   classification?: string;
   response?: string;                         // Natural language for user
+  creationId?: string;                       // For async video tracking
   assets?: Array<{
     type: 'image' | 'video';
     url: string;
@@ -180,7 +181,6 @@ router.post('/process', async (req: Request, res: Response) => {
           videoCount = Number(countResult?.count ?? 0);
         } catch (quotaErr: any) {
           console.warn('[StudioRoute] Quota check failed, allowing video creation:', quotaErr.message);
-          // Skip quota — let the user create the video despite DB issues
         }
         if (Number(videoCount) >= 7) {
           return res.status(429).json({
@@ -189,7 +189,7 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // Generate source images if needed
+        // Generate source images if needed (sync — fast enough)
         let sourceImages: string[] = [];
         if (decision.requiresSourceImages) {
           try {
@@ -207,68 +207,82 @@ router.post('/process', async (req: Request, res: Response) => {
           } catch {}
         }
 
-        // Generate video via Sora 2
+        // Create creation record with status 'processing'
+        const creationId = uuidv4();
+        const platforms = decision.parameters.platform
+          ? [decision.parameters.platform]
+          : ['tiktok', 'instagram_reel', 'youtube_shorts'];
+
         try {
-          const soraResult = await soraVideoService.generateVideo(decision.prompt);
+          await db.insert(schema.creations).values({
+            id: creationId, userId: uid, type: 'enhanced_video',
+            title: decision.prompt.slice(0, 60), status: 'processing',
+            metadata: { classification: 'video_creation', prompt: decision.prompt, platforms },
+          });
+        } catch (creationErr: any) {
+          console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
+        }
 
-          if (!soraResult.success) {
-            return res.status(500).json({
-              status: 'error',
-              classification: decision.classification,
-              response: `Video generation failed: ${soraResult.error || 'Sora returned no video'}`,
-            } as StudioResponse);
-          }
+        // Respond immediately — don't wait for Sora
+        res.json({
+          status: 'processing',
+          classification: 'video_creation',
+          creationId,
+          response: 'Video generation started — this takes 60–90 seconds. Check back shortly.',
+        } as StudioResponse);
 
-          if (soraResult.videoPath) {
-            const platforms = decision.parameters.platform
-              ? [decision.parameters.platform]
-              : ['tiktok', 'instagram_reel', 'youtube_shorts'];
+        // Fire and forget — Sora pipeline runs in background
+        (async () => {
+          try {
+            const soraResult = await soraVideoService.generateVideo(decision.prompt);
 
-            // Try FFmpeg render — fall back to raw Sora video if FFmpeg unavailable
+            if (!soraResult.success || !soraResult.videoPath) {
+              await db.update(schema.creations)
+                .set({
+                  status: 'failed',
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
+                })
+                .where(eq(schema.creations.id, creationId));
+              return;
+            }
+
+            // FFmpeg render — gracefully degrade to raw Sora video
             let videoUrl = soraResult.videoUrl || soraResult.videoPath;
             try {
               const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
                 platforms,
                 enableWatermark: !!decision.parameters.brandName,
               });
-
               if (renderResult.success && renderResult.outputs.length > 0) {
-                for (const out of renderResult.outputs) {
-                  assets.push({
-                    type: 'video',
-                    url: out.videoUrl,
-                    thumbnailUrl: out.thumbnailUrl,
-                    platform: out.platform,
-                  });
-                }
                 videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
               }
             } catch (ffmpegErr: any) {
-              console.warn('[StudioRoute] FFmpeg render unavailable, serving raw Sora video:', ffmpegErr.message);
+              console.warn('[StudioRoute] FFmpeg render unavailable, using raw Sora video:', ffmpegErr.message);
             }
 
-            // If FFmpeg produced no outputs, fall back to raw Sora video
-            if (assets.length === 0) {
-              assets.push({
-                type: 'video',
-                url: videoUrl,
-                platform: platforms[0] || 'tiktok',
-              });
-            }
-
-            // Store in creations table with AI provider tag
-            const creationId = uuidv4();
-            const aiProvider = 'Sora 2';
+            // R2 upload
             try {
-              await db.insert(schema.creations).values({
-                id: creationId, userId: uid, type: 'enhanced_video',
-                title: decision.prompt.slice(0, 60), status: 'completed',
+              const { r2Storage } = await import('../services/r2StorageService.js');
+              if (r2Storage.isAvailable) {
+                const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, uid, 'cinema/sora', 'video/mp4');
+                if (r2.url) videoUrl = r2.url;
+              }
+            } catch {}
+
+            // Update creation to completed
+            await db.update(schema.creations)
+              .set({
+                status: 'completed',
                 fileUrl: videoUrl,
-                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
-              });
-            } catch (creationErr: any) {
-              console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
-            }
+                metadata: {
+                  classification: 'video_creation',
+                  prompt: decision.prompt,
+                  platforms,
+                  aiProvider: 'Sora 2',
+                  sourceImages,
+                },
+              })
+              .where(eq(schema.creations.id, creationId));
 
             // Create approval for Operations page
             try {
@@ -276,24 +290,28 @@ router.post('/process', async (req: Request, res: Response) => {
                 id: uuidv4(),
                 userId: uid,
                 type: 'video',
-                status: 'pending',
-                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'pending' },
+                status: 'completed',
+                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
                 createdAt: new Date(),
                 updatedAt: new Date(),
               });
             } catch (approvalErr: any) {
               console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
             }
+          } catch (bgErr: any) {
+            console.error('[StudioRoute] Background video creation failed:', bgErr.message);
+            try {
+              await db.update(schema.creations)
+                .set({
+                  status: 'failed',
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
+                })
+                .where(eq(schema.creations.id, creationId));
+            } catch {}
           }
-        } catch (vidErr: any) {
-          console.error('[StudioRoute] Video creation failed:', vidErr.message);
-          return res.status(500).json({
-            status: 'error',
-            classification: decision.classification,
-            response: `Video generation failed: ${vidErr.message}`,
-          } as StudioResponse);
-        }
-        break;
+        })();
+
+        return; // Exit handler after sending response
       }
 
       case 'video_editing': {
@@ -467,6 +485,47 @@ router.post('/process', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('[StudioRoute] Processing failed:', error.message);
     return res.status(500).json({ status: 'error', error: error.message } as StudioResponse);
+  }
+});
+
+// ─── GET /api/studio/creation/:id — Poll async video status ──────────────────
+
+router.get('/creation/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const [creation] = await db.select()
+      .from(schema.creations)
+      .where(eq(schema.creations.id, id))
+      .limit(1);
+
+    if (!creation) {
+      return res.status(404).json({ status: 'error', error: 'Creation not found' });
+    }
+
+    const meta = (creation.metadata as any) || {};
+    const response: StudioResponse = {
+      status: creation.status === 'completed' ? 'completed'
+        : creation.status === 'failed' ? 'error'
+        : 'processing',
+      classification: meta.classification || 'video_creation',
+      creationId: creation.id,
+      response: creation.status === 'completed' ? 'Video is ready.'
+        : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}`
+        : 'Still generating...',
+    };
+
+    if (creation.status === 'completed' && creation.fileUrl) {
+      response.assets = [{
+        type: 'video',
+        url: creation.fileUrl,
+        platform: (meta.platforms?.[0]) || 'tiktok',
+      }];
+    }
+
+    return res.json(response);
+  } catch (err: any) {
+    console.error('[StudioRoute] Failed to fetch creation:', err.message);
+    return res.status(500).json({ status: 'error', error: err.message });
   }
 });
 
