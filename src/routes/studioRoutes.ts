@@ -220,41 +220,50 @@ router.post('/process', async (req: Request, res: Response) => {
           }
 
           if (soraResult.videoPath) {
-            // Package for platforms via FFmpeg Render
             const platforms = decision.parameters.platform
               ? [decision.parameters.platform]
               : ['tiktok', 'instagram_reel', 'youtube_shorts'];
 
-            const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
-              platforms,
-              enableWatermark: !!decision.parameters.brandName,
-            });
+            // Try FFmpeg render — fall back to raw Sora video if FFmpeg unavailable
+            let videoUrl = soraResult.videoUrl || soraResult.videoPath;
+            try {
+              const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
+                platforms,
+                enableWatermark: !!decision.parameters.brandName,
+              });
 
-            if (!renderResult.success) {
-              return res.status(500).json({
-                status: 'error',
-                classification: decision.classification,
-                response: `Video rendering failed: ${(renderResult as any).error || 'FFmpeg render returned no output'}`,
-              } as StudioResponse);
+              if (renderResult.success && renderResult.outputs.length > 0) {
+                for (const out of renderResult.outputs) {
+                  assets.push({
+                    type: 'video',
+                    url: out.videoUrl,
+                    thumbnailUrl: out.thumbnailUrl,
+                    platform: out.platform,
+                  });
+                }
+                videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
+              }
+            } catch (ffmpegErr: any) {
+              console.warn('[StudioRoute] FFmpeg render unavailable, serving raw Sora video:', ffmpegErr.message);
             }
 
-            for (const out of renderResult.outputs) {
+            // If FFmpeg produced no outputs, fall back to raw Sora video
+            if (assets.length === 0) {
               assets.push({
                 type: 'video',
-                url: out.videoUrl,
-                thumbnailUrl: out.thumbnailUrl,
-                platform: out.platform,
+                url: videoUrl,
+                platform: platforms[0] || 'tiktok',
               });
             }
 
             // Store in creations table with AI provider tag
             const creationId = uuidv4();
-            const aiProvider = 'Sora 2 + FFmpeg';
+            const aiProvider = 'Sora 2';
             try {
               await db.insert(schema.creations).values({
                 id: creationId, userId: uid, type: 'enhanced_video',
                 title: decision.prompt.slice(0, 60), status: 'completed',
-                fileUrl: soraResult.videoPath,
+                fileUrl: videoUrl,
                 metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider },
               });
             } catch (creationErr: any) {
@@ -268,7 +277,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 userId: uid,
                 type: 'video',
                 status: 'pending',
-                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl: soraResult.videoUrl || soraResult.videoPath, platforms, status: 'pending' },
+                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'pending' },
                 createdAt: new Date(),
                 updatedAt: new Date(),
               });
