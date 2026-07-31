@@ -52,7 +52,27 @@ router.post('/process', async (req: Request, res: Response) => {
     // Resolve non-UUID user identifiers to real UUIDs (needed for FK inserts)
     const resolveUserId = async (raw: string): Promise<string | null> => {
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuidRegex.test(raw)) return raw;
+      if (uuidRegex.test(raw)) {
+        // It's a valid UUID — check if user exists, auto-create if not
+        try {
+          const [existing] = await db.select({ id: schema.users.id })
+            .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
+          if (existing) return existing.id;
+
+          // Auto-create minimal user record (frontend generates UUIDs via crypto.randomUUID)
+          await db.insert(schema.users).values({
+            id: raw,
+            email: `${raw.slice(0, 8)}@empirelaunch.ai`,
+            accessKey: raw.slice(0, 8),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+          return raw;
+        } catch (err) {
+          console.warn('[StudioRoute] resolveUserId failed to verify/create user:', (err as Error).message);
+          return null;
+        }
+      }
 
       // Try lookup by accessKey
       try {
