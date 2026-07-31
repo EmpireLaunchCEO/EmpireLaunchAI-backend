@@ -38,6 +38,52 @@ interface StudioResponse {
 
 // ─── POST /api/studio/process ────────────────────────────────────────────────
 
+// Reusable helper: resolve non-UUID user identifiers to real UUIDs
+// (needed for FK inserts in creations, approvals, etc.)
+const resolveUserId = async (raw: string): Promise<string | null> => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (uuidRegex.test(raw)) {
+    // It's a valid UUID — check if user exists, auto-create if not
+    try {
+      const [existing] = await db.select({ id: schema.users.id })
+        .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
+      if (existing) return existing.id;
+
+      // Auto-create minimal user record (frontend generates UUIDs via crypto.randomUUID)
+      // email is .notNull().unique() per schema — use synthetic to satisfy both constraints
+      await db.insert(schema.users).values({
+        id: raw,
+        email: `${raw.slice(0, 8)}@empirelaunch.ai`,
+        accessKey: null,
+      }).onConflictDoNothing();
+
+      // Re-read to handle race: another request may have created between our SELECT and INSERT
+      const [created] = await db.select({ id: schema.users.id })
+        .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
+      return created?.id ?? null;
+    } catch (err) {
+      console.warn('[StudioRoute] resolveUserId failed to verify/create user:', (err as Error).message);
+      return null;
+    }
+  }
+
+  // Try lookup by accessKey
+  try {
+    const [byKey] = await db.select({ id: schema.users.id })
+      .from(schema.users).where(eq(schema.users.accessKey, raw)).limit(1);
+    if (byKey) return byKey.id;
+  } catch {}
+
+  // Try email: raw@empirelaunch.ai
+  try {
+    const [byEmail] = await db.select({ id: schema.users.id })
+      .from(schema.users).where(eq(schema.users.email, `${raw}@empirelaunch.ai`)).limit(1);
+    if (byEmail) return byEmail.id;
+  } catch {}
+
+  return null;
+};
+
 router.post('/process', async (req: Request, res: Response) => {
   try {
     const { userId, brandId, request, attachments, conversationHistory } = req.body as StudioRequest;
@@ -48,51 +94,6 @@ router.post('/process', async (req: Request, res: Response) => {
     }
 
     const uid = userId || (req as any).userId || 'system';
-
-    // Resolve non-UUID user identifiers to real UUIDs (needed for FK inserts)
-    const resolveUserId = async (raw: string): Promise<string | null> => {
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuidRegex.test(raw)) {
-        // It's a valid UUID — check if user exists, auto-create if not
-        try {
-          const [existing] = await db.select({ id: schema.users.id })
-            .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
-          if (existing) return existing.id;
-
-          // Auto-create minimal user record (frontend generates UUIDs via crypto.randomUUID)
-          // email is .notNull().unique() per schema — use synthetic to satisfy both constraints
-          await db.insert(schema.users).values({
-            id: raw,
-            email: `${raw.slice(0, 8)}@empirelaunch.ai`,
-            accessKey: null,
-          }).onConflictDoNothing();
-
-          // Re-read to handle race: another request may have created between our SELECT and INSERT
-          const [created] = await db.select({ id: schema.users.id })
-            .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
-          return created?.id ?? null;
-        } catch (err) {
-          console.warn('[StudioRoute] resolveUserId failed to verify/create user:', (err as Error).message);
-          return null;
-        }
-      }
-
-      // Try lookup by accessKey
-      try {
-        const [byKey] = await db.select({ id: schema.users.id })
-          .from(schema.users).where(eq(schema.users.accessKey, raw)).limit(1);
-        if (byKey) return byKey.id;
-      } catch {}
-
-      // Try email: raw@empirelaunch.ai
-      try {
-        const [byEmail] = await db.select({ id: schema.users.id })
-          .from(schema.users).where(eq(schema.users.email, `${raw}@empirelaunch.ai`)).limit(1);
-        if (byEmail) return byEmail.id;
-      } catch {}
-
-      return null;
-    };
 
     // 1. Fetch brand context if brandId provided
     let brandContext: any = undefined;
@@ -604,6 +605,41 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
     return res.json(response);
   } catch (err: any) {
     console.error('[StudioRoute] Failed to fetch creation:', err.message);
+    return res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// ─── GET /api/studio/assets — List user's creations for Operations page ─────
+
+router.get('/assets', async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    if (!uid) return res.status(400).json({ status: 'error', error: 'userId required' });
+
+    const resolvedUserId = await resolveUserId(String(uid));
+    if (!resolvedUserId) return res.status(400).json({ status: 'error', error: 'User not found' });
+
+    const creations = await db.select()
+      .from(schema.creations)
+      .where(eq(schema.creations.userId, resolvedUserId))
+      .orderBy(desc(schema.creations.createdAt))
+      .limit(50);
+
+    res.json({
+      status: 'ok',
+      assets: creations.map(c => ({
+        id: c.id,
+        type: c.type,
+        title: c.title,
+        status: c.status,
+        fileUrl: c.fileUrl,
+        thumbnailUrl: c.thumbnailUrl,
+        metadata: c.metadata,
+        createdAt: c.createdAt,
+      })),
+    });
+  } catch (err: any) {
+    console.error('[StudioRoute] Failed to fetch assets:', err.message);
     return res.status(500).json({ status: 'error', error: err.message });
   }
 });
