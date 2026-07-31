@@ -83,7 +83,7 @@ export class AiRouterService {
       : '';
 
     const consultInstructions = mode === 'consult'
-      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- Read their FULL idea from the conversation history. Remember what they already told you — do NOT ask them to repeat anything.\n- Ask about vibe, color scheme, fonts, or effects — 2-3 quick questions to narrow things down.\n- If the user says "you decide" or defers to you, confidently pick what would trend best and tell them why.\n- Be concise. No paragraphs or bullet points.\n- Always classify as "ai_assistant" and fill the "response" field with your suggestions. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
+      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- Read their FULL idea from the conversation history. Remember what they already told you.\n- Be proactive: instead of open-ended questions, make confident suggestions. "I think warm amber + a clean sans-serif would trend well — want me to apply that?" or "This CTA is stronger: 'Shop the Look' — want me to apply?"\n- If the user says "you decide" or "yes apply", note it and move to the next refinement area.\n- Cover vibe/colors, fonts, CTA/text, effects — one area per message.\n- Always classify as "ai_assistant" and fill the "response" field. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
       : '';
 
     return `You are the EmpireLaunch AI Router — a smart dispatcher that classifies user creative requests and routes them to the correct AI pipeline.
