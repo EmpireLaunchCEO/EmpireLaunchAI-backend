@@ -66,10 +66,11 @@ router.post('/process', async (req: Request, res: Response) => {
       } catch {}
     }
 
-    // 2. Route via Gemini AI Router
+    // 2. Route via AI Router
     const decision = await aiRouter.route({
       userId: uid,
       request,
+      mode,
       brandContext,
       conversationHistory,
     });

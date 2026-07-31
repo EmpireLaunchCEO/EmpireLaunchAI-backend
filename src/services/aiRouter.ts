@@ -32,6 +32,7 @@ export interface RouterDecision {
 export interface RouterRequest {
   userId: string;
   request: string;
+  mode?: 'consult' | 'generate';
   brandContext?: {
     name?: string;
     niche?: string;
@@ -52,7 +53,7 @@ export class AiRouterService {
    * and returns a structured routing decision. Never generates final media.
    */
   async route(request: RouterRequest): Promise<RouterDecision> {
-    const systemPrompt = this.buildSystemPrompt(request.brandContext);
+    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode);
     const userMessage = this.buildUserMessage(request);
 
     try {
@@ -76,14 +77,18 @@ export class AiRouterService {
     }
   }
 
-  private buildSystemPrompt(brandContext?: RouterRequest['brandContext']): string {
+  private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode']): string {
     const brandInfo = brandContext
       ? `\nBrand: ${brandContext.name || 'Unknown'}\nNiche: ${brandContext.niche || 'General'}\nTarget: ${brandContext.targetCustomers || 'General audience'}\nGoals: ${brandContext.businessGoals || 'Grow business'}`
       : '';
 
+    const consultInstructions = mode === 'consult'
+      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. Read their idea carefully and suggest 2-3 specific improvements — offer options for background/vibe, effects, pacing, or visual style. Always classify as "ai_assistant" and fill the "response" field with your suggestions. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
+      : '';
+
     return `You are the EmpireLaunch AI Router — a smart dispatcher that classifies user creative requests and routes them to the correct AI pipeline.
 
-${brandInfo}
+${brandInfo}${consultInstructions}
 
 YOUR ROLE: Classify the user's request and produce a refined prompt for the downstream AI service. You NEVER generate final images or videos yourself.
 
