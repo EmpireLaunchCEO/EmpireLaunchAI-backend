@@ -7,6 +7,7 @@ import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
+import { r2Storage } from '../services/r2StorageService.js';
 
 const router = Router();
 
@@ -611,6 +612,25 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
 
 // ─── GET /api/studio/assets — List user's creations for Operations page ─────
 
+/**
+ * Regenerate an expiring R2 signed URL. Cloudflare signed URLs expire after
+ * 1 hour — calling this on read ensures Library always shows working URLs.
+ */
+async function refreshR2Url(storedUrl: string): Promise<string> {
+  if (!storedUrl.includes('r2.cloudflarestorage.com')) return storedUrl;
+  try {
+    // Extract key from URL: https://{host}/{bucket}/{key}?{params}
+    const url = new URL(storedUrl);
+    const pathParts = url.pathname.split('/');
+    // pathname is like /{bucket}/brands/... — skip bucket prefix
+    const key = pathParts.slice(2).join('/');
+    const fresh = await r2Storage.getSignedUrl(key);
+    return fresh || storedUrl;
+  } catch {
+    return storedUrl; // fall back to stored URL on any failure
+  }
+}
+
 router.get('/assets', async (req: Request, res: Response) => {
   try {
     const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
@@ -625,19 +645,22 @@ router.get('/assets', async (req: Request, res: Response) => {
       .orderBy(desc(schema.creations.createdAt))
       .limit(50);
 
-    res.json({
-      status: 'ok',
-      assets: creations.map(c => ({
+    const assets = await Promise.all(creations.map(async c => {
+      const fileUrl = c.fileUrl ? await refreshR2Url(c.fileUrl) : null;
+      const thumbnailUrl = c.thumbnailUrl ? await refreshR2Url(c.thumbnailUrl) : null;
+      return {
         id: c.id,
         type: c.type,
         title: c.title,
         status: c.status,
-        fileUrl: c.fileUrl,
-        thumbnailUrl: c.thumbnailUrl,
+        fileUrl,
+        thumbnailUrl,
         metadata: c.metadata,
         createdAt: c.createdAt,
-      })),
-    });
+      };
+    }));
+
+    res.json({ status: 'ok', assets });
   } catch (err: any) {
     console.error('[StudioRoute] Failed to fetch assets:', err.message);
     return res.status(500).json({ status: 'error', error: err.message });
