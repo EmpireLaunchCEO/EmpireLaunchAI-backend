@@ -49,6 +49,28 @@ router.post('/process', async (req: Request, res: Response) => {
 
     const uid = userId || (req as any).userId || 'system';
 
+    // Resolve non-UUID user identifiers to real UUIDs (needed for FK inserts)
+    const resolveUserId = async (raw: string): Promise<string | null> => {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (uuidRegex.test(raw)) return raw;
+
+      // Try lookup by accessKey
+      try {
+        const [byKey] = await db.select({ id: schema.users.id })
+          .from(schema.users).where(eq(schema.users.accessKey, raw)).limit(1);
+        if (byKey) return byKey.id;
+      } catch {}
+
+      // Try email: raw@empirelaunch.ai
+      try {
+        const [byEmail] = await db.select({ id: schema.users.id })
+          .from(schema.users).where(eq(schema.users.email, `${raw}@empirelaunch.ai`)).limit(1);
+        if (byEmail) return byEmail.id;
+      } catch {}
+
+      return null;
+    };
+
     // 1. Fetch brand context if brandId provided
     let brandContext: any = undefined;
     if (brandId) {
@@ -167,6 +189,15 @@ router.post('/process', async (req: Request, res: Response) => {
       }
 
       case 'video_creation': {
+        // Resolve userId to a valid UUID — creation FK requires it
+        const resolvedUserId = await resolveUserId(uid);
+        if (!resolvedUserId) {
+          return res.status(400).json({
+            status: 'error',
+            error: `Cannot create video: user "${uid}" not found. Please log in again.`,
+          } as StudioResponse);
+        }
+
         // Quota check — rolling 7-day window, no subscription table needed
         let videoCount = 0;
         try {
@@ -174,7 +205,7 @@ router.post('/process', async (req: Request, res: Response) => {
           const [countResult] = await db.select({ count: count() })
             .from(schema.creations)
             .where(and(
-              eq(schema.creations.userId, uid),
+              eq(schema.creations.userId, resolvedUserId),
               eq(schema.creations.type, 'video_creation'),
               gte(schema.creations.createdAt, sevenDaysAgo)
             ));
@@ -215,12 +246,16 @@ router.post('/process', async (req: Request, res: Response) => {
 
         try {
           await db.insert(schema.creations).values({
-            id: creationId, userId: uid, type: 'enhanced_video',
+            id: creationId, userId: resolvedUserId, type: 'enhanced_video',
             title: decision.prompt.slice(0, 60), status: 'processing',
             metadata: { classification: 'video_creation', prompt: decision.prompt, platforms },
           });
         } catch (creationErr: any) {
-          console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
+          console.error('[StudioRoute] Failed to insert creation record:', creationErr.message);
+          return res.status(500).json({
+            status: 'error',
+            error: 'Failed to create video record — please try again.',
+          } as StudioResponse);
         }
 
         // Respond immediately — don't wait for Sora
@@ -264,7 +299,7 @@ router.post('/process', async (req: Request, res: Response) => {
             try {
               const { r2Storage } = await import('../services/r2StorageService.js');
               if (r2Storage.isAvailable) {
-                const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, uid, 'cinema/sora', 'video/mp4');
+                const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
                 if (r2.url) videoUrl = r2.url;
               }
             } catch {}
@@ -288,7 +323,7 @@ router.post('/process', async (req: Request, res: Response) => {
             try {
               await db.insert(schema.approvals).values({
                 id: uuidv4(),
-                userId: uid,
+                userId: resolvedUserId,
                 type: 'video',
                 status: 'completed',
                 payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
