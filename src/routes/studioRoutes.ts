@@ -291,81 +291,102 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // Fire and forget — Sora pipeline runs in background
         (async () => {
+          // 5-minute failsafe: if the pipeline hasn't finished by then, mark as failed
+          const safetyTimeout = setTimeout(async () => {
+            console.warn(`[StudioRoute] Video creation ${creationId} timed out after 5 minutes`);
+            try {
+              const [current] = await db.select({ status: schema.creations.status, metadata: schema.creations.metadata })
+                .from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
+              if (current?.status === 'processing') {
+                await db.update(schema.creations)
+                  .set({
+                    status: 'failed',
+                    metadata: { ...(current.metadata as any || {}), error: 'Pipeline timed out after 5 minutes' },
+                  })
+                  .where(eq(schema.creations.id, creationId));
+              }
+            } catch {}
+          }, 300_000);
+
           try {
-            const soraResult = await soraVideoService.generateVideo(decision.prompt);
-
-            if (!soraResult.success || !soraResult.videoPath) {
-              await db.update(schema.creations)
-                .set({
-                  status: 'failed',
-                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
-                })
-                .where(eq(schema.creations.id, creationId));
-              return;
-            }
-
-            // FFmpeg render — gracefully degrade to raw Sora video
-            let videoUrl = soraResult.videoUrl || soraResult.videoPath;
             try {
-              const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
-                platforms,
-                enableWatermark: !!decision.parameters.brandName,
-              });
-              if (renderResult.success && renderResult.outputs.length > 0) {
-                videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
-              }
-            } catch (ffmpegErr: any) {
-              console.warn('[StudioRoute] FFmpeg render unavailable, using raw Sora video:', ffmpegErr.message);
-            }
+              const soraResult = await soraVideoService.generateVideo(decision.prompt);
 
-            // R2 upload
-            try {
-              const { r2Storage } = await import('../services/r2StorageService.js');
-              if (r2Storage.isAvailable) {
-                const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
-                if (r2.url) videoUrl = r2.url;
+              if (!soraResult.success || !soraResult.videoPath) {
+                await db.update(schema.creations)
+                  .set({
+                    status: 'failed',
+                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
+                  })
+                  .where(eq(schema.creations.id, creationId));
+                return;
               }
-            } catch {}
 
-            // Update creation to completed
-            await db.update(schema.creations)
-              .set({
-                status: 'completed',
-                fileUrl: videoUrl,
-                metadata: {
-                  classification: 'video_creation',
-                  prompt: decision.prompt,
+              // FFmpeg render — gracefully degrade to raw Sora video
+              let videoUrl = soraResult.videoUrl || soraResult.videoPath;
+              try {
+                const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
                   platforms,
-                  aiProvider: 'Sora 2',
-                  sourceImages,
-                },
-              })
-              .where(eq(schema.creations.id, creationId));
+                  enableWatermark: !!decision.parameters.brandName,
+                });
+                if (renderResult.success && renderResult.outputs.length > 0) {
+                  videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
+                }
+              } catch (ffmpegErr: any) {
+                console.warn('[StudioRoute] FFmpeg render unavailable, using raw Sora video:', ffmpegErr.message);
+              }
 
-            // Create approval for Operations page
-            try {
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: resolvedUserId,
-                type: 'video',
-                status: 'completed',
-                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
-            } catch (approvalErr: any) {
-              console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
-            }
-          } catch (bgErr: any) {
-            console.error('[StudioRoute] Background video creation failed:', bgErr.message);
-            try {
+              // R2 upload
+              try {
+                const { r2Storage } = await import('../services/r2StorageService.js');
+                if (r2Storage.isAvailable) {
+                  const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
+                  if (r2.url) videoUrl = r2.url;
+                }
+              } catch {}
+
+              // Update creation to completed
               await db.update(schema.creations)
                 .set({
-                  status: 'failed',
-                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
+                  status: 'completed',
+                  fileUrl: videoUrl,
+                  metadata: {
+                    classification: 'video_creation',
+                    prompt: decision.prompt,
+                    platforms,
+                    aiProvider: 'Sora 2',
+                    sourceImages,
+                  },
                 })
                 .where(eq(schema.creations.id, creationId));
-            } catch {}
+
+              // Create approval for Operations page
+              try {
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(),
+                  userId: resolvedUserId,
+                  type: 'video',
+                  status: 'completed',
+                  payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+              } catch (approvalErr: any) {
+                console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+              }
+            } catch (bgErr: any) {
+              console.error('[StudioRoute] Background video creation failed:', bgErr.message);
+              try {
+                await db.update(schema.creations)
+                  .set({
+                    status: 'failed',
+                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
+                  })
+                  .where(eq(schema.creations.id, creationId));
+              } catch {}
+            }
+          } finally {
+            clearTimeout(safetyTimeout);
           }
         })();
 
