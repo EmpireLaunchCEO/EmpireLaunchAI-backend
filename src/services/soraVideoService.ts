@@ -51,7 +51,7 @@ export class SoraVideoService {
           'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({ model, prompt }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(60000),
       });
 
       if (!createResponse.ok) {
@@ -103,14 +103,17 @@ export class SoraVideoService {
 
   /**
    * Poll GET /v1/videos/{id} until status is "completed" or "failed".
-   * Returns true on completion, false on failure/timeout.
+   * No artificial attempt cap — relies on 5-min failsafe in studioRoutes.ts.
+   * Returns true on completion, false on failure.
    */
   private async pollVideo(
     videoId: string,
     apiKey: string,
-    maxAttempts = 30,
   ): Promise<boolean> {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let attempt = 0;
+
+    while (true) {
+      attempt++;
       await new Promise(r => setTimeout(r, 2000));
 
       try {
@@ -118,7 +121,7 @@ export class SoraVideoService {
           `https://api.openai.com/v1/videos/${videoId}`,
           {
             headers: { 'Authorization': `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(15000),
+            signal: AbortSignal.timeout(30000),
           },
         );
 
@@ -128,23 +131,20 @@ export class SoraVideoService {
         const status = data?.status;
 
         if (status === 'completed') {
-          console.log(`[SoraVideoService] Video ${videoId} completed`);
+          console.log(`[SoraVideoService] Video ${videoId} completed after ${attempt} polls`);
           return true;
         }
 
         if (status === 'failed') {
-          console.error(`[SoraVideoService] Video ${videoId} failed`);
+          console.error(`[SoraVideoService] Video ${videoId} failed after ${attempt} polls`);
           return false;
         }
 
-        console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt + 1}, status=${status}, progress=${data?.progress ?? '?'}%`);
+        console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt}, status=${status}, progress=${data?.progress ?? '?'}%`);
       } catch (err) {
-        console.warn(`[SoraVideoService] Poll attempt ${attempt + 1} failed:`, (err as Error).message);
+        console.warn(`[SoraVideoService] Poll attempt ${attempt} failed:`, (err as Error).message);
       }
     }
-
-    console.error(`[SoraVideoService] Video ${videoId} timed out after ${maxAttempts} attempts`);
-    return false;
   }
 
   /**
