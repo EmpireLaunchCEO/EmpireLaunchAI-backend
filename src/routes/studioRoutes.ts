@@ -60,14 +60,17 @@ router.post('/process', async (req: Request, res: Response) => {
           if (existing) return existing.id;
 
           // Auto-create minimal user record (frontend generates UUIDs via crypto.randomUUID)
+          // email is .notNull().unique() per schema — use synthetic to satisfy both constraints
           await db.insert(schema.users).values({
             id: raw,
             email: `${raw.slice(0, 8)}@empirelaunch.ai`,
-            accessKey: raw.slice(0, 8),
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-          return raw;
+            accessKey: null,
+          }).onConflictDoNothing();
+
+          // Re-read to handle race: another request may have created between our SELECT and INSERT
+          const [created] = await db.select({ id: schema.users.id })
+            .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
+          return created?.id ?? null;
         } catch (err) {
           console.warn('[StudioRoute] resolveUserId failed to verify/create user:', (err as Error).message);
           return null;
