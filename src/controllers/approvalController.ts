@@ -5,7 +5,7 @@ import { r2Storage } from '../services/r2StorageService.js';
 import { db, schema } from '../db/index.js';
 import { eq, sql, and, inArray } from 'drizzle-orm';
 import axios from 'axios';
-const { scheduledPosts, users, approvals } = schema;
+const { scheduledPosts, users, approvals, creations } = schema;
 
 export const getPendingApprovals = async (req: Request, res: Response) => {
   try {
@@ -156,7 +156,78 @@ export const saveToLibrary = async (req: Request, res: Response) => {
 
     // Fetch the approval
     const [approval] = await db.select().from(approvals).where(eq(approvals.id, approvalId)).limit(1);
-    if (!approval) return res.status(404).json({ error: 'Approval not found' });
+    if (!approval) {
+      // Fallback: check if this ID matches a creation record (Operations page uses creation IDs)
+      const [creation] = await db.select().from(creations).where(eq(creations.id, approvalId)).limit(1);
+      if (!creation) return res.status(404).json({ error: 'Approval not found' });
+      if (creation.userId !== userId) return res.status(403).json({ error: 'Not your asset' });
+
+      const videoUrl: string | undefined = creation.fileUrl || undefined;
+      const title: string = creation.title || 'Generated Video';
+      const assetType = creation.type === 'enhanced_video' ? 'video' :
+        creation.type === 'design' ? 'design' : 'video';
+      const brandId = userId;
+
+      let asset: any;
+
+      if (videoUrl && (videoUrl.startsWith('http://') || videoUrl.startsWith('https://'))) {
+        if (videoUrl.includes('r2.cloudflarestorage.com')) {
+          // R2 URL — extract key and copy to library
+          try {
+            const url = new URL(videoUrl);
+            const pathParts = url.pathname.split('/');
+            const key = pathParts.slice(2).join('/'); // skip bucket prefix
+            const ext = key.split('.').pop() || 'mp4';
+            const destKey = r2Storage.buildKey(brandId, `library/${assetType}`, ext);
+            const copyResult = await r2Storage.copyObject(key, destKey);
+            if (copyResult.success && copyResult.key) {
+              asset = await libraryService.create({
+                userId, brandId, type: assetType as any,
+                name: title.slice(0, 60), filePath: copyResult.key,
+                mimeType: `video/${ext}`,
+                metadata: { source: 'creation', creationId: approvalId },
+              });
+            }
+          } catch { /* fall through to download */ }
+        }
+
+        if (!asset) {
+          // External URL — download and re-upload
+          try {
+            const response = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 30000 });
+            const contentType = response.headers['content-type'] || 'video/mp4';
+            const buffer = Buffer.from(response.data);
+            asset = await libraryService.uploadAndCreate(
+              buffer, contentType, brandId, userId, assetType as any,
+              title.slice(0, 60),
+              { source: 'creation', creationId: approvalId, originalUrl: videoUrl },
+            );
+          } catch (downloadErr: any) {
+            return res.status(500).json({ error: 'Download failed', detail: downloadErr.message });
+          }
+        }
+      } else if (videoUrl && videoUrl.startsWith('brands/')) {
+        // Direct R2 key
+        const ext = videoUrl.split('.').pop() || 'mp4';
+        const destKey = r2Storage.buildKey(brandId, `library/${assetType}`, ext);
+        const copyResult = await r2Storage.copyObject(videoUrl, destKey);
+        if (copyResult.success && copyResult.key) {
+          asset = await libraryService.create({
+            userId, brandId, type: assetType as any,
+            name: title.slice(0, 60), filePath: copyResult.key,
+            mimeType: `video/${ext}`,
+            metadata: { source: 'creation', creationId: approvalId },
+          });
+        } else {
+          return res.status(500).json({ error: 'R2 copy failed', detail: copyResult.error });
+        }
+      } else {
+        return res.status(400).json({ error: 'No fileUrl found in creation record' });
+      }
+
+      if (!asset) return res.status(500).json({ error: 'Failed to create library asset' });
+      return res.json({ status: 'success', asset });
+    }
     if (approval.userId !== userId) return res.status(403).json({ error: 'Not your approval' });
 
     const payload = approval.payload as any;
