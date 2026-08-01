@@ -616,6 +616,31 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
  * Regenerate an expiring R2 signed URL. Cloudflare signed URLs expire after
  * 1 hour — calling this on read ensures Library always shows working URLs.
  */
+
+/**
+ * Extract the R2 object key from a stored URL (signed, public, or custom domain).
+ * Key format: brands/{userId}/{type}/{uuid}.{ext}
+ */
+function extractR2Key(storedUrl: string): string | null {
+  try {
+    const url = new URL(storedUrl);
+    // Case 1: Custom public URL (R2_PUBLIC_URL) — key is the entire pathname minus leading /
+    const r2PublicUrl = process.env.R2_PUBLIC_URL;
+    if (r2PublicUrl && storedUrl.startsWith(r2PublicUrl)) {
+      return url.pathname.replace(/^\//, '');
+    }
+    // Case 2: R2 endpoint URL — pathname is /{bucket}/{key}
+    if (storedUrl.includes('r2.cloudflarestorage.com')) {
+      const parts = url.pathname.split('/');
+      // ['', '{bucket}', 'brands', ...] → skip bucket
+      return parts.slice(2).join('/');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function refreshR2Url(storedUrl: string): Promise<string> {
   if (!storedUrl.includes('r2.cloudflarestorage.com')) return storedUrl;
   try {
@@ -669,6 +694,7 @@ router.get('/assets', async (req: Request, res: Response) => {
 
 // ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
 
+// ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
 router.get('/download/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -677,15 +703,17 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 
     if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
 
-    // Refresh signed URL before fetching (stored URLs expire after 1 hour)
-    const freshUrl = await refreshR2Url(creation.fileUrl);
-    const r2Response = await fetch(freshUrl);
-    if (!r2Response.ok) return res.status(502).json({ error: 'R2 fetch failed' });
+    // Extract R2 key and download via S3 client (avoids signed URL expiry entirely)
+    const r2Key = extractR2Key(creation.fileUrl);
+    if (!r2Key) {
+      return res.status(502).json({ error: 'Could not parse R2 key from URL' });
+    }
 
-    const contentType = r2Response.headers.get('content-type') || 'video/mp4';
-    const buffer = Buffer.from(await r2Response.arrayBuffer());
+    const { r2Storage } = await import('../services/r2StorageService.js');
+    const buffer = await r2Storage.downloadBuffer(r2Key);
+    if (!buffer) return res.status(502).json({ error: 'R2 download failed' });
 
-    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="empirelaunch-${id.slice(0, 8)}.mp4"`);
     res.setHeader('Content-Length', buffer.length.toString());
     res.send(buffer);
