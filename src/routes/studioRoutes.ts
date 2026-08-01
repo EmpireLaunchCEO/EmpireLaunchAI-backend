@@ -667,6 +667,33 @@ router.get('/assets', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
+
+router.get('/download/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const [creation] = await db.select()
+      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1);
+
+    if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
+
+    // Fetch from R2 server-side — no CORS issue
+    const r2Response = await fetch(creation.fileUrl);
+    if (!r2Response.ok) return res.status(502).json({ error: 'R2 fetch failed' });
+
+    const contentType = r2Response.headers.get('content-type') || 'video/mp4';
+    const buffer = Buffer.from(await r2Response.arrayBuffer());
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="empirelaunch-${id.slice(0, 8)}.mp4"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.send(buffer);
+  } catch (err: any) {
+    console.error('[StudioRoute] Download proxy failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
 
 // Diagnostic: test API connectivity
