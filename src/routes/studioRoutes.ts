@@ -677,8 +677,9 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 
     if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
 
-    // Fetch from R2 server-side — no CORS issue
-    const r2Response = await fetch(creation.fileUrl);
+    // Refresh signed URL before fetching (stored URLs expire after 1 hour)
+    const freshUrl = await refreshR2Url(creation.fileUrl);
+    const r2Response = await fetch(freshUrl);
     if (!r2Response.ok) return res.status(502).json({ error: 'R2 fetch failed' });
 
     const contentType = r2Response.headers.get('content-type') || 'video/mp4';
