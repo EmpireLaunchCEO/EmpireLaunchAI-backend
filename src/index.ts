@@ -81,18 +81,22 @@ if (!process.env.VERCEL && process.env.DATABASE_URL && !process.env.DATABASE_URL
 webSocketService.init(httpServer);
 
 if (!process.env.VERCEL) {
-  // Start the distributed background worker & AI Queue Worker
-  // Note: On serverless platforms like Vercel, these should be moved to separate worker processes
-  console.log('[Worker] Activating background workers...');
-  agentWorker.start();
-  schedulerWorker.start();
-  startAIWorker();
-  startNeuralBrowserWorker();
-  startDistributionWorker();
-  startDnaLabWorker();
-  
-  // Start the weekly Canva gallery DNA harvest scheduler (Playwright-based)
-  schedulerService.start();
+  // All background workers gated behind ENABLE_BACKGROUND_WORKERS env var
+  // These call GPT 5.2 on a schedule — only enable when actively needed
+  if (process.env.ENABLE_BACKGROUND_WORKERS === 'true') {
+    console.log('[Worker] Activating background workers...');
+    agentWorker.start();
+    schedulerWorker.start();
+    startAIWorker();
+    startNeuralBrowserWorker();
+    startDistributionWorker();
+    startDnaLabWorker();
+    
+    // Start the weekly Canva gallery DNA harvest scheduler (Playwright-based)
+    schedulerService.start();
+  } else {
+    console.log('[Worker] Background workers DISABLED (set ENABLE_BACKGROUND_WORKERS=true to enable).');
+  }
 
   // DNA Vault daily pruning — caps at 100k strands, removes lowest-scoring 1%
   setInterval(async () => {
