@@ -776,34 +776,39 @@ export default router;
 
 // Diagnostic: test API connectivity
 router.get('/diag', async (_req: Request, res: Response) => {
+  // 15-second hard deadline for the entire diag response
+  let sent = false;
+  const timer = setTimeout(() => {
+    if (!sent) { sent = true; res.json({ timeout: true, message: 'Diag timed out' }); }
+  }, 15000);
+
   const results: any = {};
-  
+  // Test OpenAI first (primary provider)
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    try {
+      const r = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${openaiKey}` },
+        signal: AbortSignal.timeout(5000)
+      });
+      results.openai = { status: r.status, ok: r.ok };
+    } catch (e: any) { results.openai = { error: e.message }; }
+  } else { results.openai = { error: 'No key configured' }; }
+
   // Test Gemini
   const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
   if (geminiKey) {
     try {
       const r = await fetch(
         `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, 
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: 'Say OK' }] }] }),
-          signal: AbortSignal.timeout(10000) }
+          signal: AbortSignal.timeout(5000) }
       );
       results.gemini = { status: r.status, ok: r.ok };
       if (!r.ok) results.gemini.body = await r.text().catch(() => '');
     } catch (e: any) { results.gemini = { error: e.message }; }
   } else { results.gemini = { error: 'No key configured' }; }
 
-  // Test OpenAI
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (openaiKey) {
-    try {
-      const r = await fetch('https://api.openai.com/v1/models', {
-        headers: { 'Authorization': `Bearer ${openaiKey}` },
-        signal: AbortSignal.timeout(10000)
-      });
-      results.openai = { status: r.status, ok: r.ok };
-    } catch (e: any) { results.openai = { error: e.message }; }
-  } else { results.openai = { error: 'No key configured' }; }
-
-  res.json(results);
+  if (!sent) { sent = true; clearTimeout(timer); res.json(results); }
 });
