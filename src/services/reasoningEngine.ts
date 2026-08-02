@@ -13,7 +13,19 @@ export class ReasoningEngine {
    * Primary AI call: GPT 5.2 first, Gemini 2.5 Flash fallback.
    * Used by consult(), reasonDesign(), and synthesizeDNA().
    */
+  // In-memory rate limiter: 60 calls per minute per instance
+  private requestTimestamps: number[] = [];
+  private readonly MAX_CALLS_PER_MINUTE = 60;
+
   private async callAI(systemPrompt: string, userMessage: string): Promise<string> {
+    // Rate limit check
+    const now = Date.now();
+    this.requestTimestamps = this.requestTimestamps.filter(t => now - t < 60000);
+    if (this.requestTimestamps.length >= this.MAX_CALLS_PER_MINUTE) {
+      throw new Error(`Rate limit exceeded: ${this.MAX_CALLS_PER_MINUTE} AI calls per minute. Try again shortly.`);
+    }
+    this.requestTimestamps.push(now);
+
     // 1. Try GPT 5.2 (primary)
     const openaiKey = process.env.OPENAI_API_KEY;
     if (openaiKey) {

@@ -110,11 +110,21 @@ export class SoraVideoService {
     videoId: string,
     apiKey: string,
   ): Promise<boolean> {
+    const MAX_ATTEMPTS = 150; // 150 × 2s = 5 minutes max
+    const MAX_ELAPSED_MS = 5 * 60 * 1000; // 5 minute hard cap
+    const startTime = Date.now();
     let attempt = 0;
+    let consecutiveErrors = 0;
 
-    while (true) {
+    while (attempt < MAX_ATTEMPTS) {
       attempt++;
       await new Promise(r => setTimeout(r, 2000));
+
+      // Hard time cap
+      if (Date.now() - startTime > MAX_ELAPSED_MS) {
+        console.error(`[SoraVideoService] Video ${videoId} timed out after ${attempt} polls`);
+        return false;
+      }
 
       try {
         const response = await fetch(
@@ -125,8 +135,23 @@ export class SoraVideoService {
           },
         );
 
-        if (!response.ok) continue;
+        // 404 = video doesn't exist — never coming back
+        if (response.status === 404) {
+          console.error(`[SoraVideoService] Video ${videoId} not found (404), aborting poll`);
+          return false;
+        }
 
+        if (!response.ok) {
+          consecutiveErrors++;
+          // After 5 consecutive HTTP errors, give up
+          if (consecutiveErrors >= 5) {
+            console.error(`[SoraVideoService] Video ${videoId} — ${consecutiveErrors} consecutive HTTP errors, aborting`);
+            return false;
+          }
+          continue;
+        }
+
+        consecutiveErrors = 0; // reset on success
         const data = await response.json();
         const status = data?.status;
 
@@ -134,6 +159,27 @@ export class SoraVideoService {
           console.log(`[SoraVideoService] Video ${videoId} completed after ${attempt} polls`);
           return true;
         }
+        if (status === 'failed') {
+          console.error(`[SoraVideoService] Video ${videoId} failed after ${attempt} polls`);
+          return false;
+        }
+        // Log every 15 polls to reduce noise
+        if (attempt % 15 === 0) {
+          console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt}, status=${status}, progress=${data?.progress ?? '?'}%`);
+        }
+      } catch (err) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= 5) {
+          console.error(`[SoraVideoService] Video ${videoId} — ${consecutiveErrors} consecutive network errors, aborting`);
+          return false;
+        }
+      }
+    }
+
+    console.error(`[SoraVideoService] Video ${videoId} exceeded max attempts (${MAX_ATTEMPTS}), aborting`);
+    return false;
+  }
+
 
         if (status === 'failed') {
           console.error(`[SoraVideoService] Video ${videoId} failed after ${attempt} polls`);

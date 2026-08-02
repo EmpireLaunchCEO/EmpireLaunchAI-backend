@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { soraVideoService } from '../services/soraVideoService.js';
@@ -323,6 +324,21 @@ router.post('/process', async (req: Request, res: Response) => {
                   .where(eq(schema.creations.id, creationId));
                 return;
               }
+              // Validate video file — reject 0-byte or corrupted output
+              try {
+                const stat = fs.statSync(soraResult.videoPath);
+                if (stat.size < 1024) {
+                  console.warn('[StudioRoute] Sora produced empty/corrupt video, marking as failed');
+                  await db.update(schema.creations)
+                    .set({
+                      status: 'failed',
+                      metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: `Sora output too small (${stat.size} bytes) — likely corrupted` },
+                    })
+                    .where(eq(schema.creations.id, creationId));
+                  try { fs.unlinkSync(soraResult.videoPath); } catch {}
+                  return;
+                }
+              } catch {} // if stat fails, proceed and let downstream catch
 
               // FFmpeg render — gracefully degrade to raw Sora video
               let videoUrl = soraResult.videoUrl || soraResult.videoPath;
