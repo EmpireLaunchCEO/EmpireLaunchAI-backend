@@ -723,7 +723,40 @@ router.get('/download/:id', async (req: Request, res: Response) => {
   }
 });
 
+// ─── DELETE /api/studio/creation/:id — Delete a creation + R2 file + approval ─
+router.delete('/creation/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const [creation] = await db.select()
+      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1);
+    if (!creation) return res.status(404).json({ error: 'Creation not found' });
+
+    // Delete R2 file first
+    if (creation.fileUrl) {
+      const r2Key = extractR2Key(creation.fileUrl);
+      if (r2Key) {
+        const { r2Storage } = await import('../services/r2StorageService.js');
+        await r2Storage.deleteFile(r2Key);
+      }
+    }
+
+    // Delete creation record
+    await db.delete(schema.creations).where(eq(schema.creations.id, id));
+
+    // Delete associated approval (by payload.assetId or id match)
+    try {
+      await db.delete(schema.approvals).where(eq(schema.approvals.id, id));
+    } catch {}
+
+    res.json({ status: 'ok', deleted: id });
+  } catch (err: any) {
+    console.error('[StudioRoute] Delete failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
+
 
 // Diagnostic: test API connectivity
 router.get('/diag', async (_req: Request, res: Response) => {
