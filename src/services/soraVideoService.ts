@@ -180,22 +180,6 @@ export class SoraVideoService {
     return false;
   }
 
-
-        if (status === 'failed') {
-          console.error(`[SoraVideoService] Video ${videoId} failed after ${attempt} polls`);
-          return false;
-        }
-
-        console.log(`[SoraVideoService] Polling ${videoId}: attempt ${attempt}, status=${status}, progress=${data?.progress ?? '?'}%`);
-      } catch (err) {
-        console.warn(`[SoraVideoService] Poll attempt ${attempt} failed:`, (err as Error).message);
-      }
-    }
-  }
-
-  /**
-   * Download a video from /v1/videos/{id}/content with API key auth.
-   */
   private async downloadVideo(url: string, taskId: string, apiKey: string): Promise<string> {
     const ext = '.mp4';
     const filename = `sora_${taskId}${ext}`;
