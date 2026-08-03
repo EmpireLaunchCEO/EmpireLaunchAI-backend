@@ -294,7 +294,9 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // Fire and forget — Sora pipeline runs in background
         (async () => {
+          console.log(`[StudioRoute] IIFE STARTED for creation ${creationId} at ${new Date().toISOString()}`);
           // 5-minute failsafe: if the pipeline hasn't finished by then, mark as failed
+          console.log(`[StudioRoute] Safety timer SET for creation ${creationId} at ${new Date().toISOString()}`);
           const safetyTimeout = setTimeout(async () => {
             console.warn(`[StudioRoute] Video creation ${creationId} timed out after 5 minutes`);
             try {
@@ -313,7 +315,9 @@ router.post('/process', async (req: Request, res: Response) => {
 
           try {
             try {
+              console.log(`[StudioRoute] Calling Sora generateVideo for ${creationId} with prompt: "${(decision.prompt||'').slice(0,100)}..."`);
               const soraResult = await soraVideoService.generateVideo(decision.prompt);
+              console.log(`[StudioRoute] Sora generateVideo RETURNED for ${creationId}: success=${soraResult.success}`);
 
               if (!soraResult.success || !soraResult.videoPath) {
                 await db.update(schema.creations)
@@ -403,6 +407,7 @@ router.post('/process', async (req: Request, res: Response) => {
                   .where(eq(schema.creations.id, creationId));
               } catch {}
             }
+          console.log(`[StudioRoute] IIFE FINISHED for creation ${creationId}`);
           } finally {
             clearTimeout(safetyTimeout);
           }

@@ -44,6 +44,7 @@ export class SoraVideoService {
       console.log(`[SoraVideoService] Creating video: model=${model}`);
 
       // Step 1: Create video generation
+      console.log(`[SoraVideoService] POST to Sora create video...`);
       const createResponse = await fetch('https://api.openai.com/v1/videos', {
         method: 'POST',
         headers: {
@@ -61,6 +62,7 @@ export class SoraVideoService {
       }
 
       const createData = await createResponse.json();
+      console.log(`[SoraVideoService] Sora create RESPONSE: status=${createResponse.status}, id=${createData?.id}, status=${createData?.status}`);
       const videoId = createData?.id;
 
       if (!videoId) {
@@ -70,6 +72,7 @@ export class SoraVideoService {
       console.log(`[SoraVideoService] Video ${videoId} created — status: ${createData.status}`);
 
       // Step 2: Poll until complete
+      console.log(`[SoraVideoService] Starting poll for video ${videoId}`);
       const completed = await this.pollVideo(videoId, apiKey);
       if (!completed) {
         return { success: false, error: 'Sora generation failed or timed out' };
