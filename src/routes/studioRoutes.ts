@@ -607,7 +607,7 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
       classification: meta.classification || 'video_creation',
       creationId: creation.id,
       response: creation.status === 'completed' ? 'Video is ready.'
-        : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}`
+        : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}\n\nPrompt sent: "${meta.prompt || 'unknown'}"`
         : 'Still generating...',
     };
 
