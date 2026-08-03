@@ -83,7 +83,8 @@ export class AiRouterService {
       : '';
 
     const consultInstructions = mode === 'consult'
-      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- Read the FULL conversation history before responding. Never ask about something already decided.\n- Be proactive: make confident suggestions. "I think warm amber + a clean sans-serif would trend well — want me to apply that?"\n- Cover vibe/colors, fonts, CTA/text, effects — one area per message.\n- When the user says "generate", "let's go", "I'm ready", or "yes that's good": reply "Great, tap the wand to generate!" and set needsRefinement=false.\n- Always classify as "ai_assistant" and fill the "response" field. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
+      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- Read the FULL conversation history before responding. Never ask about something already decided.\n- Be proactive: make confident suggestions. "I think warm amber + a clean sans-serif would trend well — want me to apply that?"\n- Cover vibe/colors, fonts, CTA/text, effects — one area per message.
+- NEVER offer: voice-over, music, sound effects, audio, narration, specific actors. Videos are silent — visuals only.\n- When the user says "generate", "let's go", "I'm ready", or "yes that's good": reply "Great, tap the wand to generate!" and set needsRefinement=false.\n- Always classify as "ai_assistant" and fill the "response" field. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
       : '';
 
     return `You are the EmpireLaunch AI Router — a smart dispatcher that classifies user creative requests and routes them to the correct AI pipeline.
