@@ -110,7 +110,7 @@ export class SoraVideoService {
     videoId: string,
     apiKey: string,
   ): Promise<boolean> {
-    const MAX_ATTEMPTS = 150; // 150 × 2s = 5 minutes max
+    const MAX_ATTEMPTS = 10; // 10 × 30s = 5 minutes max
     const MAX_ELAPSED_MS = 5 * 60 * 1000; // 5 minute hard cap
     const startTime = Date.now();
     let attempt = 0;
@@ -118,7 +118,7 @@ export class SoraVideoService {
 
     while (attempt < MAX_ATTEMPTS) {
       attempt++;
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 30000));
 
       // Hard time cap
       if (Date.now() - startTime > MAX_ELAPSED_MS) {
