@@ -294,71 +294,50 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // Fire and forget — Sora pipeline runs in background
         (async () => {
-          console.log(`[StudioRoute] IIFE STARTED for creation ${creationId} at ${new Date().toISOString()}`);
-          // 5-minute failsafe: if the pipeline hasn't finished by then, mark as failed
-          console.log(`[StudioRoute] Safety timer SET for creation ${creationId} at ${new Date().toISOString()}`);
-          const safetyTimeout = setTimeout(async () => {
-            console.warn(`[StudioRoute] Video creation ${creationId} timed out after 5 minutes`);
-            try {
-              const [current] = await db.select({ status: schema.creations.status, metadata: schema.creations.metadata })
-                .from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
-              if (current?.status === 'processing') {
-                await db.update(schema.creations)
-                  .set({
-                    status: 'failed',
-                    metadata: { ...(current.metadata as any || {}), error: 'Pipeline timed out after 5 minutes' },
-                  })
-                  .where(eq(schema.creations.id, creationId));
-              }
-            } catch {}
-          }, 300_000);
+          console.log(`[StudioRoute] IIFE STARTED for creation ${creationId}`);
+          // Promise.race: 5-minute hard timeout vs actual Sora pipeline  
+          const TIMEOUT_MS = 5 * 60 * 1000;
+          const timeoutPromise = new Promise((resolve) => {
+            setTimeout(() => resolve('timeout'), TIMEOUT_MS);
+          });
 
-          try {
+          const pipelinePromise = (async () => {
             try {
-              console.log(`[StudioRoute] Calling Sora generateVideo for ${creationId} with prompt: "${(decision.prompt||'').slice(0,100)}..."`);
               const soraResult = await soraVideoService.generateVideo(decision.prompt);
-              console.log(`[StudioRoute] Sora generateVideo RETURNED for ${creationId}: success=${soraResult.success}`);
+              console.log(`[StudioRoute] Sora RETURNED: success=${soraResult.success}`);
 
               if (!soraResult.success || !soraResult.videoPath) {
-                await db.update(schema.creations)
-                  .set({
-                    status: 'failed',
-                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
-                  })
-                  .where(eq(schema.creations.id, creationId));
+                await db.update(schema.creations).set({
+                  status: 'failed',
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
+                }).where(eq(schema.creations.id, creationId));
                 return;
               }
-              // Validate video file — reject 0-byte or corrupted output
+
               try {
                 const stat = fs.statSync(soraResult.videoPath);
                 if (stat.size < 1024) {
-                  console.warn('[StudioRoute] Sora produced empty/corrupt video, marking as failed');
-                  await db.update(schema.creations)
-                    .set({
-                      status: 'failed',
-                      metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: `Sora output too small (${stat.size} bytes) — likely corrupted` },
-                    })
-                    .where(eq(schema.creations.id, creationId));
+                  await db.update(schema.creations).set({
+                    status: 'failed',
+                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: `Sora output too small (${stat.size} bytes)` },
+                  }).where(eq(schema.creations.id, creationId));
                   try { fs.unlinkSync(soraResult.videoPath); } catch {}
                   return;
                 }
-              } catch {} // if stat fails, proceed and let downstream catch
+              } catch {}
 
-              // FFmpeg render — gracefully degrade to raw Sora video
               let videoUrl = soraResult.videoUrl || soraResult.videoPath;
               try {
                 const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
-                  platforms,
-                  enableWatermark: !!decision.parameters.brandName,
+                  platforms, enableWatermark: !!decision.parameters.brandName,
                 });
                 if (renderResult.success && renderResult.outputs.length > 0) {
                   videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
                 }
               } catch (ffmpegErr: any) {
-                console.warn('[StudioRoute] FFmpeg render unavailable, using raw Sora video:', ffmpegErr.message);
+                console.warn('[StudioRoute] FFmpeg unavailable, using raw Sora:', ffmpegErr.message);
               }
 
-              // R2 upload
               try {
                 const { r2Storage } = await import('../services/r2StorageService.js');
                 if (r2Storage.isAvailable) {
@@ -367,51 +346,46 @@ router.post('/process', async (req: Request, res: Response) => {
                 }
               } catch {}
 
-              // Update creation to completed
-              await db.update(schema.creations)
-                .set({
-                  status: 'completed',
-                  fileUrl: videoUrl,
-                  metadata: {
-                    classification: 'video_creation',
-                    prompt: decision.prompt,
-                    platforms,
-                    aiProvider: 'Sora 2',
-                    sourceImages,
-                  },
-                })
-                .where(eq(schema.creations.id, creationId));
+              await db.update(schema.creations).set({
+                status: 'completed', fileUrl: videoUrl,
+                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, aiProvider: 'Sora 2', sourceImages },
+              }).where(eq(schema.creations.id, creationId));
 
-              // Create approval for Operations page
               try {
                 await db.insert(schema.approvals).values({
-                  id: uuidv4(),
-                  userId: resolvedUserId,
-                  type: 'video',
-                  status: 'completed',
+                  id: uuidv4(), userId: resolvedUserId, type: 'video', status: 'completed',
                   payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
-                  createdAt: new Date(),
-                  updatedAt: new Date(),
+                  createdAt: new Date(), updatedAt: new Date(),
                 });
               } catch (approvalErr: any) {
-                console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
+                console.warn('[StudioRoute] Approval insert failed:', approvalErr.message);
               }
             } catch (bgErr: any) {
-              console.error('[StudioRoute] Background video creation failed:', bgErr.message);
+              console.error('[StudioRoute] Background creation failed:', bgErr.message);
               try {
-                await db.update(schema.creations)
-                  .set({
-                    status: 'failed',
-                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
-                  })
-                  .where(eq(schema.creations.id, creationId));
+                await db.update(schema.creations).set({
+                  status: 'failed',
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
+                }).where(eq(schema.creations.id, creationId));
               } catch {}
             }
-          console.log(`[StudioRoute] IIFE FINISHED for creation ${creationId}`);
-          } finally {
-            clearTimeout(safetyTimeout);
+          })();
+
+          const result = await Promise.race([pipelinePromise, timeoutPromise]);
+          if (result === 'timeout') {
+            console.warn(`[StudioRoute] Creation ${creationId} timed out after 5 minutes`);
+            try {
+              const [current] = await db.select({ status: schema.creations.status }).from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
+              if (current?.status === 'processing') {
+                await db.update(schema.creations).set({
+                  status: 'failed',
+                  metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: 'Pipeline timed out after 5 minutes' },
+                }).where(eq(schema.creations.id, creationId));
+              }
+            } catch {}
           }
-        })();
+          console.log(`[StudioRoute] IIFE FINISHED for creation ${creationId}`);
+  })();
 
         return; // Exit handler after sending response
       }
