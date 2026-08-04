@@ -275,7 +275,7 @@ router.post('/process', async (req: Request, res: Response) => {
           await db.insert(schema.creations).values({
             id: creationId, userId: resolvedUserId, type: 'enhanced_video',
             title: decision.prompt.slice(0, 60), status: 'processing',
-            metadata: { classification: 'video_creation', prompt: decision.prompt, platforms },
+            metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'pending' },
           });
         } catch (creationErr: any) {
           console.error('[StudioRoute] Failed to insert creation record:', creationErr.message);
