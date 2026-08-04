@@ -295,6 +295,10 @@ router.post('/process', async (req: Request, res: Response) => {
         // Fire and forget — Sora pipeline runs in background
         (async () => {
           console.log(`[StudioRoute] IIFE STARTED for creation ${creationId}`);
+          // Write trace to DB so we can see progress even without Railway logs
+          db.update(schema.creations).set({
+            metadata: { ...((decision as any).metadata || {}), classification: 'video_creation', prompt: decision.prompt, platforms, trace: 'iife_started' },
+          }).where(eq(schema.creations.id, creationId)).catch(() => {});
           // Promise.race: 5-minute hard timeout vs actual Sora pipeline  
           const TIMEOUT_MS = 5 * 60 * 1000;
           const timeoutPromise = new Promise((resolve) => {
@@ -305,6 +309,9 @@ router.post('/process', async (req: Request, res: Response) => {
             try {
               const soraResult = await soraVideoService.generateVideo(decision.prompt);
               console.log(`[StudioRoute] Sora RETURNED: success=${soraResult.success}`);
+              db.update(schema.creations).set({
+                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, trace: `sora_${soraResult.success ? 'ok' : 'fail'}` },
+              }).where(eq(schema.creations.id, creationId)).catch(() => {});
 
               if (!soraResult.success || !soraResult.videoPath) {
                 await db.update(schema.creations).set({
