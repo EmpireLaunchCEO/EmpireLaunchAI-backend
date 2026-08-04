@@ -21,7 +21,11 @@ function createRedisStore(prefix: string): any | undefined {
 const keyGen = (req: any): string => {
   const auth = req.headers?.authorization;
   if (auth?.startsWith("Bearer ")) return `user:${auth.slice(7)}`;
-  return req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
+  // Use X-Forwarded-For / socket to avoid express-rate-limit v7 req.ip warning
+  const ip = req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.socket?.remoteAddress
+    || "unknown";
+  return ip;
 };
 
 export const globalRateLimiter = rateLimit({
