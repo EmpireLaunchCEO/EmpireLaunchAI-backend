@@ -1,49 +1,45 @@
-import { rateLimit } from 'express-rate-limit';
-import { RedisStore } from 'rate-limit-redis';
-import { redisConnection, isRedisDisabled } from '../config/redis.js';
+import { rateLimit } from "express-rate-limit";
+import { RedisStore } from "rate-limit-redis";
+import { redisConnection, isRedisDisabled } from "../config/redis.js";
 
-function createRedisStore(): any | undefined {
+let storeCounter = 0;
+function createRedisStore(prefix: string): any | undefined {
   if (isRedisDisabled) return undefined;
   try {
-    // Verify Redis is actually connected before creating store
     const store = new RedisStore({
       // @ts-ignore
       sendCommand: (...args: string[]) => redisConnection.call(...args),
+      prefix: `rl:${prefix}:${++storeCounter}:`,
     });
     return store;
   } catch {
-    console.warn('[RateLimiter] Redis store creation failed, using in-memory store');
+    console.warn("[RateLimiter] Redis store creation failed, using in-memory store");
     return undefined;
   }
 }
 
-const redisStore = createRedisStore();
-
-// Per-user key generator: uses auth token for authenticated users, IP for anonymous
-const userAwareKeyGenerator = (req: any): string => {
-  const authHeader = req.headers?.authorization;
-  if (authHeader?.startsWith('Bearer ')) {
-    return `user:${authHeader.slice(7)}`; // Per-user bucket
-  }
-  return req.ip ?? 'unknown'; // Per-IP bucket for unauthenticated
+const keyGen = (req: any): string => {
+  const auth = req.headers?.authorization;
+  if (auth?.startsWith("Bearer ")) return `user:${auth.slice(7)}`;
+  return req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
 };
 
 export const globalRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 1000, // Per-user for authenticated, per-IP for anonymous
-  standardHeaders: 'draft-7',
+  windowMs: 15 * 60 * 1000,
+  limit: 1000,
+  standardHeaders: "draft-7",
   legacyHeaders: false,
-  store: redisStore,
-  keyGenerator: userAwareKeyGenerator,
-  skip: (req) => req.method === 'OPTIONS', // CORS preflight should not consume rate limit
+  store: createRedisStore("global"),
+  keyGenerator: keyGen,
+  skip: (req: any) => req.method === "OPTIONS",
 });
 
 export const aiActionRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  limit: 100, // Per-user for authenticated, per-IP for anonymous
-  message: 'Too many AI requests, please try again later',
-  standardHeaders: 'draft-7',
+  windowMs: 60 * 60 * 1000,
+  limit: 100,
+  message: "Too many AI requests, please try again later",
+  standardHeaders: "draft-7",
   legacyHeaders: false,
-  store: redisStore,
-  keyGenerator: userAwareKeyGenerator,
+  store: createRedisStore("ai"),
+  keyGenerator: keyGen,
 });
