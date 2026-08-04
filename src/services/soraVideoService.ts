@@ -41,7 +41,7 @@ export class SoraVideoService {
     const taskId = uuidv4();
 
     try {
-      console.log(`[SoraVideoService] Creating video: model=${model}`);
+      console.log(`[PIPELINE] sora_create_start model=${model} prompt_length=${prompt.length}`);
 
       // Step 1: Create video generation
       console.log(`[SoraVideoService] POST to Sora create video...`);
@@ -69,7 +69,7 @@ export class SoraVideoService {
         return { success: false, error: 'No video ID in Sora create response' };
       }
 
-      console.log(`[SoraVideoService] Video ${videoId} created — status: ${createData.status}`);
+      console.log(`[PIPELINE] sora_created id=${videoId} status=${createData.status}`);
 
       // Step 2: Poll until complete
       console.log(`[SoraVideoService] Starting poll for video ${videoId}`);
@@ -83,7 +83,7 @@ export class SoraVideoService {
       const localPath = await this.downloadVideo(downloadUrl, taskId, apiKey);
       const publicUrl = await this.maybeUploadToR2(localPath, options.userId);
 
-      console.log(`[SoraVideoService] Generated: ${localPath}`);
+      console.log(`[PIPELINE] sora_downloaded path=${localPath} url=${publicUrl}`);
       return {
         success: true,
         videoPath: localPath,
@@ -113,7 +113,7 @@ export class SoraVideoService {
     videoId: string,
     apiKey: string,
   ): Promise<boolean> {
-    const MAX_ATTEMPTS = 10; // 10 × 30s = 5 minutes max
+    const MAX_ATTEMPTS = 58; // 58 × 5s ~= 4m50s, within Railway request budget
     const MAX_ELAPSED_MS = 5 * 60 * 1000; // 5 minute hard cap
     const startTime = Date.now();
     let attempt = 0;
@@ -121,8 +121,11 @@ export class SoraVideoService {
 
     while (attempt < MAX_ATTEMPTS) {
       attempt++;
-      await new Promise(r => setTimeout(r, 30000));
-
+      // Railway-safe short interval instead of long timer.
+      await new Promise<void>((resolve) => {
+        const interval = setInterval(() => { clearInterval(interval); resolve(); }, 5000);
+      });
+      console.log(`[PIPELINE] sora_poll_wait_complete video=${videoId} attempt=${attempt}`);
       // Hard time cap
       if (Date.now() - startTime > MAX_ELAPSED_MS) {
         console.error(`[SoraVideoService] Video ${videoId} timed out after ${attempt} polls`);
@@ -159,11 +162,11 @@ export class SoraVideoService {
         const status = data?.status;
 
         if (status === 'completed') {
-          console.log(`[SoraVideoService] Video ${videoId} completed after ${attempt} polls`);
+          console.log(`[PIPELINE] sora_completed id=${videoId} polls=${attempt}`);
           return true;
         }
         if (status === 'failed') {
-          console.error(`[SoraVideoService] Video ${videoId} failed after ${attempt} polls`);
+          console.error(`[PIPELINE] sora_failed id=${videoId} polls=${attempt}`);
           return false;
         }
         // Log every 15 polls to reduce noise
