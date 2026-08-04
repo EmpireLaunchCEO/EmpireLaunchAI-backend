@@ -296,6 +296,10 @@ router.post('/process', async (req: Request, res: Response) => {
         (async () => {
           // Railway-safe failsafe: short interval checks instead of long timers.
           console.log(`[PIPELINE] iife_started creation=${creationId}`);
+          // Write trace to DB immediately — visible via /api/studio/creation/:id even if logs miss it
+          db.update(schema.creations).set({
+            metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'iife_started', pipeline_started_at: new Date().toISOString() },
+          }).where(eq(schema.creations.id, creationId)).catch(() => {});
           let safetyElapsed = 0;
           const safetyInterval = setInterval(async () => {
             safetyElapsed += 5000;
@@ -311,6 +315,9 @@ router.post('/process', async (req: Request, res: Response) => {
           try {
             try {
               console.log(`[PIPELINE] sora_call_start creation=${creationId}`);
+              db.update(schema.creations).set({
+                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'sora_calling' },
+              }).where(eq(schema.creations.id, creationId)).catch(() => {});
               const soraResult = await soraVideoService.generateVideo(decision.prompt, { userId: resolvedUserId });
               console.log(`[PIPELINE] sora_call_end creation=${creationId} success=${soraResult.success}`);
 
