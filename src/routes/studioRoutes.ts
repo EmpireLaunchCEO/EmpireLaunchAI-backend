@@ -757,6 +757,24 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
   }
 });
 
+// ─── Debug: GET /api/studio/latest — most recent creation for pipeline debugging ─
+router.get('/latest', async (_req: Request, res: Response) => {
+  try {
+    const [creation] = await db.select()
+      .from(schema.creations)
+      .orderBy(desc(schema.creations.createdAt))
+      .limit(1);
+    if (!creation) return res.json({ status: 'none' });
+    res.json({
+      shortId: creation.id.slice(0, 8),
+      status: creation.status,
+      type: creation.type,
+      trace: (creation.metadata as any)?.trace || 'no_trace',
+      error: (creation.metadata as any)?.error || null,
+    });
+  } catch (e: any) { res.json({ error: e.message }); }
+});
+
 export default router;
 
 
