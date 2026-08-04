@@ -29,6 +29,7 @@ interface StudioResponse {
   classification?: string;
   response?: string;                         // Natural language for user
   creationId?: string;                       // For async video tracking
+  metadata?: any;                            // Pipeline trace + provider tags
   assets?: Array<{
     type: 'image' | 'video';
     url: string;
@@ -619,6 +620,7 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
         : 'processing',
       classification: meta.classification || 'video_creation',
       creationId: creation.id,
+      metadata: meta, // Include pipeline_trace for frontend visibility
       response: creation.status === 'completed' ? 'Video is ready.'
         : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}\n\nPrompt sent: "${meta.prompt || 'unknown'}"`
         : 'Still generating...',
