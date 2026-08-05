@@ -308,7 +308,7 @@ router.post('/process', async (req: Request, res: Response) => {
           // Resolve fresh module references inside the detached task.
           const { db: pipelineDb, schema: pipelineSchema } = await import('../db/index.js');
           // Railway-safe failsafe: short interval checks instead of long timers.
-          console.log(`[PIPELINE] iife_started creation=${creationId}`);
+          process.stdout.write(`[PIPELINE] iife_started creation=${creationId}\n`);
           // Await the first trace update and report failures; a swallowed rejection
           // previously made this detached task appear to do nothing.
           try {
@@ -323,18 +323,18 @@ router.post('/process', async (req: Request, res: Response) => {
           let safetyElapsed = 0;
           const safetyInterval = setInterval(async () => {
             safetyElapsed += 5000;
-            console.log(`[PIPELINE] safety_check creation=${creationId} elapsed_ms=${safetyElapsed}`);
+            process.stdout.write(`[PIPELINE] safety_check creation=${creationId} elapsed_ms=${safetyElapsed}\n`);
             if (safetyElapsed < 300000) return;
             clearInterval(safetyInterval);
             try {
               const [current] = await pipelineDb.select({ status: pipelineSchema.creations.status, metadata: pipelineSchema.creations.metadata })
                 .from(pipelineSchema.creations).where(eq(pipelineSchema.creations.id, creationId)).limit(1);
               if (current?.status === 'processing') await pipelineDb.update(pipelineSchema.creations).set({ status: 'failed', metadata: { ...(current.metadata as any || {}), error: 'Pipeline timed out after 5 minutes' } }).where(eq(pipelineSchema.creations.id, creationId));
-            } catch (err: any) { console.error(`[PIPELINE] safety_failure creation=${creationId} error=${err.message}`); }
+            } catch (err: any) { process.stderr.write(`[PIPELINE] safety_failure creation=${creationId} error=${err.message}\n`); }
           }, 5000);
           try {
             try {
-              console.log(`[PIPELINE] sora_call_start creation=${creationId}`);
+              process.stdout.write(`[PIPELINE] sora_call_start creation=${creationId}\n`);
               pipelineDb.update(pipelineSchema.creations).set({
                 metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'sora_calling' },
               }).where(eq(pipelineSchema.creations.id, creationId)).catch((traceErr: unknown) => {
@@ -342,7 +342,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 process.stderr.write(`[PIPELINE_SYNC] sora trace update failed creation=${creationId}: ${detail}\n`);
               });
               const soraResult = await soraVideoService.generateVideo(decision.prompt, { userId: resolvedUserId });
-              console.log(`[PIPELINE] sora_call_end creation=${creationId} success=${soraResult.success}`);
+              process.stdout.write(`[PIPELINE] sora_call_end creation=${creationId} success=${soraResult.success}\n`);
 
               if (!soraResult.success || !soraResult.videoPath) {
                 await pipelineDb.update(pipelineSchema.creations)
@@ -372,12 +372,12 @@ router.post('/process', async (req: Request, res: Response) => {
               // FFmpeg render — gracefully degrade to raw Sora video
               let videoUrl = soraResult.videoUrl || soraResult.videoPath;
               try {
-                console.log(`[PIPELINE] ffmpeg_start creation=${creationId}`);
+                process.stdout.write(`[PIPELINE] ffmpeg_start creation=${creationId}\n`);
                 const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
                   platforms,
                   enableWatermark: !!decision.parameters.brandName,
                 });
-                console.log(`[PIPELINE] ffmpeg_end creation=${creationId} success=${renderResult.success}`);
+                process.stdout.write(`[PIPELINE] ffmpeg_end creation=${creationId} success=${renderResult.success}\n`);
                 if (renderResult.success && renderResult.outputs.length > 0) {
                   videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
                 }
@@ -389,14 +389,14 @@ router.post('/process', async (req: Request, res: Response) => {
               try {
                 const { r2Storage } = await import('../services/r2StorageService.js');
                 if (r2Storage.isAvailable) {
-                  console.log(`[PIPELINE] r2_upload_start creation=${creationId}`);
+                  process.stdout.write(`[PIPELINE] r2_upload_start creation=${creationId}\n`);
                   const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
                   if (r2.url) videoUrl = r2.url;
-                  console.log(`[PIPELINE] r2_upload_end creation=${creationId} url_present=${!!r2.url}`);
+                  process.stdout.write(`[PIPELINE] r2_upload_end creation=${creationId} url_present=${!!r2.url}\n`);
                 }
               } catch {}
 
-              console.log(`[PIPELINE] db_completed_start creation=${creationId}`);
+              process.stdout.write(`[PIPELINE] db_completed_start creation=${creationId}\n`);
               // Update creation to completed
               await pipelineDb.update(pipelineSchema.creations)
                 .set({
@@ -427,7 +427,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
               }
             } catch (bgErr: any) {
-              console.error('[StudioRoute] Background video creation failed:', bgErr.message);
+              process.stderr.write(`[PIPELINE] background video creation failed creation=${creationId}: ${bgErr.message}\n`);
               try {
                 await pipelineDb.update(pipelineSchema.creations)
                   .set({
