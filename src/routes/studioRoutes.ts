@@ -443,33 +443,53 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // Respond immediately — don't wait for Sora
-        res.json({
-          status: 'processing',
-          classification: 'video_creation',
-          creationId,
-          response: 'Video generation started — this takes 60–90 seconds. Check back shortly.',
-        } as StudioResponse);
-
-        // Fire and forget — Sora pipeline runs in background
-        // Use setImmediate instead of IIFE — IIFE pattern was silently
-        // not executing in production (Railway) despite working locally.
-        const pipelinePayload = {
-          creationId,
-          prompt: decision.prompt,
-          platforms,
-          sourceImages,
-          resolvedUserId,
-          brandContext,
-        };
-        setImmediate(() => {
-          executeVideoPipeline(pipelinePayload).catch((err: unknown) => {
-            const detail = err instanceof Error ? err.stack || err.message : String(err);
-            process.stderr.write(`[PIPELINE_SETIMMEDIATE_REJECTED] creation=${pipelinePayload.creationId} ${detail}\n`);
+        // SYNCHRONOUS pipeline — await full Sora→FFmpeg→R2 chain.
+        // Previously fire-and-forget (IIFE, then setImmediate) never
+        // executed in production. Running synchronously lets us see
+        // exactly where it breaks. Will take 60-120 seconds.
+        try {
+          await executeVideoPipeline({
+            creationId,
+            prompt: decision.prompt,
+            platforms,
+            sourceImages,
+            resolvedUserId,
+            brandContext,
           });
-        });
 
-        return; // Exit handler after sending response
+          // Read the completed creation record
+          const [completed] = await db.select({
+            status: schema.creations.status,
+            fileUrl: schema.creations.fileUrl,
+            metadata: schema.creations.metadata,
+          }).from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
+
+          if (completed?.status === 'completed' && completed.fileUrl) {
+            return res.json({
+              status: 'completed',
+              classification: 'video_creation',
+              creationId,
+              response: 'Video generated successfully!',
+              metadata: completed.metadata,
+              assets: [{ type: 'video', url: completed.fileUrl }],
+            } as StudioResponse);
+          }
+
+          return res.status(500).json({
+            status: 'error',
+            classification: 'video_creation',
+            creationId,
+            error: `Pipeline finished but creation status is "${completed?.status}" — check logs.`,
+          } as StudioResponse);
+        } catch (pipelineErr: any) {
+          process.stderr.write(`[PIPELINE_V2_SYNC] sync pipeline failed creation=${creationId}: ${pipelineErr.message}\n`);
+          return res.status(500).json({
+            status: 'error',
+            classification: 'video_creation',
+            creationId,
+            error: `Video pipeline failed: ${pipelineErr.message}`,
+          } as StudioResponse);
+        }
       }
 
       case 'video_editing': {
