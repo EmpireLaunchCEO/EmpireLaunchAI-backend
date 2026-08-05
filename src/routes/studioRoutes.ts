@@ -443,53 +443,32 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // SYNCHRONOUS pipeline — await full Sora→FFmpeg→R2 chain.
-        // Previously fire-and-forget (IIFE, then setImmediate) never
-        // executed in production. Running synchronously lets us see
-        // exactly where it breaks. Will take 60-120 seconds.
-        try {
-          await executeVideoPipeline({
+        // Respond immediately, then trigger pipeline on response finish.
+        // res.on('finish') fires after all data is flushed to the OS —
+        // more reliable than IIFE or setImmediate for deferred execution.
+        res.json({
+          status: 'processing',
+          classification: 'video_creation',
+          creationId,
+          response: 'Video generation started — this takes 60–90 seconds. Check back shortly.',
+        } as StudioResponse);
+
+        res.on('finish', () => {
+          process.stderr.write(`[PIPELINE_V4] finish_event_fired creation=${creationId}\n`);
+          executeVideoPipeline({
             creationId,
             prompt: decision.prompt,
             platforms,
             sourceImages,
             resolvedUserId,
             brandContext,
+          }).catch((err: unknown) => {
+            const detail = err instanceof Error ? err.stack || err.message : String(err);
+            process.stderr.write(`[PIPELINE_V4_REJECTED] creation=${creationId} ${detail}\n`);
           });
+        });
 
-          // Read the completed creation record
-          const [completed] = await db.select({
-            status: schema.creations.status,
-            fileUrl: schema.creations.fileUrl,
-            metadata: schema.creations.metadata,
-          }).from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
-
-          if (completed?.status === 'completed' && completed.fileUrl) {
-            return res.json({
-              status: 'completed',
-              classification: 'video_creation',
-              creationId,
-              response: 'Video generated successfully!',
-              metadata: completed.metadata,
-              assets: [{ type: 'video', url: completed.fileUrl }],
-            } as StudioResponse);
-          }
-
-          return res.status(500).json({
-            status: 'error',
-            classification: 'video_creation',
-            creationId,
-            error: `Pipeline finished but creation status is "${completed?.status}" — check logs.`,
-          } as StudioResponse);
-        } catch (pipelineErr: any) {
-          process.stderr.write(`[PIPELINE_V2_SYNC] sync pipeline failed creation=${creationId}: ${pipelineErr.message}\n`);
-          return res.status(500).json({
-            status: 'error',
-            classification: 'video_creation',
-            creationId,
-            error: `Video pipeline failed: ${pipelineErr.message}`,
-          } as StudioResponse);
-        }
+        return;
       }
 
       case 'video_editing': {
@@ -922,5 +901,40 @@ router.get('/trace', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/studio/sora-test ──────────────────────────────────────────
+// Direct Sora test — returns result synchronously. Use this to verify
+// the Sora API works before debugging the full pipeline.
+
+router.get('/sora-test', async (req: Request, res: Response) => {
+  const prompt = (req.query.prompt as string) || 'A cinematic product showcase video with smooth camera movement';
+  const userId = (req.query.userId as string) || 'system';
+
+  console.log(`[SoraTest] Starting with prompt: "${prompt.slice(0, 80)}..."`);
+
+  try {
+    const result = await soraVideoService.generateVideo(prompt, { userId });
+    if (result.success) {
+      console.log(`[SoraTest] SUCCESS — video at ${result.videoPath}`);
+      return res.json({
+        success: true,
+        videoPath: result.videoPath,
+        videoUrl: result.videoUrl,
+      });
+    }
+    console.error(`[SoraTest] FAILED: ${result.error}`);
+    return res.status(500).json({
+      success: false,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error(`[SoraTest] EXCEPTION: ${err.message}`);
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+      stack: err.stack,
+    });
   }
 });
