@@ -95,6 +95,156 @@ const resolveUserId = async (raw: string): Promise<string | null> => {
   return null;
 };
 
+// ─── Background Video Pipeline (called via setImmediate) ──────────────────
+
+interface VideoPipelinePayload {
+  creationId: string;
+  prompt: string;
+  platforms: string[];
+  sourceImages: string[];
+  resolvedUserId: string;
+  brandContext: any;
+}
+
+async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void> {
+  const { creationId, prompt, platforms, sourceImages, resolvedUserId, brandContext } = payload;
+
+  process.stderr.write(`[PIPELINE_V2] pipeline_fn_entered creation=${creationId}\n`);
+
+  // Railway-safe failsafe: short interval checks instead of long timers.
+  let safetyElapsed = 0;
+  const safetyInterval = setInterval(async () => {
+    safetyElapsed += 5000;
+    process.stderr.write(`[PIPELINE_V2] safety_check creation=${creationId} elapsed_ms=${safetyElapsed}\n`);
+    if (safetyElapsed < 300000) return;
+    clearInterval(safetyInterval);
+    try {
+      const [current] = await db.select({ status: schema.creations.status, metadata: schema.creations.metadata })
+        .from(schema.creations).where(eq(schema.creations.id, creationId)).limit(1);
+      if (current?.status === 'processing') await db.update(schema.creations).set({ status: 'failed', metadata: { ...(current.metadata as any || {}), error: 'Pipeline timed out after 5 minutes' } }).where(eq(schema.creations.id, creationId));
+    } catch (err: any) { process.stderr.write(`[PIPELINE_V2] safety_failure creation=${creationId} error=${err.message}\n`); }
+  }, 5000);
+
+  try {
+    // Trace: started
+    try {
+      await db.update(schema.creations).set({
+        metadata: { prompt, platforms, pipeline_trace: 'pipeline_started', pipeline_started_at: new Date().toISOString() },
+      }).where(eq(schema.creations.id, creationId));
+      process.stderr.write(`[PIPELINE_V2] trace=started creation=${creationId}\n`);
+    } catch (traceErr: unknown) {
+      const detail = traceErr instanceof Error ? traceErr.message : String(traceErr);
+      process.stderr.write(`[PIPELINE_V2] trace_start_failed creation=${creationId}: ${detail}\n`);
+    }
+
+    // Trace: calling Sora
+    try {
+      await db.update(schema.creations).set({
+        metadata: { prompt, platforms, pipeline_trace: 'sora_calling' },
+      }).where(eq(schema.creations.id, creationId));
+      process.stderr.write(`[PIPELINE_V2] trace=sora_calling creation=${creationId}\n`);
+    } catch {}
+
+    process.stderr.write(`[PIPELINE_V2] sora_call_start creation=${creationId}\n`);
+    const soraResult = await soraVideoService.generateVideo(prompt, { userId: resolvedUserId });
+    process.stderr.write(`[PIPELINE_V2] sora_call_end creation=${creationId} success=${soraResult.success}\n`);
+
+    if (!soraResult.success || !soraResult.videoPath) {
+      await db.update(schema.creations)
+        .set({
+          status: 'failed',
+          metadata: { prompt, platforms, error: soraResult.error || 'Sora returned no video' },
+        })
+        .where(eq(schema.creations.id, creationId));
+      return;
+    }
+
+    // Validate video file
+    try {
+      const stat = fs.statSync(soraResult.videoPath);
+      if (stat.size < 1024) {
+        await db.update(schema.creations)
+          .set({
+            status: 'failed',
+            metadata: { prompt, platforms, error: `Sora output too small (${stat.size} bytes)` },
+          })
+          .where(eq(schema.creations.id, creationId));
+        try { fs.unlinkSync(soraResult.videoPath); } catch {}
+        return;
+      }
+    } catch {}
+
+    // FFmpeg render
+    let videoUrl = soraResult.videoUrl || soraResult.videoPath;
+    try {
+      process.stderr.write(`[PIPELINE_V2] ffmpeg_start creation=${creationId}\n`);
+      const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
+        platforms,
+        enableWatermark: !!brandContext?.name,
+      });
+      process.stderr.write(`[PIPELINE_V2] ffmpeg_end creation=${creationId} success=${renderResult.success}\n`);
+      if (renderResult.success && renderResult.outputs.length > 0) {
+        videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
+      }
+    } catch (ffmpegErr: any) {
+      process.stderr.write(`[PIPELINE_V2] ffmpeg_failed creation=${creationId}: ${ffmpegErr.message}\n`);
+    }
+
+    // R2 upload
+    try {
+      if (r2Storage.isAvailable) {
+        process.stderr.write(`[PIPELINE_V2] r2_upload_start creation=${creationId}\n`);
+        const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
+        if (r2.url) videoUrl = r2.url;
+        process.stderr.write(`[PIPELINE_V2] r2_upload_end creation=${creationId} url_present=${!!r2.url}\n`);
+      }
+    } catch {}
+
+    // Mark completed
+    process.stderr.write(`[PIPELINE_V2] db_completed_start creation=${creationId}\n`);
+    await db.update(schema.creations)
+      .set({
+        status: 'completed',
+        fileUrl: videoUrl,
+        metadata: {
+          prompt,
+          platforms,
+          aiProvider: 'sora-2',
+          sourceImages,
+          pipeline_trace: 'completed',
+        },
+      })
+      .where(eq(schema.creations.id, creationId));
+
+    // Create approval
+    try {
+      await db.insert(schema.approvals).values({
+        id: uuidv4(),
+        userId: resolvedUserId,
+        type: 'video',
+        status: 'completed',
+        payload: { assetId: creationId, title: prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } catch {}
+
+    process.stderr.write(`[PIPELINE_V2] pipeline_complete creation=${creationId}\n`);
+  } catch (bgErr: any) {
+    process.stderr.write(`[PIPELINE_V2] pipeline_failed creation=${creationId}: ${bgErr.message}\n`);
+    try {
+      await db.update(schema.creations)
+        .set({
+          status: 'failed',
+          metadata: { prompt, platforms, error: bgErr.message, pipeline_trace: 'failed' },
+        })
+        .where(eq(schema.creations.id, creationId));
+    } catch {}
+  } finally {
+    clearInterval(safetyInterval);
+  }
+}
+
 router.post('/process', async (req: Request, res: Response) => {
   try {
     const { userId, brandId, request, attachments, conversationHistory } = req.body as StudioRequest;
@@ -302,147 +452,21 @@ router.post('/process', async (req: Request, res: Response) => {
         } as StudioResponse);
 
         // Fire and forget — Sora pipeline runs in background
-        process.stdout.write(`[PIPELINE_SYNC] BEFORE_IIFE creation=${creationId}\n`);
-        (async () => {
-          process.stdout.write('[PIPELINE_SYNC] IIFE entered\n');
-          // Resolve fresh module references inside the detached task.
-          const { db: pipelineDb, schema: pipelineSchema } = await import('../db/index.js');
-          // Railway-safe failsafe: short interval checks instead of long timers.
-          process.stdout.write(`[PIPELINE] iife_started creation=${creationId}\n`);
-          // Await the first trace update and report failures; a swallowed rejection
-          // previously made this detached task appear to do nothing.
-          try {
-            await pipelineDb.update(pipelineSchema.creations).set({
-              metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'iife_started', pipeline_started_at: new Date().toISOString() },
-            }).where(eq(pipelineSchema.creations.id, creationId));
-            process.stdout.write(`[PIPELINE_SYNC] IIFE trace persisted creation=${creationId}\n`);
-          } catch (traceErr: unknown) {
-            const detail = traceErr instanceof Error ? traceErr.stack || traceErr.message : String(traceErr);
-            process.stderr.write(`[PIPELINE_SYNC] IIFE trace update failed creation=${creationId}: ${detail}\n`);
-          }
-          let safetyElapsed = 0;
-          const safetyInterval = setInterval(async () => {
-            safetyElapsed += 5000;
-            process.stdout.write(`[PIPELINE] safety_check creation=${creationId} elapsed_ms=${safetyElapsed}\n`);
-            if (safetyElapsed < 300000) return;
-            clearInterval(safetyInterval);
-            try {
-              const [current] = await pipelineDb.select({ status: pipelineSchema.creations.status, metadata: pipelineSchema.creations.metadata })
-                .from(pipelineSchema.creations).where(eq(pipelineSchema.creations.id, creationId)).limit(1);
-              if (current?.status === 'processing') await pipelineDb.update(pipelineSchema.creations).set({ status: 'failed', metadata: { ...(current.metadata as any || {}), error: 'Pipeline timed out after 5 minutes' } }).where(eq(pipelineSchema.creations.id, creationId));
-            } catch (err: any) { process.stderr.write(`[PIPELINE] safety_failure creation=${creationId} error=${err.message}\n`); }
-          }, 5000);
-          try {
-            try {
-              process.stdout.write(`[PIPELINE] sora_call_start creation=${creationId}\n`);
-              pipelineDb.update(pipelineSchema.creations).set({
-                metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'sora_calling' },
-              }).where(eq(pipelineSchema.creations.id, creationId)).catch((traceErr: unknown) => {
-                const detail = traceErr instanceof Error ? traceErr.message : String(traceErr);
-                process.stderr.write(`[PIPELINE_SYNC] sora trace update failed creation=${creationId}: ${detail}\n`);
-              });
-              const soraResult = await soraVideoService.generateVideo(decision.prompt, { userId: resolvedUserId });
-              process.stdout.write(`[PIPELINE] sora_call_end creation=${creationId} success=${soraResult.success}\n`);
-
-              if (!soraResult.success || !soraResult.videoPath) {
-                await pipelineDb.update(pipelineSchema.creations)
-                  .set({
-                    status: 'failed',
-                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: soraResult.error || 'Sora returned no video' },
-                  })
-                  .where(eq(pipelineSchema.creations.id, creationId));
-                return;
-              }
-              // Validate video file — reject 0-byte or corrupted output
-              try {
-                const stat = fs.statSync(soraResult.videoPath);
-                if (stat.size < 1024) {
-                  console.warn('[StudioRoute] Sora produced empty/corrupt video, marking as failed');
-                  await pipelineDb.update(pipelineSchema.creations)
-                    .set({
-                      status: 'failed',
-                      metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: `Sora output too small (${stat.size} bytes) — likely corrupted` },
-                    })
-                    .where(eq(pipelineSchema.creations.id, creationId));
-                  try { fs.unlinkSync(soraResult.videoPath); } catch {}
-                  return;
-                }
-              } catch {} // if stat fails, proceed and let downstream catch
-
-              // FFmpeg render — gracefully degrade to raw Sora video
-              let videoUrl = soraResult.videoUrl || soraResult.videoPath;
-              try {
-                process.stdout.write(`[PIPELINE] ffmpeg_start creation=${creationId}\n`);
-                const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
-                  platforms,
-                  enableWatermark: !!decision.parameters.brandName,
-                });
-                process.stdout.write(`[PIPELINE] ffmpeg_end creation=${creationId} success=${renderResult.success}\n`);
-                if (renderResult.success && renderResult.outputs.length > 0) {
-                  videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
-                }
-              } catch (ffmpegErr: any) {
-                console.warn('[StudioRoute] FFmpeg render unavailable, using raw Sora video:', ffmpegErr.message);
-              }
-
-              // R2 upload
-              try {
-                const { r2Storage } = await import('../services/r2StorageService.js');
-                if (r2Storage.isAvailable) {
-                  process.stdout.write(`[PIPELINE] r2_upload_start creation=${creationId}\n`);
-                  const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
-                  if (r2.url) videoUrl = r2.url;
-                  process.stdout.write(`[PIPELINE] r2_upload_end creation=${creationId} url_present=${!!r2.url}\n`);
-                }
-              } catch {}
-
-              process.stdout.write(`[PIPELINE] db_completed_start creation=${creationId}\n`);
-              // Update creation to completed
-              await pipelineDb.update(pipelineSchema.creations)
-                .set({
-                  status: 'completed',
-                  fileUrl: videoUrl,
-                  metadata: {
-                    classification: 'video_creation',
-                    prompt: decision.prompt,
-                    platforms,
-                    aiProvider: 'sora-2',
-                    sourceImages,
-                  },
-                })
-                .where(eq(pipelineSchema.creations.id, creationId));
-
-              // Create approval for Operations page
-              try {
-                await pipelineDb.insert(pipelineSchema.approvals).values({
-                  id: uuidv4(),
-                  userId: resolvedUserId,
-                  type: 'video',
-                  status: 'completed',
-                  payload: { assetId: creationId, title: decision.prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
-                  createdAt: new Date(),
-                  updatedAt: new Date(),
-                });
-              } catch (approvalErr: any) {
-                console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
-              }
-            } catch (bgErr: any) {
-              process.stderr.write(`[PIPELINE] background video creation failed creation=${creationId}: ${bgErr.message}\n`);
-              try {
-                await pipelineDb.update(pipelineSchema.creations)
-                  .set({
-                    status: 'failed',
-                    metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, error: bgErr.message },
-                  })
-                  .where(eq(pipelineSchema.creations.id, creationId));
-              } catch {}
-            }
-          } finally {
-            clearInterval(safetyInterval);
-          }
-        })().catch((err: unknown) => {
-          const detail = err instanceof Error ? err.stack || err.message : String(err);
-          process.stderr.write(`[PIPELINE_IIFE_REJECTED] creation=${creationId} ${detail}\n`);
+        // Use setImmediate instead of IIFE — IIFE pattern was silently
+        // not executing in production (Railway) despite working locally.
+        const pipelinePayload = {
+          creationId,
+          prompt: decision.prompt,
+          platforms,
+          sourceImages,
+          resolvedUserId,
+          brandContext,
+        };
+        setImmediate(() => {
+          executeVideoPipeline(pipelinePayload).catch((err: unknown) => {
+            const detail = err instanceof Error ? err.stack || err.message : String(err);
+            process.stderr.write(`[PIPELINE_SETIMMEDIATE_REJECTED] creation=${pipelinePayload.creationId} ${detail}\n`);
+          });
         });
 
         return; // Exit handler after sending response
