@@ -116,7 +116,7 @@ if (!process.env.VERCEL) {
 
 if (!process.env.VERCEL) {
   httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`Bizrunner Scaling-Ready Server is running on port ${port} [pipeline-fix: 4399823]`);
+    console.log(`Bizrunner Scaling-Ready Server is running on port ${port} [v1b63b31-unbuffered]`);
   });
 }
 
