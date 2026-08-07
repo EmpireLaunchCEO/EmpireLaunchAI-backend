@@ -443,20 +443,16 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // Start pipeline BEFORE responding — no IIFE, no setImmediate,
-        // no event listener. Just call the function as a floating promise.
-        // The response goes out immediately; the pipeline runs in background.
-        const pipelineArgs = {
+        // Insert video job into queue — a setInterval worker picks it up.
+        // This completely avoids the async-in-handler problem.
+        const { insertVideoJob } = await import('../services/videoQueueService.js');
+        await insertVideoJob({
           creationId,
           prompt: decision.prompt,
           platforms,
           sourceImages,
           resolvedUserId,
           brandContext,
-        };
-        executeVideoPipeline(pipelineArgs).catch((err: unknown) => {
-          const detail = err instanceof Error ? err.stack || err.message : String(err);
-          process.stderr.write(`[PIPELINE_V5_REJECTED] creation=${creationId} ${detail}\n`);
         });
 
         res.json({

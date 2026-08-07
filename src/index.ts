@@ -44,6 +44,8 @@ import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
 
+import { startVideoQueueWorker } from './services/videoQueueService.js';
+
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
 import { onboardingWorker } from './workers/onboardingWorker.js';
@@ -81,6 +83,9 @@ if (!process.env.VERCEL && process.env.DATABASE_URL && !process.env.DATABASE_URL
 webSocketService.init(httpServer);
 
 if (!process.env.VERCEL) {
+  // Start video queue worker — always on, no gating
+  startVideoQueueWorker();
+
   // All background workers gated behind ENABLE_BACKGROUND_WORKERS env var
   // These call GPT 5.2 on a schedule — only enable when actively needed
   if (process.env.ENABLE_BACKGROUND_WORKERS === 'true') {
