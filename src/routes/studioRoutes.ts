@@ -874,6 +874,28 @@ router.get('/diag', async (_req: Request, res: Response) => {
   if (!sent) { sent = true; clearTimeout(timer); res.json(results); }
 });
 
+// ─── GET /api/studio/recent — No auth needed, shows last 10 creations ──────
+router.get('/recent', async (_req: Request, res: Response) => {
+  try {
+    const recent = await db.select({
+      id: schema.creations.id,
+      userId: schema.creations.userId,
+      status: schema.creations.status,
+      type: schema.creations.type,
+      createdAt: schema.creations.createdAt,
+      metadata: schema.creations.metadata,
+    }).from(schema.creations)
+      .orderBy(desc(schema.creations.createdAt))
+      .limit(10);
+    res.json(recent.map(r => ({
+      ...r,
+      trace: (r.metadata as any)?.pipeline_trace || 'no_trace',
+    })));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/studio/trace — Quick check: latest creation trace ──────────────
 router.get('/trace', async (req: Request, res: Response) => {
   try {
