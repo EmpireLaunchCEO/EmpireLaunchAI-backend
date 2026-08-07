@@ -879,15 +879,15 @@ router.get('/diag', async (_req: Request, res: Response) => {
 // ─── GET /api/studio/trace — Quick check: latest creation trace ──────────────
 router.get('/trace', async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string;
-    if (!userId) return res.status(401).json({ error: 'No user ID' });
+    const userId = (req as any).userId || req.headers['x-user-id'] as string || req.query.userId as string;
+    if (!userId) return res.status(401).json({ error: 'No user ID — pass ?userId=YOUR_ID or set x-user-id header' });
     const [latest] = await db.select({
       id: schema.creations.id,
       status: schema.creations.status,
       metadata: schema.creations.metadata,
       created_at: schema.creations.createdAt,
     }).from(schema.creations)
-      .where(and(eq(schema.creations.userId, userId), eq(schema.creations.type, 'video')))
+      .where(and(eq(schema.creations.userId, userId), eq(schema.creations.type, 'enhanced_video')))
       .orderBy(desc(schema.creations.createdAt))
       .limit(1);
     if (!latest) return res.json({ message: 'No video creations yet' });
