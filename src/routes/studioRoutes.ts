@@ -443,30 +443,28 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // Respond immediately, then trigger pipeline on response finish.
-        // res.on('finish') fires after all data is flushed to the OS —
-        // more reliable than IIFE or setImmediate for deferred execution.
+        // Start pipeline BEFORE responding — no IIFE, no setImmediate,
+        // no event listener. Just call the function as a floating promise.
+        // The response goes out immediately; the pipeline runs in background.
+        const pipelineArgs = {
+          creationId,
+          prompt: decision.prompt,
+          platforms,
+          sourceImages,
+          resolvedUserId,
+          brandContext,
+        };
+        executeVideoPipeline(pipelineArgs).catch((err: unknown) => {
+          const detail = err instanceof Error ? err.stack || err.message : String(err);
+          process.stderr.write(`[PIPELINE_V5_REJECTED] creation=${creationId} ${detail}\n`);
+        });
+
         res.json({
           status: 'processing',
           classification: 'video_creation',
           creationId,
           response: 'Video generation started — this takes 60–90 seconds. Check back shortly.',
         } as StudioResponse);
-
-        res.on('finish', () => {
-          process.stderr.write(`[PIPELINE_V4] finish_event_fired creation=${creationId}\n`);
-          executeVideoPipeline({
-            creationId,
-            prompt: decision.prompt,
-            platforms,
-            sourceImages,
-            resolvedUserId,
-            brandContext,
-          }).catch((err: unknown) => {
-            const detail = err instanceof Error ? err.stack || err.message : String(err);
-            process.stderr.write(`[PIPELINE_V4_REJECTED] creation=${creationId} ${detail}\n`);
-          });
-        });
 
         return;
       }
