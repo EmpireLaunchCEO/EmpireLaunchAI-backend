@@ -771,8 +771,17 @@ router.get('/assets', async (req: Request, res: Response) => {
 router.get('/download/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+
+    // User-scope: only allow download of own creations
+    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    if (!uid) return res.status(401).json({ error: 'userId required' });
+    const resolvedUserId = await resolveUserId(String(uid));
+    if (!resolvedUserId) return res.status(401).json({ error: 'User not found' });
+
     const [creation] = await db.select()
-      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1);
+      .from(schema.creations)
+      .where(and(eq(schema.creations.id, id), eq(schema.creations.userId, resolvedUserId)))
+      .limit(1);
 
     if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
 
