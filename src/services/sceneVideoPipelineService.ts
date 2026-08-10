@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService } from './soraVideoService.js';
@@ -8,6 +11,8 @@ import { r2Storage } from './r2StorageService.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; }
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
+function renderClip(input: string, output: string, duration: number): Promise<void> { return new Promise((resolve,reject)=>ffmpeg(input).loop(duration).videoCodec('libx264').size('1080x1920').outputOptions('-pix_fmt yuv420p').on('end',()=>resolve()).on('error',reject).save(output)); }
+function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(); inputs.forEach(i=>cmd.input(i)); cmd.mergeToFile(output,path.dirname(output)).on('end',()=>resolve()).on('error',reject); }); }
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const candidates = Array.isArray(raw?.scenes) ? raw.scenes : [];
   if (candidates.length) return candidates.map((s:any,i:number)=>({ sceneNumber:i+1,duration:Math.max(1,Number(s.duration)||Math.ceil(durationTarget/candidates.length)),visualType:s.visualType==='still'?'still':'motion',narration:String(s.narration||''),visualPrompt:String(s.visualPrompt||s.visual_prompt||idea) }));
@@ -34,32 +39,32 @@ export class SceneVideoPipelineService {
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
   }
-  async processProject(projectId:string,userId:string):Promise<void> {
+  async processProject(projectId:string,userId:string,skipGeneration=false):Promise<void> {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
-    const assets:string[]=[];
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
-    for (const scene of scenes) { await this.processScene(scene, userId); }
+    if (!skipGeneration) await Promise.all(scenes.map(scene=>this.processScene(scene,userId)));
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     if (complete.some(s=>s.status!=='completed')) { await db.update(schema.videoProjects).set({status:'failed',updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId)); return; }
-    for (const s of complete) if(s.assetUrl) assets.push(s.assetUrl);
-    await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:assets[0]||null,updatedAt:new Date(),metadata:{sceneUrls:assets}}).where(eq(schema.videoProjects.id,projectId));
-    trace(`project_complete project=${projectId} assets=${assets.length}`);
+    const dir=path.join(process.cwd(),'temp','scene-projects',projectId); fs.mkdirSync(dir,{recursive:true});
+    const clips:string[]=[];
+    for (const scene of complete) { const local=String((scene.metadata as any)?.localPath||''); if(!local||!fs.existsSync(local)) throw new Error(`Missing local scene ${scene.sceneNumber}`); const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`); if(scene.assetType==='image/png') await renderClip(local,clip,scene.duration||3); else { fs.copyFileSync(local,clip); } clips.push(clip); }
+    const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
+    let finalUrl=assembled; if(r2Storage.isAvailable){const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled;}
+    await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
   }
   async processScene(scene:any,userId:string):Promise<void> {
-    trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`);
-    await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
-    try {
-      let localPath:string|undefined; let mime='video/mp4';
-      if(scene.visualType==='still') { const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl) throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png'; }
-      else { const result=await soraVideoService.generateVideo(scene.visualPrompt); if(!result.success||!result.videoPath) throw new Error(result.error||'Sora 2 failed'); localPath=result.videoPath; }
-      trace(`scene_visual_complete id=${scene.id} type=${scene.visualType}`);
-      let assetUrl=localPath;
-      if(localPath && r2Storage.isAvailable) { const uploaded=await r2Storage.uploadLocalFile(localPath,userId,'video-scenes',mime); assetUrl=uploaded.url||localPath; }
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',narration:scene.narration},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
-      trace(`scene_complete id=${scene.id}`);
-    } catch(error:any) { trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); }
+    trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
+    try { let localPath:string; let mime='video/mp4';
+      if(scene.visualType==='still'){const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
+      else {const result=await soraVideoService.generateVideo(scene.visualPrompt,{userId:undefined}); if(!result.success||!result.videoPath)throw new Error(result.error||'Sora 2 failed'); localPath=result.videoPath;}
+      let audioUrl:string|undefined; if(scene.narration) audioUrl=await this.generateAudio(scene.narration,userId,scene.id);
+      let assetUrl = localPath;
+      if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,narration:scene.narration},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+    } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
+  private async generateAudio(text:string,userId:string,sceneId:string):Promise<string|undefined>{ const key=process.env.OPENAI_API_KEY; if(!key)return undefined; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true}); const local=path.join(dir,`${sceneId}.mp3`); const response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)}); if(!response.ok)throw new Error(`GPT Audio ${response.status}`); fs.writeFileSync(local,Buffer.from(await response.arrayBuffer())); if(r2Storage.isAvailable){const up=await r2Storage.uploadLocalFile(local,userId,'video-scenes/audio','audio/mpeg'); return up.url;} return local; }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
-  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; await this.processScene(scene,userId); await this.processProject(scene.projectId,userId); return scene.projectId; }
+  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; await this.processScene(scene,userId); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
 }
 export const sceneVideoPipelineService = new SceneVideoPipelineService();
