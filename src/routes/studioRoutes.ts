@@ -384,6 +384,50 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
+        // ── Scene Pipeline Routing ──────────────────────────────────────
+        // Detect if this is a complex/long-form idea that should use the
+        // multi-scene pipeline. Detection triggers:
+        //   1. Explicit flag: req.body.useScenePipeline === true
+        //   2. Has narration request in the idea text
+        //   3. Duration target > 60 seconds (multi-scene territory)
+        //   4. Idea mentions scenes, story, chapters, or "long-form"
+        const idea = String(req.body.idea || decision.prompt || request);
+        const durationTarget = Number(req.body.durationTarget || decision.parameters.durationTarget || 0);
+        const explicitScene = req.body.useScenePipeline === true;
+        const hasNarration = /narration|voiceover|voice.over|narrate|story\b/i.test(idea);
+        const isLongForm = durationTarget > 60;
+        const mentionsScenes = /\bscenes?\b|\bchapters?\b|\blong.form\b|\bmulti.scene\b|\b5.minute\b|\b10.minute\b|\bstory\b/i.test(idea);
+        const useScenePipeline = explicitScene || hasNarration || isLongForm || mentionsScenes;
+
+        if (useScenePipeline) {
+          console.log(`[StudioRoute] Routing to scene pipeline — idea=${idea.slice(0, 60)}, duration=${durationTarget}`);
+          try {
+            const projectId = await sceneVideoPipelineService.createProject({
+              userId: resolvedUserId,
+              title: req.body.title || idea.slice(0, 80),
+              idea,
+              platforms: decision.parameters.platform
+                ? [decision.parameters.platform]
+                : ['tiktok', 'instagram_reel', 'youtube_shorts'],
+              style: req.body.style,
+              durationTarget: durationTarget || 30,
+              script: req.body.script || decision.parameters.script,
+            });
+            return res.status(202).json({
+              status: 'processing',
+              classification: 'video_creation',
+              creationId: projectId,
+              pipeline: 'scene-based',
+              response: 'Multi-scene video generation started. This takes 2-5 minutes. Check back shortly.',
+            } as StudioResponse);
+          } catch (sceneErr: any) {
+            console.error('[StudioRoute] Scene pipeline failed to start, falling back to single-shot:', sceneErr.message);
+            // Fall through to single-shot below
+          }
+        }
+
+        // ── Single-Shot Pipeline (existing) ─────────────────────────────
+
         // Quota check — rolling 7-day window, no subscription table needed
         let videoCount = 0;
         try {
@@ -647,33 +691,83 @@ router.post('/process', async (req: Request, res: Response) => {
 router.get('/creation/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+
+    // FIRST: Check creations table (single-shot videos)
     const [creation] = await db.select()
       .from(schema.creations)
       .where(eq(schema.creations.id, id))
       .limit(1);
 
-    if (!creation) {
+    if (creation) {
+      const meta = (creation.metadata as any) || {};
+      const response: StudioResponse = {
+        status: creation.status === 'completed' ? 'completed'
+          : creation.status === 'failed' ? 'error'
+          : 'processing',
+        classification: meta.classification || 'video_creation',
+        creationId: creation.id,
+        metadata: meta,
+        response: creation.status === 'completed' ? 'Video is ready.'
+          : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}\n\nPrompt sent: "${meta.prompt || 'unknown'}"`
+          : 'Still generating...',
+      };
+
+      if (creation.status === 'completed' && creation.fileUrl) {
+        response.assets = [{
+          type: 'video',
+          url: creation.fileUrl,
+          platform: (meta.platforms?.[0]) || 'tiktok',
+        }];
+      }
+      return res.json(response);
+    }
+
+    // SECOND: Check video_projects table (scene-based pipeline)
+    const [project] = await db.select()
+      .from(schema.videoProjects)
+      .where(eq(schema.videoProjects.id, id))
+      .limit(1);
+
+    if (!project) {
       return res.status(404).json({ status: 'error', error: 'Creation not found' });
     }
 
-    const meta = (creation.metadata as any) || {};
+    // Gather scene progress for the project
+    const scenes = await db.select()
+      .from(schema.videoScenes)
+      .where(eq(schema.videoScenes.projectId, id))
+      .orderBy(asc(schema.videoScenes.sceneNumber));
+
+    const completedScenes = scenes.filter(s => s.status === 'completed').length;
+    const failedScenes = scenes.filter(s => s.status === 'failed').length;
+    const totalScenes = scenes.length;
+    const progress = totalScenes ? Math.round(completedScenes / totalScenes * 100) : 0;
+
+    const projectMeta = (project.metadata as any) || {};
     const response: StudioResponse = {
-      status: creation.status === 'completed' ? 'completed'
-        : creation.status === 'failed' ? 'error'
+      status: project.status === 'completed' ? 'completed'
+        : project.status === 'failed' ? 'error'
         : 'processing',
-      classification: meta.classification || 'video_creation',
-      creationId: creation.id,
-      metadata: meta, // Include pipeline_trace for frontend visibility
-      response: creation.status === 'completed' ? 'Video is ready.'
-        : creation.status === 'failed' ? `Generation failed: ${meta.error || 'unknown error'}\n\nPrompt sent: "${meta.prompt || 'unknown'}"`
-        : 'Still generating...',
+      classification: 'video_creation',
+      creationId: project.id,
+      pipeline: 'scene-based',
+      metadata: {
+        ...projectMeta,
+        sceneProgress: { completed: completedScenes, failed: failedScenes, total: totalScenes, progress },
+        pipeline_trace: project.status,
+      },
+      response: project.status === 'completed' ? 'Video is ready.'
+        : project.status === 'failed' ? `Generation failed. ${failedScenes} of ${totalScenes} scenes failed.`
+        : project.status === 'assembling' ? `Assembling final video... ${completedScenes}/${totalScenes} scenes complete.`
+        : project.status === 'generating' ? `Generating scenes... ${completedScenes}/${totalScenes} complete.`
+        : `Scripting...`,
     };
 
-    if (creation.status === 'completed' && creation.fileUrl) {
+    if (project.status === 'completed' && project.finalVideoUrl) {
       response.assets = [{
         type: 'video',
-        url: creation.fileUrl,
-        platform: (meta.platforms?.[0]) || 'tiktok',
+        url: project.finalVideoUrl,
+        platform: (projectMeta.platforms?.[0]) || 'tiktok',
       }];
     }
 
