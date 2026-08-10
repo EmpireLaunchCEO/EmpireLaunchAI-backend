@@ -671,3 +671,44 @@ export const libraryAssets = sqliteTable('library_assets', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+/**
+ * Video Projects — multi-scene video pipeline.
+ * Replaces single-shot creations for complex multi-scene video generation.
+ */
+export const videoProjects = sqliteTable('video_projects', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  title: text('title').notNull(),
+  status: text('status').default('scripting').notNull(), // 'scripting' | 'generating' | 'assembling' | 'completed' | 'failed'
+  totalDuration: integer('total_duration'),         // total seconds across all scenes
+  sceneCount: integer('scene_count'),               // number of scenes
+  script: text('script', { mode: 'json' }),         // full script JSON (scene breakdown, narration, etc.)
+  finalVideoUrl: text('final_video_url'),            // R2 URL of assembled final video
+  thumbnailUrl: text('thumbnail_url'),              // R2 URL of thumbnail
+  metadata: text('metadata', { mode: 'json' }).default('{}').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+/**
+ * Video Scenes — individual scenes within a video project.
+ * Each scene maps to one AI-generated asset (Sora 2 video or GPT Image 2 still).
+ */
+export const videoScenes = sqliteTable('video_scenes', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').references(() => videoProjects.id).notNull(),
+  sceneNumber: integer('scene_number').notNull(),
+  duration: integer('duration'),                    // target duration in seconds
+  visualType: text('visual_type').default('motion').notNull(), // 'motion' | 'still'
+  narration: text('narration'),                     // voiceover/narration text for this scene
+  visualPrompt: text('visual_prompt'),              // AI prompt used for scene generation
+  status: text('status').default('pending').notNull(), // 'pending' | 'generating' | 'completed' | 'failed'
+  assetUrl: text('asset_url'),                      // R2 URL of generated scene asset
+  assetType: text('asset_type'),                    // 'video/mp4' | 'image/png'
+  audioUrl: text('audio_url'),                      // R2 URL of generated audio/voiceover
+  retryCount: integer('retry_count').default(0).notNull(),
+  metadata: text('metadata', { mode: 'json' }).default('{}').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
