@@ -9,6 +9,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
+import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
 
 const router = Router();
 
@@ -837,6 +838,26 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
   }
 });
 
+/** Scene-based video project endpoints. All work is persisted and runs after response. */
+router.post('/video-project', async (req: Request, res: Response) => {
+  try {
+    const rawUser = req.body.userId || (req as any).userId;
+    const resolvedUserId = await resolveUserId(rawUser);
+    if (!resolvedUserId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' });
+    const { title, idea, platforms, style, durationTarget, script } = req.body;
+    if (!idea || typeof idea !== 'string') return res.status(400).json({ status: 'error', error: 'idea is required' });
+    const projectId = await sceneVideoPipelineService.createProject({ userId: resolvedUserId, title: title || idea.slice(0, 80), idea, platforms, style, durationTarget, script });
+    return res.status(202).json({ status: 'processing', projectId });
+  } catch (error: any) { process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`); return res.status(500).json({ status: 'error', error: error.message }); }
+});
+router.get('/video-project/:id', async (req: Request, res: Response) => {
+  try { const userId = await resolveUserId(typeof req.query.userId === 'string' ? req.query.userId : (req as any).userId); const result = userId ? await sceneVideoPipelineService.getProject(req.params.id, userId) : null; if (!result) return res.status(404).json({ status: 'error', error: 'Project not found' }); return res.json(result); }
+  catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
+});
+router.post('/scene/:id/regenerate', async (req: Request, res: Response) => {
+  try { const userId = await resolveUserId(req.body.userId || (req as any).userId); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
+  catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
+});
 export default router;
 
 
