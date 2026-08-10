@@ -44,13 +44,41 @@ export class SceneVideoPipelineService {
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
     if (!skipGeneration) { const outcomes = await Promise.allSettled(scenes.map(scene=>this.processScene(scene,userId))); const rejected = outcomes.filter(o=>o.status==='rejected').length; if (rejected) trace(`scene_queue_rejections project=${projectId} count=${rejected}`); }
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
-    if (complete.some(s=>s.status!=='completed')) { await db.update(schema.videoProjects).set({status:'failed',updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId)); return; }
-    const dir=path.join(process.cwd(),'temp','scene-projects',projectId); fs.mkdirSync(dir,{recursive:true});
-    const clips:string[]=[];
-    for (const scene of complete) { const local=String((scene.metadata as any)?.localPath||''); if(!local||!fs.existsSync(local)) throw new Error(`Missing local scene ${scene.sceneNumber}`); const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`); const audioLocal=String((scene.metadata as any)?.audioLocalPath||''); if(scene.assetType==='image/png' || audioLocal) await renderClip(local,clip,scene.duration||3,audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined); else { fs.copyFileSync(local,clip); } clips.push(clip); }
-    const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
-    let finalUrl=assembled; if(r2Storage.isAvailable){const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled;}
-    await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+    if (complete.some(s=>s.status!=='completed')) {
+      const failedCount = complete.filter(s=>s.status==='failed').length;
+      await db.update(schema.videoProjects).set({
+        status:'failed',
+        metadata: { failedSceneCount: failedCount, totalScenes: complete.length },
+        updatedAt:new Date()
+      }).where(eq(schema.videoProjects.id,projectId));
+      return;
+    }
+
+    // Transition to assembling
+    await db.update(schema.videoProjects).set({status:'assembling',updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
+    trace(`assembling_start project=${projectId}`);
+
+    try {
+      const dir=path.join(process.cwd(),'temp','scene-projects',projectId); fs.mkdirSync(dir,{recursive:true});
+      const clips:string[]=[];
+      for (const scene of complete) {
+        const local=String((scene.metadata as any)?.localPath||'');
+        if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber}`); continue; }
+        const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`); const audioLocal=String((scene.metadata as any)?.audioLocalPath||'');
+        if(scene.assetType==='image/png' || audioLocal) await renderClip(local,clip,scene.duration||3,audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined); else { fs.copyFileSync(local,clip); } clips.push(clip);
+      }
+      if (clips.length === 0) throw new Error('No scene clips available for assembly');
+      const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
+      let finalUrl=assembled;
+      if(r2Storage.isAvailable) {
+        try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; }
+        catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
+      }
+      await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+    } catch(assemblyErr:any) {
+      trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
+      await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
+    }
   }
   async processScene(scene:any,userId:string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
