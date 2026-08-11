@@ -952,50 +952,6 @@ router.post('/scene/:id/regenerate', async (req: Request, res: Response) => {
   try { const userId = await resolveUserId(req.body.userId || (req as any).userId); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
   catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
 });
-
-/** List all video projects for the authenticated user (Operations page). */
-router.get('/video-projects', async (req: Request, res: Response) => {
-  try {
-    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
-    if (!uid) return res.status(400).json({ status: 'error', error: 'userId required' });
-    const resolvedUserId = await resolveUserId(String(uid));
-    if (!resolvedUserId) return res.status(400).json({ status: 'error', error: 'User not found' });
-
-    const projects = await db.select()
-      .from(schema.videoProjects)
-      .where(eq(schema.videoProjects.userId, resolvedUserId))
-      .orderBy(desc(schema.videoProjects.createdAt))
-      .limit(50);
-
-    // Enrich each project with scene progress
-    const enriched = await Promise.all(projects.map(async p => {
-      const scenes = await db.select()
-        .from(schema.videoScenes)
-        .where(eq(schema.videoScenes.projectId, p.id))
-        .orderBy(asc(schema.videoScenes.sceneNumber));
-      const done = scenes.filter(s => s.status === 'completed').length;
-      return {
-        id: p.id,
-        title: p.title,
-        status: p.status,
-        sceneCount: p.sceneCount,
-        totalDuration: p.totalDuration,
-        finalVideoUrl: p.finalVideoUrl ? await refreshR2Url(p.finalVideoUrl) : null,
-        thumbnailUrl: p.thumbnailUrl ? await refreshR2Url(p.thumbnailUrl) : null,
-        progress: scenes.length ? Math.round(done / scenes.length * 100) : 0,
-        scenes: scenes.map(s => ({ id: s.id, sceneNumber: s.sceneNumber, status: s.status, visualType: s.visualType, duration: s.duration })),
-        metadata: p.metadata,
-        createdAt: p.createdAt,
-      };
-    }));
-
-    res.json({ status: 'ok', projects: enriched });
-  } catch (err: any) {
-    console.error('[StudioRoute] Failed to fetch video projects:', err.message);
-    return res.status(500).json({ status: 'error', error: err.message });
-  }
-});
-
 export default router;
 
 
