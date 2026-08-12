@@ -175,7 +175,7 @@ async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void
       }
     } catch {}
 
-    // FFmpeg render
+    // FFmpeg render — never clobber an existing remote URL with a relative/local path
     let videoUrl = soraResult.videoUrl || soraResult.videoPath;
     try {
       process.stderr.write(`[PIPELINE_V2] ffmpeg_start creation=${creationId}\n`);
@@ -184,22 +184,31 @@ async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void
         enableWatermark: !!brandContext?.name,
       });
       process.stderr.write(`[PIPELINE_V2] ffmpeg_end creation=${creationId} success=${renderResult.success}\n`);
-      if (renderResult.success && renderResult.outputs.length > 0) {
+      if (renderResult.success && renderResult.outputs.length > 0 && !/^https?:\/\//.test(videoUrl)) {
         videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
       }
     } catch (ffmpegErr: any) {
       process.stderr.write(`[PIPELINE_V2] ffmpeg_failed creation=${creationId}: ${ffmpegErr.message}\n`);
     }
 
-    // R2 upload
+    // R2 upload — only if we don't already have a remote URL and the file still exists.
+    // soraResult.videoUrl is already an R2 signed URL when R2 is configured —
+    // never clobber it with a dead local-path fallback.
+    let r2Key: string | undefined;
     try {
-      if (r2Storage.isAvailable) {
+      if (r2Storage.isAvailable && !/^https?:\/\//.test(videoUrl) && fs.existsSync(soraResult.videoPath)) {
         process.stderr.write(`[PIPELINE_V2] r2_upload_start creation=${creationId}\n`);
         const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, resolvedUserId, 'cinema/sora', 'video/mp4');
-        if (r2.url) videoUrl = r2.url;
+        if (r2.url && /^https?:\/\//.test(r2.url)) videoUrl = r2.url;
+        if (r2.r2Key) r2Key = r2.r2Key;
         process.stderr.write(`[PIPELINE_V2] r2_upload_end creation=${creationId} url_present=${!!r2.url}\n`);
       }
     } catch {}
+
+    // If we kept the existing R2 URL (upload skipped), derive the key from it for metadata
+    if (!r2Key && soraResult.videoUrl && /^https?:\/\//.test(soraResult.videoUrl)) {
+      r2Key = extractR2Key(soraResult.videoUrl) ?? undefined;
+    }
 
     // Mark completed
     process.stderr.write(`[PIPELINE_V2] db_completed_start creation=${creationId}\n`);
@@ -213,6 +222,7 @@ async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void
           aiProvider: 'sora-2',
           sourceImages,
           pipeline_trace: 'completed',
+          ...(r2Key ? { r2Key } : {}),
         },
       })
       .where(eq(schema.creations.id, creationId));
@@ -846,8 +856,11 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 
     if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
 
-    // Extract R2 key and download via S3 client (avoids signed URL expiry entirely)
-    const r2Key = extractR2Key(creation.fileUrl);
+    // Extract R2 key and download via S3 client (avoids signed URL expiry entirely).
+    // Fall back to metadata.r2Key (stored since the URL-clobber fix) when the
+    // fileUrl formatting can't be parsed — legacy rows may hold dead local paths.
+    const meta = (creation.metadata as any) || {};
+    const r2Key = extractR2Key(creation.fileUrl) || (typeof meta.r2Key === 'string' ? meta.r2Key : null);
     if (!r2Key) {
       return res.status(502).json({ error: 'Could not parse R2 key from URL' });
     }
