@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
-import { eq, asc } from 'drizzle-orm';
+import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
@@ -11,6 +11,25 @@ import { r2Storage } from './r2StorageService.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; }
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
+/** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
+function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const started = Date.now();
+    let done = false;
+    const timer = setInterval(() => {
+      if (done) { clearInterval(timer); return; }
+      if (Date.now() - started >= ms) {
+        done = true;
+        clearInterval(timer);
+        reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
+      }
+    }, 5000);
+    promise.then(
+      (v) => { if (!done) { done = true; clearInterval(timer); resolve(v); } },
+      (e) => { if (!done) { done = true; clearInterval(timer); reject(e); } },
+    );
+  });
+}
 function renderClip(input: string, output: string, duration: number, audio?: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(input); if(audio) cmd.input(audio).outputOptions(['-map 0:v:0','-map 1:a:0','-shortest']); cmd.loop(duration).videoCodec('libx264').size('1080x1920').audioCodec('aac').outputOptions('-pix_fmt yuv420p').on('end',()=>resolve()).on('error',reject).save(output); }); }
 function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(); inputs.forEach(i=>cmd.input(i)); cmd.mergeToFile(output,path.dirname(output)).on('end',()=>resolve()).on('error',reject); }); }
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
@@ -43,37 +62,31 @@ export class SceneVideoPipelineService {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
     if (!skipGeneration) {
-      // Never allow a provider call to leave a scene (and therefore the project) in
-      // `generating` forever.  Railway can keep an outbound request alive longer
-      // than the request handler, so enforce the deadline at the worker boundary.
-      const runWithDeadline = async (scene: any) => {
-        let timer: ReturnType<typeof setInterval> | undefined;
-        const deadline = new Promise<never>((_, reject) => {
-          const started = Date.now();
-          timer = setInterval(() => {
-            if (Date.now() - started >= 4 * 60 * 1000) {
-              if (timer) clearInterval(timer);
-              reject(new Error('Scene generation timed out after 4 minutes'));
-            }
-          }, 5000);
-        });
-        try {
-          await Promise.race([this.processScene(scene, userId), deadline]);
-        } finally {
-          if (timer) clearInterval(timer);
-        }
-      };
-      const outcomes = await Promise.allSettled(scenes.map(runWithDeadline));
-      const rejected = outcomes.filter(o=>o.status==='rejected').length;
+      // Never let a provider call leave a scene in `generating` forever. Railway can
+      // keep an outbound request alive longer than the handler; enforce a deadline at
+      // the worker boundary (4 min per scene — Sora polls up to ~5 min max, image 3 min).
+      const outcomes = await Promise.allSettled(scenes.map(scene => withDeadline(
+        this.processScene(scene, userId),
+        4 * 60 * 1000,
+        `Scene ${scene.sceneNumber}`,
+      )));
+      const rejected = outcomes.filter(o => o.status === 'rejected').length;
       if (rejected) {
         trace(`scene_queue_rejections project=${projectId} count=${rejected}`);
-        // A timed-out provider call may still be in flight; persist a terminal
-        // state now so polling can never report a permanently generating scene.
+        // A timed-out provider call may still be in flight; persist a terminal state
+        // now so polling can never report a permanently generating scene. Scope to
+        // non-completed scenes only — never clobber a scene that already finished.
         await db.update(schema.videoScenes).set({
           status: 'failed',
           metadata: { error: 'Scene generation timed out after 4 minutes' },
           updatedAt: new Date(),
-        }).where(eq(schema.videoScenes.projectId, projectId));
+        }).where(and(
+          eq(schema.videoScenes.projectId, projectId),
+          or(
+            eq(schema.videoScenes.status, 'generating'),
+            eq(schema.videoScenes.status, 'pending'),
+          ),
+        ));
       }
     }
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
@@ -133,5 +146,51 @@ export class SceneVideoPipelineService {
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
   async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; await this.processScene(scene,userId); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
+  /**
+   * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
+   * fire-and-forget scene work dies with it and projects can sit in `generating` /
+   * `assembling` forever. On boot (and periodically) mark those as failed so the UI
+   * always resolves to a terminal state. Cheap + deterministic — we don't try to
+   * resume mid-flight work, since the provider requests were killed with the process.
+   */
+  async recoverStaleProjects(): Promise<number> {
+    const stale = await db.select().from(schema.videoProjects).where(or(
+      eq(schema.videoProjects.status, 'generating'),
+      eq(schema.videoProjects.status, 'assembling'),
+    ));
+    if (stale.length === 0) return 0;
+    const ids = stale.map(p => p.id);
+    await db.update(schema.videoProjects).set({
+      status: 'failed',
+      metadata: { error: 'Pipeline interrupted by service restart — regenerate this video', recoveredBy: 'resume-on-boot' },
+      updatedAt: new Date(),
+    }).where(inArray(schema.videoProjects.id, ids));
+    // Also fail any scene still stuck in generating/pending so per-scene UI reflects it.
+    await db.update(schema.videoScenes).set({
+      status: 'failed',
+      metadata: { error: 'Scene interrupted by service restart' },
+      updatedAt: new Date(),
+    }).where(and(
+      inArray(schema.videoScenes.projectId, ids),
+      or(
+        eq(schema.videoScenes.status, 'generating'),
+        eq(schema.videoScenes.status, 'pending'),
+      ),
+    ));
+    trace(`recovered_stale_projects count=${stale.length} ids=${ids.map(i=>i.slice(0,8)).join(',')}`);
+    return stale.length;
+  }
+  private watchdogStarted = false;
+  /** Start the periodic stale-project watchdog (Railway-safe: setInterval, no long setTimeout). */
+  startWatchdog(intervalMs = 5 * 60 * 1000): void {
+    if (this.watchdogStarted) return;
+    this.watchdogStarted = true;
+    // Run once immediately after boot, then on the interval.
+    this.recoverStaleProjects().catch(e => trace(`watchdog_initial_failed error=${e.message}`));
+    setInterval(() => {
+      this.recoverStaleProjects().catch(e => trace(`watchdog_tick_failed error=${e.message}`));
+    }, intervalMs);
+    trace(`watchdog_started interval=${intervalMs}ms`);
+  }
 }
 export const sceneVideoPipelineService = new SceneVideoPipelineService();

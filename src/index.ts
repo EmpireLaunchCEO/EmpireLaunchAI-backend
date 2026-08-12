@@ -45,6 +45,7 @@ import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
 
 import { startVideoQueueWorker } from './services/videoQueueService.js';
+import { sceneVideoPipelineService } from './services/sceneVideoPipelineService.js';
 
 import { agentWorker } from './workers/agentWorker.js';
 import { schedulerWorker } from './workers/schedulerWorker.js';
@@ -85,6 +86,9 @@ webSocketService.init(httpServer);
 if (!process.env.VERCEL) {
   // Start video queue worker — always on, no gating
   startVideoQueueWorker();
+  // Scene pipeline restart-safety: recover projects stuck in generating/assembling
+  // after a process restart, immediately on boot and then every 5 min.
+  sceneVideoPipelineService.startWatchdog();
 
   // All background workers gated behind ENABLE_BACKGROUND_WORKERS env var
   // These call GPT 5.2 on a schedule — only enable when actively needed
