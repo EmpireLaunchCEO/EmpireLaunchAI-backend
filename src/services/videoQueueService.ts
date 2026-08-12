@@ -19,6 +19,30 @@ interface VideoJobPayload {
   brandContext: any;
 }
 
+/**
+ * Extract the R2 object key from a stored URL (signed, public, or custom domain).
+ * Key format: brands/{userId}/{type}/{uuid}.{ext}
+ */
+function extractR2Key(storedUrl: string): string | null {
+  try {
+    const url = new URL(storedUrl);
+    // Case 1: Custom public URL (R2_PUBLIC_URL) — key is the entire pathname minus leading /
+    const r2PublicUrl = process.env.R2_PUBLIC_URL;
+    if (r2PublicUrl && storedUrl.startsWith(r2PublicUrl)) {
+      return url.pathname.replace(/^\//, '');
+    }
+    // Case 2: R2 endpoint URL — pathname is /{bucket}/{key}
+    if (storedUrl.includes('r2.cloudflarestorage.com')) {
+      const parts = url.pathname.split('/');
+      // ['', '{bucket}', 'brands', ...] → skip bucket
+      return parts.slice(2).join('/');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 let workerStarted = false;
 
 /**
@@ -125,33 +149,42 @@ export function startVideoQueueWorker(): void {
           }
         } catch {}
 
-        // FFmpeg
+        // FFmpeg — never clobber an existing remote URL with a relative/local path
         let videoUrl = soraResult.videoUrl || soraResult.videoPath;
         try {
           const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
             platforms,
             enableWatermark: !!meta?.brandContext?.name,
           });
-          if (renderResult.success && renderResult.outputs.length > 0) {
+          if (renderResult.success && renderResult.outputs.length > 0 && !/^https?:\/\//.test(videoUrl)) {
             videoUrl = renderResult.outputs[0]?.videoUrl || videoUrl;
           }
         } catch (ffmpegErr: any) {
           console.warn(`[VideoQueue] FFmpeg failed: ${ffmpegErr.message}`);
         }
 
-        // R2
+        // R2 — only upload if we don't already have a remote URL and the file still exists.
+        // soraResult.videoUrl is already an R2 signed URL when R2 is configured —
+        // never clobber it with a dead local-path fallback.
+        let r2Key: string | undefined;
         try {
-          if (r2Storage.isAvailable) {
+          if (r2Storage.isAvailable && !/^https?:\/\//.test(videoUrl) && fs.existsSync(soraResult.videoPath)) {
             const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, userId, 'cinema/sora', 'video/mp4');
-            if (r2.url) videoUrl = r2.url;
+            if (r2.url && /^https?:\/\//.test(r2.url)) videoUrl = r2.url;
+            if (r2.r2Key) r2Key = r2.r2Key;
           }
         } catch {}
+
+        // If we kept the existing R2 URL (upload skipped), derive the key from it for metadata
+        if (!r2Key && soraResult.videoUrl && /^https?:\/\//.test(soraResult.videoUrl)) {
+          r2Key = extractR2Key(soraResult.videoUrl) ?? undefined;
+        }
 
         // Complete
         await db.update(schema.creations).set({
           status: 'completed',
           fileUrl: videoUrl,
-          metadata: { ...meta, aiProvider: 'sora-2', pipeline_trace: 'completed' },
+          metadata: { ...meta, aiProvider: 'sora-2', pipeline_trace: 'completed', ...(r2Key ? { r2Key } : {}) },
         }).where(eq(schema.creations.id, creationId));
 
         // Approval
