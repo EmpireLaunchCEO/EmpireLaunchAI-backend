@@ -385,19 +385,15 @@ router.post('/process', async (req: Request, res: Response) => {
         }
 
         // ── Scene Pipeline Routing ──────────────────────────────────────
-        // Detect if this is a complex/long-form idea that should use the
-        // multi-scene pipeline. Detection triggers:
-        //   1. Explicit flag: req.body.useScenePipeline === true
-        //   2. Has narration request in the idea text
-        //   3. Duration target > 60 seconds (multi-scene territory)
-        //   4. Idea mentions scenes, story, chapters, or "long-form"
+        // Only trigger for explicitly long-form / multi-scene requests.
+        // Standard videos (even with "story" or "narration") should use
+        // the fast single-shot Sora pipeline.
         const idea = String(req.body.idea || decision.prompt || request);
         const durationTarget = Number(req.body.durationTarget || decision.parameters.durationTarget || 0);
         const explicitScene = req.body.useScenePipeline === true;
-        const hasNarration = /narration|voiceover|voice.over|narrate|story\b/i.test(idea);
         const isLongForm = durationTarget > 60;
-        const mentionsScenes = /\bscenes?\b|\bchapters?\b|\blong.form\b|\bmulti.scene\b|\b5.minute\b|\b10.minute\b|\bstory\b/i.test(idea);
-        const useScenePipeline = explicitScene || hasNarration || isLongForm || mentionsScenes;
+        const mentionsScenes = /\bscenes?\b|\bchapters?\b|\blong.form\b|\bmulti.scene\b|\b\d+\s*minute\b/i.test(idea);
+        const useScenePipeline = explicitScene || isLongForm || mentionsScenes;
 
         if (useScenePipeline) {
           console.log(`[StudioRoute] Routing to scene pipeline — idea=${idea.slice(0, 60)}, duration=${durationTarget}`);
