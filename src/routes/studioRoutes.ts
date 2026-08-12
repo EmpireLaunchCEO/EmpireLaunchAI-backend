@@ -6,7 +6,7 @@ import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
-import { eq, and, gte, count, desc } from 'drizzle-orm';
+import { eq, and, gte, count, desc, asc } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
@@ -255,7 +255,15 @@ router.post('/process', async (req: Request, res: Response) => {
       return res.status(400).json({ status: 'error', error: 'request is required' });
     }
 
-    const uid = userId || (req as any).userId || 'system';
+    // Resolve userId from all possible sources. Guard against sentinel
+    // values ('system', 'anonymous', '') that reach the route when the
+    // frontend hasn't generated a device UUID yet.
+    let uid = userId || (req as any).userId || req.headers['x-user-id'] as string || '';
+    const nonUuidSentinels = /^(system|anonymous|)$/i;
+    if (nonUuidSentinels.test(String(uid).trim())) {
+      console.warn(`[StudioRoute] Received sentinel userId "${uid}", generating device UUID`);
+      uid = uuidv4();
+    }
 
     // 1. Fetch brand context if brandId provided
     let brandContext: any = undefined;
@@ -384,45 +392,7 @@ router.post('/process', async (req: Request, res: Response) => {
           } as StudioResponse);
         }
 
-        // ── Scene Pipeline Routing ──────────────────────────────────────
-        // Only trigger for explicitly long-form / multi-scene requests.
-        // Standard videos (even with "story" or "narration") should use
-        // the fast single-shot Sora pipeline.
-        const idea = String(req.body.idea || decision.prompt || request);
-        const durationTarget = Number(req.body.durationTarget || decision.parameters.durationTarget || 0);
-        const explicitScene = req.body.useScenePipeline === true;
-        const isLongForm = durationTarget > 60;
-        const mentionsScenes = /\bscenes?\b|\bchapters?\b|\blong.form\b|\bmulti.scene\b|\b\d+\s*minute\b/i.test(idea);
-        const useScenePipeline = explicitScene || isLongForm || mentionsScenes;
-
-        if (useScenePipeline) {
-          console.log(`[StudioRoute] Routing to scene pipeline — idea=${idea.slice(0, 60)}, duration=${durationTarget}`);
-          try {
-            const projectId = await sceneVideoPipelineService.createProject({
-              userId: resolvedUserId,
-              title: req.body.title || idea.slice(0, 80),
-              idea,
-              platforms: decision.parameters.platform
-                ? [decision.parameters.platform]
-                : ['tiktok', 'instagram_reel', 'youtube_shorts'],
-              style: req.body.style,
-              durationTarget: durationTarget || 30,
-              script: req.body.script || decision.parameters.script,
-            });
-            return res.status(202).json({
-              status: 'processing',
-              classification: 'video_creation',
-              creationId: projectId,
-              pipeline: 'scene-based',
-              response: 'Multi-scene video generation started. This takes 2-5 minutes. Check back shortly.',
-            } as StudioResponse);
-          } catch (sceneErr: any) {
-            console.error('[StudioRoute] Scene pipeline failed to start, falling back to single-shot:', sceneErr.message);
-            // Fall through to single-shot below
-          }
-        }
-
-        // ── Single-Shot Pipeline (existing) ─────────────────────────────
+        // ── Single-Shot Pipeline ─────────────────────────────────────────
 
         // Quota check — rolling 7-day window, no subscription table needed
         let videoCount = 0;
