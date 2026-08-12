@@ -63,18 +63,45 @@ export class AiRouterService {
       });
 
       console.log('[AiRouter] Raw AI response:', raw.slice(0, 300));
-      return this.parseDecision(raw);
+      return this.applyDeterministicOverrides(this.parseDecision(raw), request);
     } catch (err: any) {
       console.error('[AiRouter] AI routing failed:', err.message);
-      // Fallback: classify as ai_assistant and return the actual error
-      return {
+      // Preserve explicit generation intent even when the model is unavailable.
+      return this.applyDeterministicOverrides({
         classification: 'ai_assistant',
         prompt: '',
         parameters: {},
         response: `AI router error: ${err.message}`,
         needsRefinement: true,
-      };
+      }, request);
     }
+  }
+
+  /**
+   * The model occasionally treats an explicit video request as a conversation.
+   * Generation requests must never be downgraded to chat: the studio route
+   * only starts Sora after receiving video_creation. Keep consult mode purely
+   * conversational, while providing a deterministic safety net for the wand.
+   */
+  private applyDeterministicOverrides(decision: RouterDecision, request: RouterRequest): RouterDecision {
+    if (request.mode === 'consult' || decision.classification !== 'ai_assistant') return decision;
+
+    const text = request.request.toLowerCase();
+    const hasGenerationVerb = /\b(create|make|generate|produce|build|turn)\b/.test(text);
+    const hasVideoIntent = /\b(video|promo(?:tional)?|reel|tiktok|commercial|shorts?|ad(?:vertisement)?)\b/.test(text);
+    const asksToEdit = /\b(edit|editing|trim|caption(?:s|ed)?|resize|cut|merge|overlay)\b/.test(text);
+
+    // Do not turn a request explicitly about editing existing media into a
+    // fresh generation job merely because it mentions a video.
+    if (!hasGenerationVerb || !hasVideoIntent || asksToEdit) return decision;
+
+    return {
+      ...decision,
+      classification: 'video_creation',
+      prompt: decision.prompt || request.request,
+      needsRefinement: false,
+      response: undefined,
+    };
   }
 
   private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode']): string {
@@ -98,6 +125,7 @@ CLASSIFICATION OPTIONS:
 - "image_creation" — Product mockups, Etsy/Shopify listing images, social media graphics, marketing graphics, logos, banners, product scenes. Route to GPT Image 2.
 - "image_editing" — Background replacement, color adjustments, edits to existing images. Route to GPT Image 2 with edit instructions.
 - "video_creation" — Text-to-video, product commercials, TikTok/Reels/Facebook/Pinterest videos, promotional videos, seasonal campaigns, AI twin videos. Route through: source images (if needed) → Sora 2 → FFmpeg packaging.
+- EXPLICIT GENERATION RULE: In generate mode, if the user asks to create/make/generate/produce a video, promo, reel, TikTok, commercial, short, or ad (especially with a duration or format), you MUST classify as "video_creation", never "ai_assistant".
 - "video_editing" — Captions, trims, resizing, logo overlays on existing video. Route to FFmpeg render service. If new visual content is needed, flag requiresNewVisualContent.
 - "final_rendering" — Platform optimization, format conversion, branding/packaging of existing content.
 
