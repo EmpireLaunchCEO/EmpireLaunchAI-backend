@@ -138,9 +138,13 @@ export class RenderingEngine {
         n: 1,
         quality,
       }),
-      signal: AbortSignal.timeout(60000)
+      signal: AbortSignal.timeout(180000)
     });
 
+    // gpt-image-2 can legitimately take 60-120s+ to render a high-quality image.
+    // 60s was aborting healthy generations ("The operation was aborted due to
+    // timeout") before OpenAI had a chance to respond, failing every still scene.
+    // The scene worker deadline in sceneVideoPipelineService is the safety net.
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
       throw new Error(`gpt-image-2 API error (${response.status}): ${errorBody.slice(0, 200)}`);
