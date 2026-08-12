@@ -42,7 +42,40 @@ export class SceneVideoPipelineService {
   async processProject(projectId:string,userId:string,skipGeneration=false):Promise<void> {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
-    if (!skipGeneration) { const outcomes = await Promise.allSettled(scenes.map(scene=>this.processScene(scene,userId))); const rejected = outcomes.filter(o=>o.status==='rejected').length; if (rejected) trace(`scene_queue_rejections project=${projectId} count=${rejected}`); }
+    if (!skipGeneration) {
+      // Never allow a provider call to leave a scene (and therefore the project) in
+      // `generating` forever.  Railway can keep an outbound request alive longer
+      // than the request handler, so enforce the deadline at the worker boundary.
+      const runWithDeadline = async (scene: any) => {
+        let timer: ReturnType<typeof setInterval> | undefined;
+        const deadline = new Promise<never>((_, reject) => {
+          const started = Date.now();
+          timer = setInterval(() => {
+            if (Date.now() - started >= 4 * 60 * 1000) {
+              if (timer) clearInterval(timer);
+              reject(new Error('Scene generation timed out after 4 minutes'));
+            }
+          }, 5000);
+        });
+        try {
+          await Promise.race([this.processScene(scene, userId), deadline]);
+        } finally {
+          if (timer) clearInterval(timer);
+        }
+      };
+      const outcomes = await Promise.allSettled(scenes.map(runWithDeadline));
+      const rejected = outcomes.filter(o=>o.status==='rejected').length;
+      if (rejected) {
+        trace(`scene_queue_rejections project=${projectId} count=${rejected}`);
+        // A timed-out provider call may still be in flight; persist a terminal
+        // state now so polling can never report a permanently generating scene.
+        await db.update(schema.videoScenes).set({
+          status: 'failed',
+          metadata: { error: 'Scene generation timed out after 4 minutes' },
+          updatedAt: new Date(),
+        }).where(eq(schema.videoScenes.projectId, projectId));
+      }
+    }
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     if (complete.some(s=>s.status!=='completed')) {
       const failedCount = complete.filter(s=>s.status==='failed').length;
