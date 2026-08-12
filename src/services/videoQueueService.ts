@@ -8,6 +8,15 @@ import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import type { SoraGenerationResult } from './soraVideoService.js';
 
+// ── Sora retry policy ──────────────────────────────────────────────
+// Sora's API intermittently returns status:failed ~55-90s into generation
+// (~50% flake rate observed in production on 2026-08-12). We retry up to 2
+// additional attempts with a short backoff before marking the creation
+// failed. FFmpeg/R2 are NOT re-run on retry — only the Sora create/generate
+// call is repeated. Policy per task #26627131 (2 retries, 10-15s backoff).
+const SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
+const SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempt 1/2/3 (10s then 15s)
+
 // We import the pipeline function dynamically to avoid circular deps
 let executeVideoPipeline: Function | null = null;
 
@@ -132,15 +141,14 @@ export function startVideoQueueWorker(): void {
         // generation. Retry up to 2 additional attempts with a short
         // backoff before marking the creation failed. FFmpeg/R2 below run
         // only once, after a successful Sora result — retries never re-run them.
-        const MAX_SORA_ATTEMPTS = 3; // initial + 2 automatic retries
         let soraResult: SoraGenerationResult | null = null;
         let retriesUsed = 0;
 
-        for (let attempt = 1; attempt <= MAX_SORA_ATTEMPTS; attempt++) {
+        for (let attempt = 1; attempt <= SORA_MAX_ATTEMPTS; attempt++) {
           if (attempt > 1) {
             retriesUsed = attempt - 1;
-            const backoffMs = attempt === 2 ? 10_000 : 15_000; // 10s then 15s
-            console.log(`[VideoQueue] Sora attempt ${attempt}/${MAX_SORA_ATTEMPTS} starting after ${backoffMs}ms backoff (creation=${creationId})`);
+            const backoffMs = SORA_RETRY_BACKOFF_MS[attempt - 1]; // 10s then 15s
+            console.log(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} starting after ${backoffMs}ms backoff (creation=${creationId})`);
             await db.update(schema.creations).set({
               metadata: { ...meta, pipeline_trace: `sora_retry_${retriesUsed}`, retryCount: retriesUsed },
             }).where(eq(schema.creations.id, creationId));
@@ -149,7 +157,7 @@ export function startVideoQueueWorker(): void {
 
           soraResult = await soraVideoService.generateVideo(prompt, { userId });
           if (soraResult.success && soraResult.videoPath) break;
-          console.warn(`[VideoQueue] Sora attempt ${attempt}/${MAX_SORA_ATTEMPTS} failed: ${soraResult.error || 'no video path'} (creation=${creationId})`);
+          console.warn(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} failed: ${soraResult.error || 'no video path'} (creation=${creationId})`);
         }
 
         if (!soraResult?.success || !soraResult.videoPath) {
