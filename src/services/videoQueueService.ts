@@ -6,6 +6,7 @@
 
 import { db, schema } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
+import type { SoraGenerationResult } from './soraVideoService.js';
 
 // We import the pipeline function dynamically to avoid circular deps
 let executeVideoPipeline: Function | null = null;
@@ -126,12 +127,40 @@ export function startVideoQueueWorker(): void {
       console.log(`[VideoQueue] Starting Sora for ${creationId}`);
 
       try {
-        // Sora
-        const soraResult = await soraVideoService.generateVideo(prompt, { userId });
-        if (!soraResult.success || !soraResult.videoPath) {
+        // ── Sora (with automatic retry on upstream flake) ──────────────
+        // Sora's API intermittently returns status:failed ~55-90s into
+        // generation. Retry up to 2 additional attempts with a short
+        // backoff before marking the creation failed. FFmpeg/R2 below run
+        // only once, after a successful Sora result — retries never re-run them.
+        const MAX_SORA_ATTEMPTS = 3; // initial + 2 automatic retries
+        let soraResult: SoraGenerationResult | null = null;
+        let retriesUsed = 0;
+
+        for (let attempt = 1; attempt <= MAX_SORA_ATTEMPTS; attempt++) {
+          if (attempt > 1) {
+            retriesUsed = attempt - 1;
+            const backoffMs = attempt === 2 ? 10_000 : 15_000; // 10s then 15s
+            console.log(`[VideoQueue] Sora attempt ${attempt}/${MAX_SORA_ATTEMPTS} starting after ${backoffMs}ms backoff (creation=${creationId})`);
+            await db.update(schema.creations).set({
+              metadata: { ...meta, pipeline_trace: `sora_retry_${retriesUsed}`, retryCount: retriesUsed },
+            }).where(eq(schema.creations.id, creationId));
+            await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+          }
+
+          soraResult = await soraVideoService.generateVideo(prompt, { userId });
+          if (soraResult.success && soraResult.videoPath) break;
+          console.warn(`[VideoQueue] Sora attempt ${attempt}/${MAX_SORA_ATTEMPTS} failed: ${soraResult.error || 'no video path'} (creation=${creationId})`);
+        }
+
+        if (!soraResult?.success || !soraResult.videoPath) {
           await db.update(schema.creations).set({
             status: 'failed',
-            metadata: { ...meta, error: soraResult.error || 'Sora failed', pipeline_trace: 'sora_failed' },
+            metadata: {
+              ...meta,
+              error: soraResult?.error || 'Sora failed',
+              pipeline_trace: 'sora_failed',
+              retryCount: retriesUsed,
+            },
           }).where(eq(schema.creations.id, creationId));
           return;
         }
@@ -184,7 +213,13 @@ export function startVideoQueueWorker(): void {
         await db.update(schema.creations).set({
           status: 'completed',
           fileUrl: videoUrl,
-          metadata: { ...meta, aiProvider: 'sora-2', pipeline_trace: 'completed', ...(r2Key ? { r2Key } : {}) },
+          metadata: {
+            ...meta,
+            aiProvider: 'sora-2',
+            pipeline_trace: 'completed',
+            ...(retriesUsed > 0 ? { soraRetries: retriesUsed } : {}),
+            ...(r2Key ? { r2Key } : {}),
+          },
         }).where(eq(schema.creations.id, creationId));
 
         // Approval
