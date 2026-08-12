@@ -1084,6 +1084,22 @@ router.get('/trace', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/studio/openai-diag — Quick OpenAI connectivity check ──────
+router.get('/openai-diag', async (_req: Request, res: Response) => {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return res.json({ ok: false, error: 'OPENAI_API_KEY not set in env' });
+  try {
+    const r = await fetch('https://api.openai.com/v1/models', {
+      headers: { 'Authorization': `Bearer ${key}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    const text = await r.text().catch(() => '');
+    return res.json({ ok: r.ok, status: r.status, preview: text.slice(0, 300) });
+  } catch (e: any) {
+    return res.json({ ok: false, error: e.message || String(e) });
+  }
+});
+
 // ─── GET /api/studio/sora-test ──────────────────────────────────────────
 // Direct Sora test — returns result synchronously. Use this to verify
 // the Sora API works before debugging the full pipeline.
