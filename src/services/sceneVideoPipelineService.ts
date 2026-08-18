@@ -131,7 +131,7 @@ export class SceneVideoPipelineService {
     try { let localPath:string; let mime='video/mp4';
       if(scene.visualType==='still'){const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
       else {const result=await soraVideoService.generateVideo(scene.visualPrompt,{userId:undefined}); if(!result.success||!result.videoPath)throw new Error(result.error||'Sora 2 failed'); localPath=result.videoPath;}
-      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { const audio = await this.generateAudio(scene.narration,userId,scene.id); audioUrl = audio.url; audioLocalPath = audio.localPath; }
+      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
@@ -140,7 +140,10 @@ export class SceneVideoPipelineService {
   private async generateAudio(text:string,userId:string,sceneId:string):Promise<{url?:string;localPath:string}> {
     const key=process.env.OPENAI_API_KEY; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true}); const localPath=path.join(dir,`${sceneId}.mp3`);
     if(!key) return {localPath};
-    const response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
+    // NOTE: OpenAI's /v1/audio/speech only accepts tts-1, tts-1-hd, gpt-4o-mini-tts.
+    // 'gpt-audio' is NOT a valid speech model (it 404s) — it's only our internal
+    // provider tag. gpt-4o-mini-tts needs no special access and sounds the best.
+    const response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-4o-mini-tts',voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
     if(!response.ok) throw new Error(`GPT Audio ${response.status}`); fs.writeFileSync(localPath,Buffer.from(await response.arrayBuffer())); let url:string|undefined;
     if(r2Storage.isAvailable){const copyPath=`${localPath}.r2-upload`; fs.copyFileSync(localPath,copyPath); const up=await r2Storage.uploadLocalFile(copyPath,userId,'video-scenes/audio','audio/mpeg'); url=up.url;} return {url,localPath};
   }
