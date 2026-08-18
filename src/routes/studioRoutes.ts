@@ -404,7 +404,11 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // ── Single-Shot Pipeline ─────────────────────────────────────────
 
-        // Quota check — rolling 7-day window, no subscription table needed
+        // Quota check — rolling 7-day window, no subscription table needed.
+        // NOTE: Customize Video creations are stored with type='enhanced_video'
+        // (the router classification 'video_creation' lives in metadata, not the
+        // creations.type column), so count 'enhanced_video' here or the counter
+        // always reads 0 and the 7/week limit never blocks.
         let videoCount = 0;
         try {
           const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -412,7 +416,7 @@ router.post('/process', async (req: Request, res: Response) => {
             .from(schema.creations)
             .where(and(
               eq(schema.creations.userId, resolvedUserId),
-              eq(schema.creations.type, 'video_creation'),
+              eq(schema.creations.type, 'enhanced_video'),
               gte(schema.creations.createdAt, sevenDaysAgo)
             ));
           videoCount = Number(countResult?.count ?? 0);
