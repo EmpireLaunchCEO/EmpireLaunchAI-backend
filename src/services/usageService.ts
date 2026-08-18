@@ -1,14 +1,29 @@
 import { db, schema } from '../db/index.js';
-import { eq, and, gte, sql } from 'drizzle-orm';
+import { eq, and, gte, count, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
-const { usageLogs, users } = schema;
+const { usageLogs, users, creations } = schema;
+
+// Postgres stores user ids as UUID columns. Guard every DB query with this so a
+// non-UUID sentinel ('anonymous', 'system', '') never reaches Postgres and
+// throws `invalid input syntax for type uuid: "..."` (which used to be caught
+// silently, breaking quota tracking for those requests).
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(value: string): boolean {
+  return typeof value === 'string' && UUID_REGEX.test(value);
+}
 
 export class UsageService {
   /**
    * Tracks a new usage event.
    */
   async logUsage(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'customize_video' | 'edits', metadata?: any) {
+    // Never attempt a DB write / FK insert with a non-UUID userId (usage_logs.user_id
+    // is a UUID FK). Unidentified callers simply have no quota attributable to them.
+    if (!isValidUuid(userId)) {
+      console.warn(`[UsageService] Skipping usage log for non-UUID userId "${userId}" (type=${type})`);
+      return;
+    }
     try {
       await db.insert(usageLogs).values({
         id: uuidv4(),
@@ -28,6 +43,17 @@ export class UsageService {
    * The app owner (Staci) has unlimited usage on everything.
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
+    // Unidentified / non-UUID caller — never run a Postgres query with the raw
+    // value (it would throw a uuid cast error). There is no user row to count
+    // usage against, so report the full allowance for the type (never crash).
+    if (!isValidUuid(userId)) {
+      console.warn(`[UsageService] Quota lookup with non-UUID userId "${userId}" (type=${type}) — returning full allowance`);
+      if (type === 'faceless' || type === 'enhanced_video' || type === 'edits') return 'unlimited';
+      if (type === 'high_res_design') return 50;
+      if (type === 'neural_twin' || type === 'customize_video') return 7;
+      return 3;
+    }
+
     // Owner override — unlimited on everything
     if (await this.isOwner(userId)) {
       return 'unlimited';
@@ -76,6 +102,21 @@ export class UsageService {
     }
 
     try {
+      if (type === 'customize_video') {
+        // Customize Video creations are stored in `creations` with type
+        // 'enhanced_video'. Count those within the period instead of usage_logs
+        // (which is never written for customize_video) so the 7/week quota and
+        // the client-facing counter both reflect real usage.
+        const [result] = await db.select({ count: count() })
+          .from(creations)
+          .where(and(
+            eq(creations.userId, userId),
+            eq(creations.type, 'enhanced_video'),
+            gte(creations.createdAt, periodStart)
+          ));
+        return Math.max(0, limit - Number(result?.count ?? 0));
+      }
+
       const logs = await db.select()
         .from(usageLogs)
         .where(
@@ -120,6 +161,7 @@ export class UsageService {
   private ownerCache = new Set<string>();
   private async isOwner(userId: string): Promise<boolean> {
     if (this.ownerCache.has(userId)) return true;
+    if (!isValidUuid(userId)) return false;
     try {
       const [user] = await db.select({ email: users.email })
         .from(users)
