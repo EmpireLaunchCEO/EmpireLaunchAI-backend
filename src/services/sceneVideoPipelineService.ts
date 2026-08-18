@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
@@ -30,7 +31,28 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
     );
   });
 }
-function renderClip(input: string, output: string, duration: number, audio?: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(input); if(audio) cmd.input(audio).outputOptions(['-map 0:v:0','-map 1:a:0','-shortest']); cmd.loop(duration).videoCodec('libx264').size('1080x1920').audioCodec('aac').outputOptions('-pix_fmt yuv420p').on('end',()=>resolve()).on('error',reject).save(output); }); }
+function renderClip(input: string, output: string, duration: number, audio?: string): Promise<void> {
+  return new Promise((resolve,reject)=>{
+    // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
+    // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
+    const isImage = /\.(png|jpe?g|webp|gif)$/i.test(input);
+    const args: string[] = [];
+    if (isImage) args.push('-loop','1','-i',input);
+    else args.push('-i',input);
+    if (audio) args.push('-i',audio);
+    args.push('-map','0:v:0');
+    if (audio) args.push('-map','1:a:0','-shortest');
+    args.push('-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2');
+    args.push('-t',String(duration));
+    args.push('-c:v','libx264','-pix_fmt','yuv420p');
+    if (audio) args.push('-c:a','aac');
+    args.push('-y',output);
+    execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
+      if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      else resolve();
+    });
+  });
+}
 function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(); inputs.forEach(i=>cmd.input(i)); cmd.mergeToFile(output,path.dirname(output)).on('end',()=>resolve()).on('error',reject); }); }
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const candidates = Array.isArray(raw?.scenes) ? raw.scenes : [];
