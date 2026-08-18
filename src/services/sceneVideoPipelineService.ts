@@ -142,9 +142,15 @@ export class SceneVideoPipelineService {
     if(!key) return {localPath};
     // NOTE: OpenAI's /v1/audio/speech only accepts tts-1, tts-1-hd, gpt-4o-mini-tts.
     // 'gpt-audio' is NOT a valid speech model (it 404s) — it's only our internal
-    // provider tag. gpt-4o-mini-tts needs no special access and sounds the best.
-    const response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-4o-mini-tts',voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
-    if(!response.ok) throw new Error(`GPT Audio ${response.status}`); fs.writeFileSync(localPath,Buffer.from(await response.arrayBuffer())); let url:string|undefined;
+    // provider tag. Different keys have different model access (a 403 on one model
+    // does not mean the others are blocked), so fall through the chain until one works.
+    const ttsModels=['gpt-4o-mini-tts','tts-1','tts-1-hd'];
+    let response:Response|null=null; let lastStatus=0;
+    for(const model of ttsModels){
+      response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model,voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
+      if(response.ok) break; lastStatus=response.status; trace(`scene_audio_model_failed model=${model} status=${response.status} sceneId=${sceneId}`);
+    }
+    if(!response||!response.ok) throw new Error(`GPT Audio ${lastStatus}`); fs.writeFileSync(localPath,Buffer.from(await response.arrayBuffer())); let url:string|undefined;
     if(r2Storage.isAvailable){const copyPath=`${localPath}.r2-upload`; fs.copyFileSync(localPath,copyPath); const up=await r2Storage.uploadLocalFile(copyPath,userId,'video-scenes/audio','audio/mpeg'); url=up.url;} return {url,localPath};
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
