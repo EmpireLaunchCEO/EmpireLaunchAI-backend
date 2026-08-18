@@ -138,12 +138,19 @@ export class SceneVideoPipelineService {
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   private async generateAudio(text:string,userId:string,sceneId:string):Promise<{url?:string;localPath:string}> {
-    const key=process.env.OPENAI_API_KEY; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true}); const localPath=path.join(dir,`${sceneId}.mp3`);
-    if(!key) return {localPath};
-    // NOTE: OpenAI's /v1/audio/speech only accepts tts-1, tts-1-hd, gpt-4o-mini-tts.
-    // 'gpt-audio' is NOT a valid speech model (it 404s) — it's only our internal
-    // provider tag. Different keys have different model access (a 403 on one model
-    // does not mean the others are blocked), so fall through the chain until one works.
+    const key=process.env.OPENAI_API_KEY; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true});
+    if(!key) return {localPath:path.join(dir,`${sceneId}.mp3`)};
+    const uploadAudio=async(lp:string,mime:string):Promise<string|undefined>=>{ if(!r2Storage.isAvailable) return undefined; try{ await fs.promises.copyFile(lp,`${lp}.r2-upload`); const up=await r2Storage.uploadLocalFile(`${lp}.r2-upload`,userId,'video-scenes/audio',mime); return up.url; }catch{ return undefined; } };
+    // ---- Attempt 1: gpt-audio (owner's explicitly-enabled model) via Chat Completions ----
+    // gpt-audio does NOT map to /v1/audio/speech (404 "Invalid URL"). It is an audio
+    // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
+    // Returns message.audio.data as base64 WAV. Verified 200 in prod ownership checks.
+    try {
+      const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',modalities:['text','audio'],audio:{voice:'alloy',format:'wav'},messages:[{role:'user',content:text}]}),signal:AbortSignal.timeout(90000)});
+      if(r.ok){ const j=await r.json(); const aud=j?.choices?.[0]?.message?.audio; if(aud&&aud.data){ const buf=Buffer.from(aud.data as string,'base64'); if(buf.length>0){ const lp=path.join(dir,`${sceneId}.wav`); fs.writeFileSync(lp,buf); trace(`scene_audio_model_ok model=gpt-audio sceneId=${sceneId}`); const url=await uploadAudio(lp,'audio/wav'); return {url,localPath:lp}; } } trace(`scene_audio_model_failed model=gpt-audio status=no_audio sceneId=${sceneId}`); } else { trace(`scene_audio_model_failed model=gpt-audio status=${r.status} sceneId=${sceneId}`); }
+    } catch(e:any){ trace(`scene_audio_gptaudio_err sceneId=${sceneId} err=${e?.message}`); }
+    // ---- Attempt 2: classic TTS speech chain (/v1/audio/speech -> mp3) ----
+    const localPath=path.join(dir,`${sceneId}.mp3`);
     const ttsModels=['gpt-4o-mini-tts','tts-1','tts-1-hd'];
     let response:Response|null=null; let lastStatus=0;
     for(const model of ttsModels){
