@@ -150,6 +150,46 @@ export class SceneVideoPipelineService {
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+      // ── Deliver to Operations page: mirror single-shot path — create a `creations`
+      //    row (type 'video', status 'completed') so the project's final video shows up in
+      //    GET /api/studio/assets AND an approvals row so it appears in the approval feed.
+      //    Scene projects previously wrote ONLY to video_projects/video_scenes, so completed
+      //    videos never surfaced on the Operations page. (Owner: "delivered to Operations page".)
+      try {
+        const creationId = uuidv4();
+        const projectRow = projectId;
+        let projectTitle = 'Scene-Based Video';
+        try {
+          const [pRow] = await db.select({ title: schema.videoProjects.title }).from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId));
+          if (pRow?.title) projectTitle = pRow.title;
+        } catch {}
+        await db.insert(schema.creations).values({
+          id: creationId,
+          userId,
+          type: 'video',
+          title: projectTitle,
+          status: 'completed',
+          fileUrl: finalUrl,
+          metadata: { source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg' },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        trace(`project_library_creation project=${projectId} creation=${creationId}`);
+        try {
+          await db.insert(schema.approvals).values({
+            id: uuidv4(),
+            userId,
+            type: 'video',
+            status: 'completed',
+            payload: { assetId: creationId, title: projectTitle, videoUrl: finalUrl, platforms: [], status: 'completed' },
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        } catch (apprErr: any) { trace(`scene_approval_insert_failed project=${projectId} err=${apprErr?.message}`); }
+      } catch (libErr: any) {
+        // Library/approval persistence must never fail the pipeline — log and continue.
+        trace(`scene_library_insert_failed project=${projectId} err=${libErr?.message}`);
+      }
     } catch(assemblyErr:any) {
       trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
       await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));

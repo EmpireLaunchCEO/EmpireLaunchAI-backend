@@ -812,13 +812,14 @@ router.get('/assets', async (req: Request, res: Response) => {
     const resolvedUserId = await resolveUserId(String(uid));
     if (!resolvedUserId) return res.status(400).json({ status: 'error', error: 'User not found' });
 
+    // Fetch single-shot creations
     const creations = await db.select()
       .from(schema.creations)
       .where(eq(schema.creations.userId, resolvedUserId))
       .orderBy(desc(schema.creations.createdAt))
       .limit(50);
 
-    const assets = await Promise.all(creations.map(async c => {
+    const creationAssets = await Promise.all(creations.map(async c => {
       const fileUrl = c.fileUrl ? await refreshR2Url(c.fileUrl) : null;
       const thumbnailUrl = c.thumbnailUrl ? await refreshR2Url(c.thumbnailUrl) : null;
       return {
@@ -830,8 +831,40 @@ router.get('/assets', async (req: Request, res: Response) => {
         thumbnailUrl,
         metadata: c.metadata,
         createdAt: c.createdAt,
+        pipeline: 'single-shot',
       };
     }));
+
+    // Also fetch completed scene-based video projects
+    const projects = await db.select()
+      .from(schema.videoProjects)
+      .where(and(
+        eq(schema.videoProjects.userId, resolvedUserId),
+        eq(schema.videoProjects.status, 'completed')
+      ))
+      .orderBy(desc(schema.videoProjects.createdAt))
+      .limit(25);
+
+    const projectAssets = await Promise.all(projects.map(async p => {
+      const fileUrl = p.finalVideoUrl ? await refreshR2Url(p.finalVideoUrl) : null;
+      const thumbnailUrl = p.thumbnailUrl ? await refreshR2Url(p.thumbnailUrl) : null;
+      return {
+        id: p.id,
+        type: 'enhanced_video',
+        title: p.title,
+        status: p.status,
+        fileUrl,
+        thumbnailUrl,
+        metadata: { ...((p.metadata || {}) as any), sceneCount: p.sceneCount, totalDuration: p.totalDuration },
+        createdAt: p.createdAt,
+        pipeline: 'scene-based',
+      };
+    }));
+
+    // Merge and sort by createdAt descending
+    const assets = [...creationAssets, ...projectAssets]
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      .slice(0, 50);
 
     res.json({ status: 'ok', assets });
   } catch (err: any) {
