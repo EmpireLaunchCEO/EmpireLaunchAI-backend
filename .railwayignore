@@ -1,0 +1,32 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.*
+
+# Build output
+dist
+dist/
+.next/
+build_output*.txt
+build_output*.log
+build_errors*.txt
+build_attempt_*.log
+build_vercel_debug*.log
+
+# Environment & secrets
+.env
+.env*
+*.pem
+
+# Git & tooling
+.git
+.gitignore
+.dockerignore
+.railwayignore
+
+# Logs, OS, misc
+*.log
+.DS_Store
+Thumbs.db
+all_tasks.json
+REBUILD.txt
