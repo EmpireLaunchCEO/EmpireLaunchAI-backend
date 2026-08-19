@@ -11,6 +11,12 @@ import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; }
+/** Sora 2 intermittently reports status:failed ~55-90s into generation. Scene motion
+ *  scenes retry up to 2 extra attempts with short backoff (mirrors the single-shot
+ *  Customize Video worker in videoQueueService.ts). Worst case: 3 × ~90s + 25s backoff
+ *  ≈ 5 min, inside the 7-min per-scene deadline. */
+const SCENE_SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
+const SCENE_SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempts 1/2/3
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
 /** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -153,7 +159,24 @@ export class SceneVideoPipelineService {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       if(scene.visualType==='still'){const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
-      else {const result=await soraVideoService.generateVideo(scene.visualPrompt,{userId:undefined}); if(!result.success||!result.videoPath)throw new Error(result.error||'Sora 2 failed'); localPath=result.videoPath;}
+      else {
+        // Motion scenes: Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
+        let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
+        let retriesUsed = 0;
+        for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
+          if (attempt > 1) {
+            retriesUsed = attempt - 1;
+            const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
+            trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+            await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+          }
+          soraResult = await soraVideoService.generateVideo(scene.visualPrompt, { userId: undefined });
+          if (soraResult.success && soraResult.videoPath) break;
+          trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
+        }
+        if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
+        localPath = soraResult.videoPath;
+      }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
