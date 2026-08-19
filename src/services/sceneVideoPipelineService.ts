@@ -86,10 +86,11 @@ export class SceneVideoPipelineService {
     if (!skipGeneration) {
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
-      // the worker boundary (4 min per scene — Sora polls up to ~5 min max, image 3 min).
+      // the worker boundary (7 min per scene — image gen up to 3 min + gpt-audio +
+      // R2 uploads observed at ~5.5 min for still+narration; Sora polls up to ~5 min).
       const outcomes = await Promise.allSettled(scenes.map(scene => withDeadline(
         this.processScene(scene, userId),
-        4 * 60 * 1000,
+        7 * 60 * 1000,
         `Scene ${scene.sceneNumber}`,
       )));
       const rejected = outcomes.filter(o => o.status === 'rejected').length;
@@ -100,7 +101,7 @@ export class SceneVideoPipelineService {
         // non-completed scenes only — never clobber a scene that already finished.
         await db.update(schema.videoScenes).set({
           status: 'failed',
-          metadata: { error: 'Scene generation timed out after 4 minutes' },
+          metadata: { error: 'Scene generation timed out after 7 minutes' },
           updatedAt: new Date(),
         }).where(and(
           eq(schema.videoScenes.projectId, projectId),
@@ -191,13 +192,31 @@ export class SceneVideoPipelineService {
    * always resolves to a terminal state. Cheap + deterministic — we don't try to
    * resume mid-flight work, since the provider requests were killed with the process.
    */
-  async recoverStaleProjects(): Promise<number> {
-    const stale = await db.select().from(schema.videoProjects).where(or(
+  async recoverStaleProjects(minAgeMs = 0): Promise<number> {
+    const candidates = await db.select().from(schema.videoProjects).where(or(
       eq(schema.videoProjects.status, 'generating'),
       eq(schema.videoProjects.status, 'assembling'),
     ));
+    if (candidates.length === 0) return 0;
+    let stale = candidates;
+    if (minAgeMs > 0) {
+      // Periodic tick: only fail projects that have been idle for the grace period.
+      // A healthy pipeline bumps scene/project updatedAt as scenes start/complete, so
+      // anything younger than the cutoff is actively being worked — never fail it
+      // (observed false positive: still+narration scene legitimately runs ~5.5 min,
+      // the 5-min tick killed it 9ms after scene_complete).
+      const cutoff = new Date(Date.now() - minAgeMs);
+      const fresh: typeof candidates = [];
+      stale = [];
+      for (const p of candidates) {
+        const scenes = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId, p.id));
+        const lastActivity = scenes.reduce((max: Date, s: any) => (s.updatedAt > max ? s.updatedAt : max), p.updatedAt);
+        if (lastActivity >= cutoff) fresh.push(p); else stale.push(p);
+      }
+      trace(`watchdog_aged candidates=${candidates.length} fresh=${fresh.length} stale=${stale.length}`);
+    }
     if (stale.length === 0) return 0;
-    const ids = stale.map(p => p.id);
+    const ids = stale.map((p: any) => p.id);
     await db.update(schema.videoProjects).set({
       status: 'failed',
       metadata: { error: 'Pipeline interrupted by service restart — regenerate this video', recoveredBy: 'resume-on-boot' },
@@ -219,16 +238,18 @@ export class SceneVideoPipelineService {
     return stale.length;
   }
   private watchdogStarted = false;
-  /** Start the periodic stale-project watchdog (Railway-safe: setInterval, no long setTimeout). */
-  startWatchdog(intervalMs = 5 * 60 * 1000): void {
+  /** Start the periodic stale-project watchdog (Railway-safe: setInterval, no long setTimeout).
+   *  Boot run fails everything stranded (process just restarted — nothing can be actively
+   *  working). Periodic ticks use an age grace so a healthy in-flight pipeline is never killed. */
+  startWatchdog(intervalMs = 5 * 60 * 1000, staleGraceMs = 9 * 60 * 1000): void {
     if (this.watchdogStarted) return;
     this.watchdogStarted = true;
     // Run once immediately after boot, then on the interval.
     this.recoverStaleProjects().catch(e => trace(`watchdog_initial_failed error=${e.message}`));
     setInterval(() => {
-      this.recoverStaleProjects().catch(e => trace(`watchdog_tick_failed error=${e.message}`));
+      this.recoverStaleProjects(staleGraceMs).catch(e => trace(`watchdog_tick_failed error=${e.message}`));
     }, intervalMs);
-    trace(`watchdog_started interval=${intervalMs}ms`);
+    trace(`watchdog_started interval=${intervalMs}ms grace=${staleGraceMs}ms`);
   }
 }
 export const sceneVideoPipelineService = new SceneVideoPipelineService();
