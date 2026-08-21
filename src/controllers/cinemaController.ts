@@ -46,6 +46,23 @@ export const upload = multer({
 
 // ─── Controller ─────────────────────────────────────────────────────────────
 
+/**
+ * Resolve the acting user id for unauthenticated cinema flows. These routes
+ * are intentionally fail-open (the Studio boxes call them before auth), so we
+ * pull the real user from the transport the frontend actually sends: the
+ * `x-user-id` header, or body/query `userId`. Without it we'd always persist
+ * Neural Twin / enhanced creations under the sentinel `system`/`anonymous`,
+ * which never surfaces on the Operations page.
+ */
+function resolveUserId(req: Request): string {
+  const fromAuth = (req as any).user?.id;
+  const fromBody = (req as any).body?.userId;
+  const fromQuery = (req as any).query?.userId as string | undefined;
+  const fromHeader = (req as any).headers?.['x-user-id'] as string | undefined;
+  const uid = fromAuth || fromBody || fromQuery || fromHeader || '';
+  const sentinels = /^(system|anonymous|)$/i;
+  return sentinels.test(String(uid).trim()) ? '' : String(uid).trim();
+}
 export class CinemaController {
 
   /**
@@ -68,7 +85,7 @@ export class CinemaController {
 
       // Store securely
       const storedPath = cinemaEngineService.storeUpload(filePath, 'photo');
-      const userId = (req as any).user?.id || 'anonymous';
+      const userId = resolveUserId(req) || 'anonymous';
 
       // Save to creations table so it shows up in Operations page
       await db.insert(schema.creations).values({
@@ -111,7 +128,7 @@ export class CinemaController {
       }
 
       const storedPath = cinemaEngineService.storeUpload(filePath, 'video');
-      const userId = (req as any).user?.id || 'anonymous';
+      const userId = resolveUserId(req) || 'anonymous';
 
       // Save to creations table so it shows up in Operations page
       await db.insert(schema.creations).values({
@@ -143,7 +160,7 @@ export class CinemaController {
   async createNeuralTwin(req: Request, res: Response): Promise<void> {
     try {
       const { photoPath, script, voiceStyle } = req.body;
-      const userId = (req as any).user?.id || 'system';
+      const userId = resolveUserId(req) || 'system';
 
       if (!photoPath && !req.body.photoUrl) {
         res.status(400).json({ error: 'photoPath or photoUrl and script are required' });
@@ -187,7 +204,7 @@ export class CinemaController {
   async enhanceVideo(req: Request, res: Response): Promise<void> {
     try {
       const { videoPath } = req.body;
-      const userId = (req as any).user?.id || 'system';
+      const userId = resolveUserId(req) || 'system';
 
       if (!videoPath) {
         res.status(400).json({ error: 'videoPath is required' });
@@ -224,7 +241,7 @@ export class CinemaController {
    */
   async getUsage(req: Request, res: Response): Promise<void> {
     try {
-      const userId = (req as any).user?.id || 'anonymous';
+      const userId = resolveUserId(req) || 'anonymous';
       const neuralRemaining = await usageService.getDailyRemaining(userId, 'neural_twin');
       const enhancedRemaining = await usageService.getDailyRemaining(userId, 'enhanced_video');
       const designRemaining = await usageService.getDailyRemaining(userId, 'high_res_design');

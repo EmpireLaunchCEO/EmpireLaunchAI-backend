@@ -9,6 +9,7 @@ import { soraVideoService } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
+import { resolveVoice } from './voiceOptions.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; sourceImages?: string[]; }
 /** Sora 2 intermittently reports status:failed ~55-90s into generation. Scene motion
@@ -90,13 +91,19 @@ export class SceneVideoPipelineService {
   async processProject(projectId:string,userId:string,skipGeneration=false):Promise<void> {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
+    // Pull the project's voiceover selection (persisted by createProject) so scene
+    // narration is voiced with the user's gender/tone instead of a hardcoded alloy.
+    const [projectRow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+    const pmeta = ((projectRow?.metadata as any) || {});
+    const voice = pmeta.voice as 'female' | 'male' | undefined;
+    const tone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
     if (!skipGeneration) {
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
       // the worker boundary (7 min per scene — image gen up to 3 min + gpt-audio +
       // R2 uploads observed at ~5.5 min for still+narration; Sora polls up to ~5 min).
       const outcomes = await Promise.allSettled(scenes.map(scene => withDeadline(
-        this.processScene(scene, userId),
+        this.processScene(scene, userId, voice, tone),
         7 * 60 * 1000,
         `Scene ${scene.sceneNumber}`,
       )));
@@ -196,7 +203,7 @@ export class SceneVideoPipelineService {
       await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
-  async processScene(scene:any,userId:string):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       if(scene.visualType==='still'){const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
@@ -218,13 +225,13 @@ export class SceneVideoPipelineService {
         if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
         localPath = soraResult.videoPath;
       }
-      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
+      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
-  private async generateAudio(text:string,userId:string,sceneId:string):Promise<{url?:string;localPath:string}> {
+  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
     const key=process.env.OPENAI_API_KEY; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true});
     if(!key) return {localPath:path.join(dir,`${sceneId}.mp3`)};
     const uploadAudio=async(lp:string,mime:string):Promise<string|undefined>=>{ if(!r2Storage.isAvailable) return undefined; try{ await fs.promises.copyFile(lp,`${lp}.r2-upload`); const up=await r2Storage.uploadLocalFile(`${lp}.r2-upload`,userId,'video-scenes/audio',mime); return up.url; }catch{ return undefined; } };
@@ -233,22 +240,22 @@ export class SceneVideoPipelineService {
     // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
     // Returns message.audio.data as base64 WAV. Verified 200 in prod ownership checks.
     try {
-      const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',modalities:['text','audio'],audio:{voice:'alloy',format:'wav'},messages:[{role:'user',content:text}]}),signal:AbortSignal.timeout(90000)});
-      if(r.ok){ const j=await r.json(); const aud=j?.choices?.[0]?.message?.audio; if(aud&&aud.data){ const buf=Buffer.from(aud.data as string,'base64'); if(buf.length>0){ const lp=path.join(dir,`${sceneId}.wav`); fs.writeFileSync(lp,buf); trace(`scene_audio_model_ok model=gpt-audio sceneId=${sceneId}`); const url=await uploadAudio(lp,'audio/wav'); return {url,localPath:lp}; } } trace(`scene_audio_model_failed model=gpt-audio status=no_audio sceneId=${sceneId}`); } else { trace(`scene_audio_model_failed model=gpt-audio status=${r.status} sceneId=${sceneId}`); }
+      const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',modalities:['text','audio'],audio:{voice:resolveVoice(voice,tone),format:'mp3'},messages:[{role:'user',content:text}]}),signal:AbortSignal.timeout(90000)});
+      if(r.ok){ const j=await r.json(); const aud=j?.choices?.[0]?.message?.audio; if(aud&&aud.data){ const buf=Buffer.from(aud.data as string,'base64'); if(buf.length>0){ const lp=path.join(dir,`${sceneId}.mp3`); fs.writeFileSync(lp,buf); trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(voice,tone)} sceneId=${sceneId}`); const url=await uploadAudio(lp,'audio/mpeg'); return {url,localPath:lp}; } } trace(`scene_audio_model_failed model=gpt-audio status=no_audio sceneId=${sceneId}`); } else { trace(`scene_audio_model_failed model=gpt-audio status=${r.status} sceneId=${sceneId}`); }
     } catch(e:any){ trace(`scene_audio_gptaudio_err sceneId=${sceneId} err=${e?.message}`); }
     // ---- Attempt 2: classic TTS speech chain (/v1/audio/speech -> mp3) ----
     const localPath=path.join(dir,`${sceneId}.mp3`);
     const ttsModels=['gpt-4o-mini-tts','tts-1','tts-1-hd'];
     let response:Response|null=null; let lastStatus=0;
     for(const model of ttsModels){
-      response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model,voice:'alloy',input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
+      response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model,voice:resolveVoice(voice,tone),input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
       if(response.ok) break; lastStatus=response.status; trace(`scene_audio_model_failed model=${model} status=${response.status} sceneId=${sceneId}`);
     }
     if(!response||!response.ok) throw new Error(`GPT Audio ${lastStatus}`); fs.writeFileSync(localPath,Buffer.from(await response.arrayBuffer())); let url:string|undefined;
     if(r2Storage.isAvailable){const copyPath=`${localPath}.r2-upload`; fs.copyFileSync(localPath,copyPath); const up=await r2Storage.uploadLocalFile(copyPath,userId,'video-scenes/audio','audio/mpeg'); url=up.url;} return {url,localPath};
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
-  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; await this.processScene(scene,userId); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
+  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
   /**
    * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
    * fire-and-forget scene work dies with it and projects can sit in `generating` /
