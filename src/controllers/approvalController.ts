@@ -44,11 +44,20 @@ export const createApproval = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: type, description' });
     }
 
+    // Shared voiceover controls + screenshot source images (Faceless box).
+    // Merged into payload so downstream consumers read them; only present if sent.
+    const enrichedPayload = {
+      ...(payload || {}),
+      ...(req.body.voice === 'female' || req.body.voice === 'male' ? { voice: req.body.voice } : {}),
+      ...(['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? { tone: req.body.tone } : {}),
+      ...(Array.isArray(req.body.sourceImages) && req.body.sourceImages.length ? { sourceImages: req.body.sourceImages } : {}),
+    };
+
     const approval = await approvalService.createRequest(
       userId,
       type,
       description,
-      payload || {}
+      enrichedPayload
     );
 
     console.log(`Approval created: ${type} for user ${userId}`);
