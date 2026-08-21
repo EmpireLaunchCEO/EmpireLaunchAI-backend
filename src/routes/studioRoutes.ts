@@ -30,6 +30,10 @@ interface StudioRequest {
   request: string;
   attachments?: string[];
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  duration?: number;                        // Customize Video: requested duration (seconds)
+  voice?: 'female' | 'male';                // Voiceover gender (shared control)
+  tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';  // Voiceover tone
+  sourceImages?: string[];                  // Screenshot/image uploads as source visuals
 }
 
 interface StudioResponse {
@@ -105,6 +109,9 @@ interface VideoPipelinePayload {
   sourceImages: string[];
   resolvedUserId: string;
   brandContext: any;
+  duration?: number;
+  voice?: string;
+  tone?: string;
 }
 
 async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void> {
@@ -454,11 +461,25 @@ router.post('/process', async (req: Request, res: Response) => {
           ? [decision.parameters.platform]
           : ['tiktok', 'instagram_reel', 'youtube_shorts'];
 
+        // Shared voiceover + duration + screenshot controls (Customize Video).
+        // Persisted in metadata so the queue worker reads them from the job.
+        const duration = Number.isFinite(Number(req.body.duration)) ? Number(req.body.duration) : undefined;
+        const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
+        const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
+
         try {
           await db.insert(schema.creations).values({
             id: creationId, userId: resolvedUserId, type: 'enhanced_video',
             title: decision.prompt.slice(0, 60), status: 'processing',
-            metadata: { classification: 'video_creation', prompt: decision.prompt, platforms, pipeline_trace: 'pending' },
+            metadata: {
+              classification: 'video_creation',
+              prompt: decision.prompt,
+              platforms,
+              pipeline_trace: 'pending',
+              ...(duration ? { duration } : {}),
+              ...(voice || tone ? { voiceover: { voice, tone } } : {}),
+              ...(sourceImages.length ? { sourceImages } : {}),
+            },
           });
         } catch (creationErr: any) {
           console.error('[StudioRoute] Failed to insert creation record:', creationErr.message);
@@ -956,8 +977,25 @@ router.post('/video-project', async (req: Request, res: Response) => {
     if (!resolvedUserId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' });
     const { title, idea, platforms, style, script } = req.body;
     const durationTarget = Number(req.body.durationTarget || req.body.duration || 30);
+    // Shared voiceover controls (same options as Customize Video) + screenshot source images.
+    const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
+    const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
+    const sourceImages = Array.isArray(req.body.sourceImages)
+      ? req.body.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
+      : req.body.sourceImages;
     if (!idea || typeof idea !== 'string') return res.status(400).json({ status: 'error', error: 'idea is required' });
-    const projectId = await sceneVideoPipelineService.createProject({ userId: resolvedUserId, title: title || idea.slice(0, 80), idea, platforms, style, durationTarget, script });
+    const projectId = await sceneVideoPipelineService.createProject({
+      userId: resolvedUserId,
+      title: title || idea.slice(0, 80),
+      idea,
+      platforms,
+      style,
+      durationTarget,
+      script,
+      voice,
+      tone,
+      sourceImages,
+    });
     return res.status(202).json({ status: 'processing', projectId });
   } catch (error: any) { process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`); return res.status(500).json({ status: 'error', error: error.message }); }
 });
