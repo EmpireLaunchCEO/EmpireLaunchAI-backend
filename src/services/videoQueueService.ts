@@ -132,7 +132,14 @@ export function startVideoQueueWorker(): void {
       const prompt = meta?.prompt || 'Generate a video';
       const platforms = meta?.platforms || ['tiktok'];
       const duration = typeof meta?.duration === 'number' ? meta.duration : undefined;
-      const voiceover = meta?.voiceover as { gender?: 'female'|'male'; tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto' } | undefined;
+      const voiceoverRaw = (meta?.voiceover || meta?.voiceoverConfig || {}) as {
+        voice?: 'female' | 'male';
+        gender?: 'female' | 'male';
+        tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';
+      } | undefined;
+      const voiceover = voiceoverRaw && (voiceoverRaw.voice || voiceoverRaw.gender || voiceoverRaw.tone)
+        ? { gender: (voiceoverRaw.voice || voiceoverRaw.gender) as 'female' | 'male' | undefined, tone: voiceoverRaw.tone }
+        : undefined;
       const userId = job.userId;
 
       console.log(`[VideoQueue] Starting Sora for ${creationId}`);
