@@ -131,6 +131,8 @@ export function startVideoQueueWorker(): void {
       const creationId = job.id;
       const prompt = meta?.prompt || 'Generate a video';
       const platforms = meta?.platforms || ['tiktok'];
+      const duration = typeof meta?.duration === 'number' ? meta.duration : undefined;
+      const voiceover = meta?.voiceover as { gender?: 'female'|'male'; tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto' } | undefined;
       const userId = job.userId;
 
       console.log(`[VideoQueue] Starting Sora for ${creationId}`);
@@ -155,7 +157,7 @@ export function startVideoQueueWorker(): void {
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
 
-          soraResult = await soraVideoService.generateVideo(prompt, { userId });
+          soraResult = await soraVideoService.generateVideo(prompt, { userId, duration });
           if (soraResult.success && soraResult.videoPath) break;
           console.warn(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} failed: ${soraResult.error || 'no video path'} (creation=${creationId})`);
         }
@@ -200,6 +202,42 @@ export function startVideoQueueWorker(): void {
           console.warn(`[VideoQueue] FFmpeg failed: ${ffmpegErr.message}`);
         }
 
+        // Voiceover (gpt-audio) — if the user selected a voice, generate narration
+        // of the prompt and mux it onto the video so the delivered file has audio.
+        // Uses the same verified chat/completions + mp3 path as scene narration.
+        let voiceoverPath: string | undefined;
+        if (voiceover && (voiceover.gender || voiceover.tone)) {
+          try {
+            const { resolveVoice } = await import('./voiceOptions.js');
+            const { execFile } = await import('child_process');
+            const key = process.env.OPENAI_API_KEY;
+            if (key) {
+              const vr = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: 'gpt-audio', modalities: ['text','audio'], audio: { voice: resolveVoice(voiceover.gender, voiceover.tone), format: 'mp3' }, messages: [{ role: 'user', content: prompt }] }),
+                signal: AbortSignal.timeout(90000),
+              });
+              if (vr.ok) {
+                const j = await vr.json();
+                const aud = j?.choices?.[0]?.message?.audio;
+                if (aud?.data) {
+                  const dir = path.posix? '': ''; // path not imported; use process.cwd
+                  const audioFile = `${soraResult.videoPath}.voice.mp3`;
+                  const fsMod = await import('fs');
+                  fsMod.writeFileSync(audioFile, Buffer.from(aud.data as string, 'base64'));
+                  const muxed = `${soraResult.videoPath}.voiced.mp4`;
+                  await new Promise<void>((resolve, reject) => {
+                    execFile('ffmpeg', ['-y','-i',soraResult.videoPath,'-i',audioFile,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-shortest',muxed], (err) => err ? reject(err) : resolve());
+                  });
+                  if (fsMod.existsSync(muxed)) { soraResult.videoPath = muxed; voiceoverPath = audioFile; fsMod.unlinkSync(audioFile); videoUrl = soraResult.videoPath; }
+                }
+              }
+            }
+          } catch (voErr: any) {
+            console.warn(`[VideoQueue] Voiceover failed: ${voErr.message}`);
+          }
+        }
         // R2 — only upload if we don't already have a remote URL and the file still exists.
         // soraResult.videoUrl is already an R2 signed URL when R2 is configured —
         // never clobber it with a dead local-path fallback.

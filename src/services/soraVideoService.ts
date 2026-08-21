@@ -5,6 +5,7 @@ import { r2Storage } from './r2StorageService.js';
 
 export interface SoraGenerationOptions {
   userId?: string;        // For R2 upload
+  duration?: number;      // seconds the caller wants the video to be (passed to the model; may be approximate)
 }
 
 export interface SoraGenerationResult {
@@ -51,7 +52,7 @@ export class SoraVideoService {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model, prompt }),
+        body: JSON.stringify({ model, prompt, ...(options.duration ? { duration: options.duration } : {}) }),
         signal: AbortSignal.timeout(60000),
       });
 
