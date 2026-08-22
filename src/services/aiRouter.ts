@@ -41,6 +41,8 @@ export interface RouterRequest {
     archetype?: string;
   };
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Durable locked facts from prior sessions (see memoryService.ts). */
+  lockedFacts?: Record<string, any>;
 }
 
 // ─── AI Router Service ───────────────────────────────────────────────────────
@@ -53,7 +55,7 @@ export class AiRouterService {
    * and returns a structured routing decision. Never generates final media.
    */
   async route(request: RouterRequest): Promise<RouterDecision> {
-    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode);
+    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode, request.lockedFacts);
     const userMessage = this.buildUserMessage(request);
 
     try {
@@ -104,7 +106,12 @@ export class AiRouterService {
     };
   }
 
-  private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode']): string {
+  private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode'], lockedFacts?: Record<string, any>): string {
+    const memoryBlock = lockedFacts && Object.keys(lockedFacts).length
+      ? `\nSETTLED DECISIONS (do not re-ask — treat as already confirmed by the user):\n${Object.entries(lockedFacts)
+          .filter(([,v]) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0))
+          .map(([k, v]) => `- ${k}: ${Array.isArray(v) ? v.join(', ') : String(v)}`).join('\n')}\nDo NOT ask about these again. Only ask genuinely NEW questions when real info is still missing.`
+      : '';
     const brandInfo = brandContext
       ? `\nBrand: ${brandContext.name || 'Unknown'}\nNiche: ${brandContext.niche || 'General'}\nTarget: ${brandContext.targetCustomers || 'General audience'}\nGoals: ${brandContext.businessGoals || 'Grow business'}`
       : '';
@@ -116,7 +123,7 @@ export class AiRouterService {
 
     return `You are the EmpireLaunch AI Router — a smart dispatcher that classifies user creative requests and routes them to the correct AI pipeline.
 
-${brandInfo}${consultInstructions}
+${brandInfo}${consultInstructions}${memoryBlock}
 
 YOUR ROLE: Classify the user's request and produce a refined prompt for the downstream AI service. You NEVER generate final images or videos yourself.
 
