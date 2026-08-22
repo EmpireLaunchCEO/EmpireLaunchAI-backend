@@ -6,7 +6,7 @@ import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
-import { eq, and, gte, count, desc, asc } from 'drizzle-orm';
+import { eq, and, gte, count, desc, asc, ne } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
@@ -415,7 +415,9 @@ router.post('/process', async (req: Request, res: Response) => {
         // NOTE: Customize Video creations are stored with type='enhanced_video'
         // (the router classification 'video_creation' lives in metadata, not the
         // creations.type column), so count 'enhanced_video' here or the counter
-        // always reads 0 and the 7/week limit never blocks.
+        // always reads 0 and the 7/week limit never blocks. Failed jobs are
+        // excluded so a transient provider/deploy failure does not permanently
+        // consume a customer's weekly generation allowance.
         let videoCount = 0;
         try {
           const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -424,6 +426,7 @@ router.post('/process', async (req: Request, res: Response) => {
             .where(and(
               eq(schema.creations.userId, resolvedUserId),
               eq(schema.creations.type, 'enhanced_video'),
+              ne(schema.creations.status, 'failed'),
               gte(schema.creations.createdAt, sevenDaysAgo)
             ));
           videoCount = Number(countResult?.count ?? 0);

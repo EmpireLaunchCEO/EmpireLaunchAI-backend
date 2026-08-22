@@ -5,7 +5,7 @@
  */
 
 import { db, schema } from '../db/index.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, lt } from 'drizzle-orm';
 import type { SoraGenerationResult } from './soraVideoService.js';
 
 // ── Sora retry policy ──────────────────────────────────────────────
@@ -16,6 +16,13 @@ import type { SoraGenerationResult } from './soraVideoService.js';
 // call is repeated. Policy per task #26627131 (2 retries, 10-15s backoff).
 const SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
 const SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempt 1/2/3 (10s then 15s)
+
+// A queue job is considered orphaned only after this much inactivity. Every
+// worker state transition refreshes updatedAt, so an in-flight Sora request is
+// not re-queued while it is still making progress.
+const VIDEO_JOB_STALE_MS = 8 * 60 * 1000;
+const VIDEO_QUEUE_RECOVERY_INTERVAL_MS = 60 * 1000;
+const MAX_RECOVERY_BATCH = 25;
 
 // We import the pipeline function dynamically to avoid circular deps
 let executeVideoPipeline: Function | null = null;
@@ -54,22 +61,100 @@ function extractR2Key(storedUrl: string): string | null {
 }
 
 let workerStarted = false;
+let recoveryInFlight = false;
+
+type CreationMetadata = Record<string, any>;
+
+function normalizeMetadata(value: unknown): CreationMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as CreationMetadata;
+}
+
+/**
+ * Re-queue jobs orphaned by a process restart/deploy. The updatedAt predicate
+ * is part of the UPDATE, not just the initial SELECT, so a worker that touched
+ * the row while the sweep was running wins and is never double-processed.
+ */
+async function recoverStaleVideoJobs(): Promise<void> {
+  if (recoveryInFlight) return;
+  recoveryInFlight = true;
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - VIDEO_JOB_STALE_MS);
+
+  try {
+    const staleJobs = await db.select({
+      id: schema.creations.id,
+      metadata: schema.creations.metadata,
+      updatedAt: schema.creations.updatedAt,
+    }).from(schema.creations)
+      .where(and(
+        eq(schema.creations.status, 'processing'),
+        eq(schema.creations.type, 'enhanced_video'),
+        lt(schema.creations.updatedAt, staleBefore),
+      ))
+      .orderBy(schema.creations.updatedAt)
+      .limit(MAX_RECOVERY_BATCH);
+
+    for (const job of staleJobs) {
+      const metadata = normalizeMetadata(job.metadata);
+      const previousTrace = typeof metadata.pipeline_trace === 'string'
+        ? metadata.pipeline_trace
+        : 'unknown';
+
+      // Queued rows are already eligible for the normal poller; only recover
+      // rows that had advanced into an in-flight state before the restart.
+      if (previousTrace === 'queued') continue;
+
+      const recoveryCount = Number(metadata.recoveryCount || 0) + 1;
+      await db.update(schema.creations).set({
+        metadata: {
+          ...metadata,
+          pipeline_trace: 'queued',
+          recoveryCount,
+          recoveredFrom: previousTrace,
+          recoveredAt: now.toISOString(),
+        },
+        updatedAt: now,
+      }).where(and(
+        eq(schema.creations.id, job.id),
+        eq(schema.creations.status, 'processing'),
+        eq(schema.creations.type, 'enhanced_video'),
+        lt(schema.creations.updatedAt, staleBefore),
+      ));
+
+      console.warn(`[VideoQueue] Re-queued stale job ${job.id} (trace=${previousTrace}, recovery=${recoveryCount})`);
+    }
+  } catch (err: any) {
+    console.error(`[VideoQueue] Recovery sweep failed: ${err.message}`);
+  } finally {
+    recoveryInFlight = false;
+  }
+}
 
 /**
  * Insert a video job by updating the existing creation record.
  * The creation already exists with status='processing' and pipeline_trace='pending'.
- * We just mark it as queued so the worker picks it up.
+ * We just mark it as queued so the worker picks it up, preserving metadata
+ * (notably duration and voiceover) persisted by the route before this call.
  */
 export async function insertVideoJob(payload: VideoJobPayload): Promise<void> {
   console.log(`[VideoQueue] Inserting job for creation=${payload.creationId}`);
   try {
+    const [existing] = await db.select({ metadata: schema.creations.metadata })
+      .from(schema.creations)
+      .where(eq(schema.creations.id, payload.creationId))
+      .limit(1);
+    const existingMetadata = normalizeMetadata(existing?.metadata);
+
     await db.update(schema.creations).set({
       metadata: {
+        ...existingMetadata,
         prompt: payload.prompt,
         platforms: payload.platforms,
         pipeline_trace: 'queued',
         sourceImages: payload.sourceImages,
       },
+      updatedAt: new Date(),
     }).where(eq(schema.creations.id, payload.creationId));
     console.log(`[VideoQueue] Job queued: ${payload.creationId}`);
   } catch (err: any) {
@@ -86,8 +171,17 @@ export function startVideoQueueWorker(): void {
   workerStarted = true;
   console.log('[VideoQueue] Worker started — polling every 5s');
 
+  // Recover rows orphaned by a previous process before the first poll, then
+  // repeat periodically for deploys/restarts that happen during processing.
+  void recoverStaleVideoJobs();
+  let lastRecoveryAt = 0;
+
   setInterval(async () => {
     try {
+      if (Date.now() - lastRecoveryAt >= VIDEO_QUEUE_RECOVERY_INTERVAL_MS) {
+        lastRecoveryAt = Date.now();
+        await recoverStaleVideoJobs();
+      }
       // Find oldest queued job
       const [job] = await db.select({
         id: schema.creations.id,
@@ -108,8 +202,12 @@ export function startVideoQueueWorker(): void {
 
       // Mark as in-progress so another worker doesn't pick it up
       await db.update(schema.creations).set({
-        metadata: { ...meta, pipeline_trace: 'worker_processing' },
-      }).where(eq(schema.creations.id, job.id));
+        metadata: { ...normalizeMetadata(meta), pipeline_trace: 'worker_processing' },
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.creations.id, job.id),
+        eq(schema.creations.status, 'processing'),
+      ));
 
       console.log(`[VideoQueue] Processing job: ${job.id}`);
 
@@ -159,7 +257,8 @@ export function startVideoQueueWorker(): void {
             const backoffMs = SORA_RETRY_BACKOFF_MS[attempt - 1]; // 10s then 15s
             console.log(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} starting after ${backoffMs}ms backoff (creation=${creationId})`);
             await db.update(schema.creations).set({
-              metadata: { ...meta, pipeline_trace: `sora_retry_${retriesUsed}`, retryCount: retriesUsed },
+              metadata: { ...normalizeMetadata(meta), pipeline_trace: `sora_retry_${retriesUsed}`, retryCount: retriesUsed },
+              updatedAt: new Date(),
             }).where(eq(schema.creations.id, creationId));
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
@@ -173,11 +272,12 @@ export function startVideoQueueWorker(): void {
           await db.update(schema.creations).set({
             status: 'failed',
             metadata: {
-              ...meta,
+              ...normalizeMetadata(meta),
               error: soraResult?.error || 'Sora failed',
               pipeline_trace: 'sora_failed',
               retryCount: retriesUsed,
             },
+            updatedAt: new Date(),
           }).where(eq(schema.creations.id, creationId));
           return;
         }
@@ -188,7 +288,8 @@ export function startVideoQueueWorker(): void {
           if (stat.size < 1024) {
             await db.update(schema.creations).set({
               status: 'failed',
-              metadata: { ...meta, error: 'Sora output too small', pipeline_trace: 'validation_failed' },
+              metadata: { ...normalizeMetadata(meta), error: 'Sora output too small', pipeline_trace: 'validation_failed' },
+              updatedAt: new Date(),
             }).where(eq(schema.creations.id, creationId));
             try { fs.unlinkSync(soraResult.videoPath); } catch {}
             return;
@@ -229,13 +330,14 @@ export function startVideoQueueWorker(): void {
                 const j = await vr.json();
                 const aud = j?.choices?.[0]?.message?.audio;
                 if (aud?.data) {
-                  const dir = path.posix? '': ''; // path not imported; use process.cwd
-                  const audioFile = `${soraResult.videoPath}.voice.mp3`;
+                  const inputVideoPath = soraResult.videoPath;
+                  if (!inputVideoPath) throw new Error('Sora returned no video path for voiceover');
+                  const audioFile = `${inputVideoPath}.voice.mp3`;
                   const fsMod = await import('fs');
                   fsMod.writeFileSync(audioFile, Buffer.from(aud.data as string, 'base64'));
-                  const muxed = `${soraResult.videoPath}.voiced.mp4`;
+                  const muxed = `${inputVideoPath}.voiced.mp4`;
                   await new Promise<void>((resolve, reject) => {
-                    execFile('ffmpeg', ['-y','-i',soraResult.videoPath,'-i',audioFile,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-shortest',muxed], (err) => err ? reject(err) : resolve());
+                    execFile('ffmpeg', ['-y', '-i', inputVideoPath, '-i', audioFile, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxed], (err: Error | null) => err ? reject(err) : resolve());
                   });
                   if (fsMod.existsSync(muxed)) { soraResult.videoPath = muxed; voiceoverPath = audioFile; fsMod.unlinkSync(audioFile); videoUrl = soraResult.videoPath; }
                 }
@@ -267,12 +369,13 @@ export function startVideoQueueWorker(): void {
           status: 'completed',
           fileUrl: videoUrl,
           metadata: {
-            ...meta,
+            ...normalizeMetadata(meta),
             aiProvider: 'sora-2',
             pipeline_trace: 'completed',
             ...(retriesUsed > 0 ? { soraRetries: retriesUsed } : {}),
             ...(r2Key ? { r2Key } : {}),
           },
+          updatedAt: new Date(),
         }).where(eq(schema.creations.id, creationId));
 
         // Approval
@@ -294,7 +397,8 @@ export function startVideoQueueWorker(): void {
         try {
           await db.update(schema.creations).set({
             status: 'failed',
-            metadata: { ...meta, error: err.message, pipeline_trace: 'worker_failed' },
+            metadata: { ...normalizeMetadata(meta), error: err.message, pipeline_trace: 'worker_failed' },
+            updatedAt: new Date(),
           }).where(eq(schema.creations.id, creationId));
         } catch {}
       }
