@@ -712,3 +712,16 @@ export const videoScenes = sqliteTable('video_scenes', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
+
+/**
+ * Durable AI Memory — SQLite mirror of session_memory (dev/local).
+ */
+export const sessionMemory = sqliteTable('session_memory', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  brandId: text('brand_id'),
+  lockedFacts: text('locked_facts', { mode: 'json' }).default('{}').notNull(),
+  lastSummary: text('last_summary'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});

@@ -10,6 +10,7 @@ import { eq, and, gte, count, desc, asc, ne } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 
 const router = Router();
 
@@ -52,6 +53,40 @@ interface StudioResponse {
   error?: string;
 }
 
+// ─── Durable memory: extract newly-confirmed facts ─────────────────────────────
+function extractConfirmedFacts(
+  req: { request: string; voice?: string; tone?: string; duration?: number; conversationHistory?: Array<{ role: string; content: string }> },
+  decision: RouterDecision,
+): Record<string, any> {
+  const facts: Record<string, any> = {};
+  const text = [req.request, ...(req.conversationHistory ?? []).map(m => `${m.role}: ${m.content}`)].join(' ').toLowerCase();
+  if (req.voice) facts.voice = req.voice;
+  if (req.tone) facts.tone = req.tone;
+  if (typeof req.duration === 'number' && req.duration > 0) facts.duration = req.duration;
+  if (!facts.voice) {
+    if (/(female|woman|girl|her voice)/.test(text)) facts.voice = 'female';
+    else if (/(male|man|guy|his voice|deep voice)/.test(text)) facts.voice = 'male';
+  }
+  if (!facts.tone) {
+    if (/(calm|soothing|relaxed)/.test(text)) facts.tone = 'calm';
+    else if (/(warm|friendly|cozy)/.test(text)) facts.tone = 'warm';
+    else if (/(serious|professional|formal|authoritative)/.test(text)) facts.tone = 'serious';
+    else if (/(enthusiastic|energetic|exciting|upbeat|hype)/.test(text)) facts.tone = 'enthusiastic';
+  }
+  if (typeof facts.duration !== 'number') {
+    const m = text.match(/(\d+)\s*(?:seconds?|sec|s\b)/);
+    if (m) facts.duration = Number(m[1]);
+    else {
+      const min = text.match(/(\d+)\s*minutes?/);
+      if (min) facts.duration = Number(min[1]) * 60;
+    }
+  }
+  const platform = decision.parameters?.platform;
+  if (platform && /^(tiktok|instagram|youtube|etsy|shopify|facebook|pinterest|linkedin)$/i.test(String(platform))) {
+    facts.platform = String(platform).toLowerCase();
+  }
+  return facts;
+}
 // ─── POST /api/studio/process ────────────────────────────────────────────────
 
 // Reusable helper: resolve non-UUID user identifiers to real UUIDs
@@ -266,6 +301,7 @@ async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void
 router.post('/process', async (req: Request, res: Response) => {
   try {
     const { userId, brandId, request, attachments, conversationHistory } = req.body as StudioRequest;
+    const { voice, tone, duration } = req.body as StudioRequest;
     const mode: 'consult' | 'generate' = (req.body as StudioRequest).mode || 'generate';
 
     if (!request || typeof request !== 'string') {
@@ -300,16 +336,25 @@ router.post('/process', async (req: Request, res: Response) => {
       } catch {}
     }
 
-    // 2. Route via AI Router
+    // 2. Load durable locked facts (decisions from prior sessions) and route
+    const lockedFacts = await loadLockedFacts(uid, brandId || null);
     const decision = await aiRouter.route({
       userId: uid,
       request,
       mode,
       brandContext,
       conversationHistory,
+      lockedFacts,
     });
 
     console.log(`[StudioRoute] Routed: ${decision.classification} ${decision.needsRefinement ? '(needs refinement)' : ''}`);
+
+    // 2b. Persist newly-confirmed facts into durable memory (best-effort). Only
+    // writes real UUID users; sentinel/anonymous users are skipped by the service.
+    const confirmed = extractConfirmedFacts({ request, voice, tone, duration, conversationHistory }, decision);
+    if (Object.keys(confirmed).length > 0) {
+      await saveLockedFacts(uid, brandId || null, confirmed);
+    }
 
     // Consult mode — chat only, never trigger generation pipeline
     if (mode === 'consult') {

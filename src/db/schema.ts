@@ -590,3 +590,19 @@ export const libraryAssets = pgTable('library_assets', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+/**
+ * Durable AI Memory — persists "locked"/confirmed decisions per user (+ optional
+ * brand) so the Studio AI Router does NOT re-ask questions already answered
+ * across sessions. Stores structured facts (voice, tone, duration, brand,
+ * platform, approved design directions, answered clarifying questions).
+ */
+export const sessionMemory = pgTable('session_memory', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  brandId: text('brand_id'),                    // optional scoping to a brand/empire
+  lockedFacts: jsonb('locked_facts').default({}).notNull(),
+  lastSummary: text('last_summary'),            // free-text recap of last session
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
