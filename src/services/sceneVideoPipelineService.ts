@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
@@ -60,11 +60,53 @@ function renderClip(input: string, output: string, duration: number, audio?: str
     });
   });
 }
-function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{ const cmd=ffmpeg(); inputs.forEach(i=>cmd.input(i)); cmd.mergeToFile(output,path.dirname(output)).on('end',()=>resolve()).on('error',reject); }); }
+function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{
+  // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
+  // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
+  // be crossfaded directly. Each xfade overlaps by TRANSITION_MS.
+  const DURATION_MS = process.env.SCENE_TRANSITION_MS ? Number(process.env.SCENE_TRANSITION_MS) : 500;
+  const TR_MS = Math.min(DURATION_MS, 1000);
+  if (inputs.length === 1) {
+    const cmd = ffmpeg().input(inputs[0]);
+    cmd.outputOptions(['-c:v','libx264','-pix_fmt','yuv420p','-r','30']);
+    return void cmd.save(output).on('end',()=>resolve()).on('error',reject);
+  }
+  try {
+    // First pass: probe each clip's duration via ffprobe so xfade offsets are exact.
+    const seconds = inputs.map((f)=>{
+      try {
+        const out = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
+        const n = parseFloat(out); return Number.isFinite(n) ? n : 3; // default 3s
+      } catch { return 3; }
+    });
+    const filter = [];
+    const tr = TR_MS/1000;
+    let offsetAcc = 0;
+    for (let i=1;i<inputs.length;i++){
+      // offset = accumulated length - overlap of the transitions so far
+      offsetAcc += seconds[i-1] - tr;
+      filter.push(`[v${i-1}][${i}:v]xfade=transition=fade:duration=${tr}:offset=${Math.max(0,offsetAcc).toFixed(3)}[v${i}]`);
+    }
+    return void (async()=>{
+      const fc = filter.join(';');
+      const args:string[] = [];
+      inputs.forEach(i=>{ args.push('-i',i); });
+      args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']','-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
+      execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
+        if(err) reject(new Error('ffmpeg xfade exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
+        else resolve();
+      });
+    })();
+  } catch(e:any){
+    reject(new Error('xfade concat failed: '+e.message));
+  }
+}); }
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const candidates = Array.isArray(raw?.scenes) ? raw.scenes : [];
   if (candidates.length) return candidates.map((s:any,i:number)=>({ sceneNumber:i+1,duration:Math.max(1,Number(s.duration)||Math.ceil(durationTarget/candidates.length)),visualType:s.visualType==='still'?'still':'motion',narration:String(s.narration||''),visualPrompt:String(s.visualPrompt||s.visual_prompt||idea) }));
-  return [0,1,2].map((i)=>({sceneNumber:i+1,duration:Math.ceil(durationTarget/3),visualType:'motion' as const,narration:i===0?`Introducing ${idea}`:i===1?`Discover why ${idea} matters`:`Take the next step with ${idea}`,visualPrompt:`Original cinematic scene ${i+1} for: ${idea}`}));
+  return [0,1,2].map((i)=>({sceneNumber:i+1,duration:Math.ceil(durationTarget/3),visualType:'motion' as const,
+    narration:i===0?`Introducing ${idea}`:i===1?`See ${idea} come to life`: `Ready to start? Take the next step with ${idea}`,
+    visualPrompt:i===0?`Cinematic opening establishing shot: ${idea} — the hook, subject clearly introduced`:i===1?`Cinematic middle shot: ${idea} developing, the transformation or key benefit in action, continuous with the opening subject`:`Cinematic closing shot: ${idea} — payoff and a clear call-to-action, same continuous subject as the opening`}));
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
@@ -76,7 +118,7 @@ export class SceneVideoPipelineService {
       trace(`gpt52_script_start project=${projectId}`);
       try {
         const toneHint = input.tone && input.tone !== 'auto' ? ` Use a ${input.tone} narration tone.` : '';
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. Return scenes with sceneNumber, duration, visualType (motion or still), narration, and visualPrompt.${toneHint}`, mode: 'generate' });
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. Return scenes with sceneNumber, duration, visualType (motion or still), narration, and visualPrompt.${toneHint}\n\nSTORY ARC REQUIREMENT (mandatory): the scenes MUST form a genuine beginning → middle → call-to-action progression, NOT 3 variations of the same opening. Each scene's visualPrompt and narration must ADVANCE the story from the previous one: scene 1 establishes the hook/subject, scene 2 builds/develops the subject or shows the transformation/benefit, scene 3 delivers the payoff and a clear call-to-action. Keep one continuous subject across all scenes so the video feels coherent.`, mode: 'generate' });
         generatedScript = (decision as any).script || (decision as any).parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
