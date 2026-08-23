@@ -6,7 +6,7 @@ import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { db, schema } from '../db/index.js';
-import { eq, and, gte, count, desc, asc, ne } from 'drizzle-orm';
+import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
@@ -989,26 +989,83 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 router.delete('/creation/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const [creation] = await db.select()
-      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1);
-    if (!creation) return res.status(404).json({ error: 'Creation not found' });
+    const { r2Storage } = await import('../services/r2StorageService.js');
 
-    // Delete R2 file first
-    if (creation.fileUrl) {
-      const r2Key = extractR2Key(creation.fileUrl);
-      if (r2Key) {
-        const { r2Storage } = await import('../services/r2StorageService.js');
-        await r2Storage.deleteFile(r2Key);
+    // Delete an R2 object (best-effort — never fail the row delete on R2 errors).
+    const deleteR2 = async (url?: string | null) => {
+      if (!url) return;
+      const key = extractR2Key(url);
+      if (key) { try { await r2Storage.deleteFile(key); } catch {} }
+    };
+
+    // Delete a video project, its scenes' R2 assets/audio, and the project row
+    // (video_scenes cascades on project delete). Best-effort per child.
+    const deleteProject = async (projectId: string): Promise<void> => {
+      if (!projectId) return;
+      const [proj] = await db.select()
+        .from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!proj) return;
+      try {
+        const scenes = await db.select()
+          .from(schema.videoScenes).where(eq(schema.videoScenes.projectId, proj.id));
+        for (const s of scenes) { await deleteR2(s.assetUrl); await deleteR2(s.audioUrl); }
+      } catch {}
+      await deleteR2(proj.finalVideoUrl);
+      await deleteR2(proj.thumbnailUrl);
+      try { await db.delete(schema.videoProjects).where(eq(schema.videoProjects.id, proj.id)); } catch {}
+    };
+
+    // Delete all approval rows that reference a given creation id (payload.assetId).
+    const deleteApprovalsFor = async (creationId: string): Promise<void> => {
+      try {
+        await db.delete(schema.approvals)
+          .where(sql`${schema.approvals.payload}->>'assetId' = ${creationId}`);
+      } catch {}
+    };
+
+    // ── Resolve the true underlying object(s) across all id namespaces ──
+    // Operations surfaces items from 3 sources: approvals (their id or payload.assetId),
+    // assets/creations (their id), and video-projects (video_projects.id). A single X must
+    // delete the creation row + R2 file + its linked video_project(+scenes) + approvals no
+    // matter which namespace the clicked id belongs to.
+
+    // 1) Creation found by its own id.
+    let creation = (await db.select()
+      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1))[0];
+
+    // 2) Creation resolved through an approval (approval.payload.assetId == id, OR approval.id == id).
+    if (!creation) {
+      const [ap] = await db.select().from(schema.approvals)
+        .where(sql`${schema.approvals.payload}->>'assetId' = ${id}`).limit(1);
+      const approval = ap || (await db.select()
+        .from(schema.approvals).where(eq(schema.approvals.id, id)).limit(1))[0];
+      if (approval?.payload?.assetId) {
+        creation = (await db.select()
+          .from(schema.creations).where(eq(schema.creations.id, approval.payload.assetId)).limit(1))[0];
       }
     }
 
-    // Delete creation record
-    await db.delete(schema.creations).where(eq(schema.creations.id, id));
+    // 3) Video project found by its own id → link back to the creation the scene
+    //    pipeline wrote (metadata.projectId == this project id).
+    const [projectById] = await db.select()
+      .from(schema.videoProjects).where(eq(schema.videoProjects.id, id)).limit(1);
+    if (!creation && projectById) {
+      const [linked] = await db.select().from(schema.creations)
+        .where(sql`${schema.creations.metadata}->>'projectId' = ${projectById.id}`).limit(1);
+      creation = linked;
+    }
 
-    // Delete associated approval (by payload.assetId or id match)
-    try {
-      await db.delete(schema.approvals).where(eq(schema.approvals.id, id));
-    } catch {}
+    const projectId = creation?.metadata?.projectId || projectById?.id;
+    if (!creation && !projectId) return res.status(404).json({ error: 'Not found' });
+
+    // Delete in dependency order: project (+ scenes + R2) → creation (+ R2) → approvals.
+    if (projectId) await deleteProject(projectId);
+    if (creation) {
+      await deleteR2(creation.fileUrl);
+      await deleteR2(creation.thumbnailUrl);
+      await db.delete(schema.creations).where(eq(schema.creations.id, creation.id));
+      await deleteApprovalsFor(creation.id);
+    }
 
     res.json({ status: 'ok', deleted: id });
   } catch (err: any) {
