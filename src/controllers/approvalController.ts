@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
+import { usageService } from '../services/usageService.js';
 import { db, schema } from '../db/index.js';
 import { eq, sql, and, inArray } from 'drizzle-orm';
 import axios from 'axios';
@@ -42,6 +43,15 @@ export const createApproval = async (req: Request, res: Response) => {
     const { type, description, payload } = req.body;
     if (!type || !description) {
       return res.status(400).json({ error: 'Missing required fields: type, description' });
+    }
+    // Enforce the 7/week Faceless quota at the submission gate (owner stays
+    // unlimited). Throws "Usage limit reached..." when over the cap.
+    if (type === 'faceless') {
+      try {
+        await usageService.enforceLimit(userId, 'faceless');
+      } catch (limitError: any) {
+        return res.status(403).json({ error: limitError?.message || 'Faceless usage limit reached' });
+      }
     }
 
     // Shared voiceover controls + screenshot source images (Faceless box).

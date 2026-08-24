@@ -246,6 +246,7 @@ export class CinemaController {
       const enhancedRemaining = await usageService.getDailyRemaining(userId, 'enhanced_video');
       const designRemaining = await usageService.getDailyRemaining(userId, 'high_res_design');
       const customizeRemaining = await usageService.getDailyRemaining(userId, 'customize_video');
+      const facelessRemaining = await usageService.getDailyRemaining(userId, 'faceless');
 
       res.json({
         userId,
@@ -265,6 +266,11 @@ export class CinemaController {
         },
         customize: {
           remaining: customizeRemaining,
+          limit: 7,
+          period: 'week',
+        },
+        faceless: {
+          remaining: facelessRemaining,
           limit: 7,
           period: 'week',
         },
