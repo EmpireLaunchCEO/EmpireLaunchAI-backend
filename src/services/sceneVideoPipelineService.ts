@@ -82,10 +82,14 @@ function concatClips(inputs: string[], output: string): Promise<void> { return n
     const filter = [];
     const tr = TR_MS/1000;
     let offsetAcc = 0;
-    for (let i=1;i<inputs.length;i++){
-      // offset = accumulated length - overlap of the transitions so far
-      offsetAcc += seconds[i-1] - tr;
-      filter.push(`[v${i-1}][${i}:v]xfade=transition=fade:duration=${tr}:offset=${Math.max(0,offsetAcc).toFixed(3)}[v${i}]`);
+    // xfade chain. IMPORTANT: the FIRST input is stream 0:v (it is never renamed),
+    // so the first transition is [0:v][1:v]xfade[v1]. Each following transition
+    // reuses the previous output label: [v1][2:v]xfade[v2], [v2][3:v]xfade[v3], ...
+    offsetAcc = Math.max(0, seconds[0] - tr);
+    filter.push(`[0:v][1:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
+    for (let i=2;i<inputs.length;i++){
+      offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
+      filter.push(`[v${i-1}][${i}:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
     }
     return void (async()=>{
       const fc = filter.join(';');
