@@ -101,24 +101,120 @@ function concatClips(inputs: string[], output: string): Promise<void> { return n
     reject(new Error('xfade concat failed: '+e.message));
   }
 }); }
+/** Max Scene-Based video duration (5 minutes). Durations above this are rejected at the route. */
+export const MAX_SCENE_DURATION = 300;
+/** Target ~1 scene per 6s of video so every scene stays a short, renderable single Sora shot. */
+const SECONDS_PER_SCENE = 6;
+const MIN_SCENES = 3;
+const MAX_SCENES = 60;
+/** Bounded parallelism for scene generation — a 5-min (30–60 scene) video must NOT fire
+ *  that many concurrent Sora/gpt-audio calls (rate limits, cost spike, memory). */
+const SCENE_CONCURRENCY = 3;
+/** Per-scene provider deadline (unchanged from prior behaviour). */
+const SCENE_DEADLINE_MS = 7 * 60 * 1000;
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
+/** Scale the number of scenes with the duration target: ~1 scene per 6s, 3..60 scenes. */
+function targetSceneCount(durationTarget: number): number {
+  return clamp(Math.round(durationTarget / SECONDS_PER_SCENE), MIN_SCENES, MAX_SCENES);
+}
+
+/**
+ * Build a coherent N-scene story arc (hook → development → payoff/CTA) around ONE
+ * continuous subject (`idea`), each scene ~durationTarget/N seconds. Used both as the
+ * fallback when GPT returns no script and as the per-scene pad when it under-delivers.
+ * Durations are distributed so the exact sum equals durationTarget.
+ */
+function buildArcScenes(idea: string, count: number, durationTarget: number): SceneScript[] {
+  const base = Math.floor(durationTarget / count);
+  const rem = durationTarget - base * count;
+  return Array.from({ length: count }, (_, i) => {
+    const f = count <= 1 ? 0.5 : i / (count - 1); // 0..1 story progress
+    const beat = f < 0.25 ? 'hook' : f < 0.75 ? 'development' : 'payoff';
+    let narration: string;
+    let visualPrompt: string;
+    if (beat === 'hook') {
+      narration = `Opening scene: introducing ${idea}.`;
+      visualPrompt = `Cinematic opening establishing shot: ${idea} — the hook, subject clearly introduced`;
+    } else if (beat === 'development') {
+      narration = `Development scene: seeing ${idea} come to life and its benefit in action.`;
+      visualPrompt = `Cinematic middle shot: ${idea} developing, the transformation or key benefit in action, continuous with the opening subject`;
+    } else {
+      narration = `Call to action: ready to take the next step with ${idea}?`;
+      visualPrompt = `Cinematic closing shot: ${idea} — payoff and a clear call-to-action, same continuous subject as the opening`;
+    }
+    return {
+      sceneNumber: i + 1,
+      duration: base + (i < rem ? 1 : 0),
+      visualType: 'motion' as const,
+      narration,
+      visualPrompt,
+    };
+  });
+}
+
+/**
+ * Map `fn` over `items` with at most `limit` promises in-flight at once. Preserves
+ * input order in the result. Prevents 30–60 concurrent provider calls on long videos.
+ */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const cur = idx++;
+      out[cur] = await fn(items[cur], cur);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
+  const count = targetSceneCount(durationTarget);
   const candidates = Array.isArray(raw?.scenes) ? raw.scenes : [];
-  if (candidates.length) return candidates.map((s:any,i:number)=>({ sceneNumber:i+1,duration:Math.max(1,Number(s.duration)||Math.ceil(durationTarget/candidates.length)),visualType:s.visualType==='still'?'still':'motion',narration:String(s.narration||''),visualPrompt:String(s.visualPrompt||s.visual_prompt||idea) }));
-  return [0,1,2].map((i)=>({sceneNumber:i+1,duration:Math.ceil(durationTarget/3),visualType:'motion' as const,
-    narration:i===0?`Introducing ${idea}`:i===1?`See ${idea} come to life`: `Ready to start? Take the next step with ${idea}`,
-    visualPrompt:i===0?`Cinematic opening establishing shot: ${idea} — the hook, subject clearly introduced`:i===1?`Cinematic middle shot: ${idea} developing, the transformation or key benefit in action, continuous with the opening subject`:`Cinematic closing shot: ${idea} — payoff and a clear call-to-action, same continuous subject as the opening`}));
+  const arc = buildArcScenes(idea, count, durationTarget);
+  const base = Math.floor(durationTarget / count);
+  const rem = durationTarget - base * count;
+  if (candidates.length) {
+    // Evenly distribute durationTarget across exactly `count` short scenes so every
+    // clip is ~5-6s and renderable (a single Sora shot cannot produce ~100s). Use
+    // GPT's visual/narration per scene when available; pad to `count` with the arc
+    // if GPT under-delivers.
+    return Array.from({ length: count }, (_, i) => {
+      const s = candidates[Math.min(i, candidates.length - 1)];
+      const a = arc[i];
+      return {
+        sceneNumber: i + 1,
+        duration: base + (i < rem ? 1 : 0),
+        visualType: s?.visualType === 'still' ? 'still' : 'motion',
+        narration: String(s?.narration || a.narration || ''),
+        visualPrompt: String(s?.visualPrompt || s?.visual_prompt || a.visualPrompt || idea),
+      };
+    });
+  }
+  return arc;
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
-    const duration = input.durationTarget || 30;
+    // Clamp to the 5-min cap (defense in depth — the route also rejects > MAX).
+    const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
+    const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
     let generatedScript = input.script;
     if (!generatedScript) {
       trace(`gpt52_script_start project=${projectId}`);
       try {
         const toneHint = input.tone && input.tone !== 'auto' ? ` Use a ${input.tone} narration tone.` : '';
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. Return scenes with sceneNumber, duration, visualType (motion or still), narration, and visualPrompt.${toneHint}\n\nSTORY ARC REQUIREMENT (mandatory): the scenes MUST form a genuine beginning → middle → call-to-action progression, NOT 3 variations of the same opening. Each scene's visualPrompt and narration must ADVANCE the story from the previous one: scene 1 establishes the hook/subject, scene 2 builds/develops the subject or shows the transformation/benefit, scene 3 delivers the payoff and a clear call-to-action. Keep one continuous subject across all scenes so the video feels coherent.`, mode: 'generate' });
+        // Scale the number of scenes with the duration: ~1 short scene per 6s so every
+        // scene stays a renderable single shot (a lone Sora clip cannot produce ~100s).
+        const sceneCount = targetSceneCount(duration);
+        const perScene = Math.max(1, Math.round(duration / sceneCount));
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
         generatedScript = (decision as any).script || (decision as any).parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
@@ -144,11 +240,19 @@ export class SceneVideoPipelineService {
       // keep an outbound request alive longer than the handler; enforce a deadline at
       // the worker boundary (7 min per scene — image gen up to 3 min + gpt-audio +
       // R2 uploads observed at ~5.5 min for still+narration; Sora polls up to ~5 min).
-      const outcomes = await Promise.allSettled(scenes.map(scene => withDeadline(
-        this.processScene(scene, userId, voice, tone),
-        7 * 60 * 1000,
-        `Scene ${scene.sceneNumber}`,
-      )));
+      // Scenes are generated with bounded parallelism (SCENE_CONCURRENCY) so a
+      // 5-min/30–60-scene video never fires that many concurrent Sora/image/gpt-audio
+      // calls at once (rate limits, cost spike, memory). Preserves the prior
+      // all-settled semantics (fulfilled/rejected per scene) so rejection handling below
+      // is unchanged.
+      const outcomes = await mapLimit(scenes, SCENE_CONCURRENCY, async (scene: any) => {
+        try {
+          await withDeadline(this.processScene(scene, userId, voice, tone), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          return { status: 'fulfilled' as const };
+        } catch (reason) {
+          return { status: 'rejected' as const, reason };
+        }
+      });
       const rejected = outcomes.filter(o => o.status === 'rejected').length;
       if (rejected) {
         trace(`scene_queue_rejections project=${projectId} count=${rejected}`);
@@ -306,9 +410,18 @@ export class SceneVideoPipelineService {
    * resume mid-flight work, since the provider requests were killed with the process.
    */
   async recoverStaleProjects(minAgeMs = 0): Promise<number> {
+    // Boot run (minAgeMs=0): fail every generating/assembling project — the process
+    // just restarted, so nothing can be actively working. Periodic tick (minAgeMs>0):
+    // only age-fail GENERATING projects. An 'assembling' project is mid-way through a
+    // single long, non-resumable FFmpeg/xfade render with no updatedAt bumps (a 5-min /
+    // 30–60-clip assembly can legitimately exceed the tick grace) — killing it would
+    // throw away the whole render. Boot-run still rescues a truly stranded assembler
+    // after a restart, and assembly errors are caught by try/catch → status fails.
+    const candidateStatuses = minAgeMs > 0
+      ? ['generating']
+      : ['generating', 'assembling'];
     const candidates = await db.select().from(schema.videoProjects).where(or(
-      eq(schema.videoProjects.status, 'generating'),
-      eq(schema.videoProjects.status, 'assembling'),
+      ...candidateStatuses.map((s) => eq(schema.videoProjects.status, s as any)),
     ));
     if (candidates.length === 0) return 0;
     let stale = candidates;

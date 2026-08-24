@@ -9,7 +9,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
-import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, MAX_SCENE_DURATION } from '../services/sceneVideoPipelineService.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 
 const router = Router();
@@ -1082,6 +1082,10 @@ router.post('/video-project', async (req: Request, res: Response) => {
     if (!resolvedUserId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' });
     const { title, idea, platforms, style, script } = req.body;
     const durationTarget = Number(req.body.durationTarget || req.body.duration || 30);
+    // Reject out-of-range durations up front with a clear message (5 min max).
+    if (!Number.isFinite(durationTarget) || durationTarget < 1 || durationTarget > MAX_SCENE_DURATION) {
+      return res.status(400).json({ status: 'error', error: `duration must be between 1 and ${MAX_SCENE_DURATION} seconds (5 minutes)` });
+    }
     // Shared voiceover controls (same options as Customize Video) + screenshot source images.
     const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
     const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
