@@ -93,13 +93,13 @@ export class RenderingEngine {
    * Generate a single image using GPT Image 2. For image_creation/image_editing.
    * Returns the local path to the generated PNG.
    */
-  async renderImage(prompt: string, userId?: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+  async renderImage(prompt: string, userId?: string, inputImageUrl?: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
     const taskId = uuidv4().slice(0, 8);
     const workingDir = path.join(this.tempDir, `img_${taskId}`);
     fs.mkdirSync(workingDir, { recursive: true });
 
     try {
-      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high');
+      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high', inputImageUrl);
       let finalUrl = localPath;
       if (userId && r2Storage.isAvailable) {
         const r2 = await r2Storage.uploadLocalFile(localPath, userId, 'renders/images', 'image/png');
@@ -118,7 +118,7 @@ export class RenderingEngine {
    * Calls POST /v1/images/generations with quality parameter (required).
    * Response: {data: [{b64_json: '...'}], output_format: 'png', size: '...'}
    */
-  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high'): Promise<string> {
+  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high', inputImageUrl?: string): Promise<string> {
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
     const apiKey = process.env.OPENAI_API_KEY;
@@ -126,34 +126,48 @@ export class RenderingEngine {
       throw new Error('OPENAI_API_KEY not configured — cannot generate scene images');
     }
 
-    const response = await fetch('https://api.openai.com/v1/images/generations', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-image-2',
-        prompt,
-        n: 1,
-        quality,
-      }),
-      signal: AbortSignal.timeout(180000)
-    });
-
-    // gpt-image-2 can legitimately take 60-120s+ to render a high-quality image.
-    // 60s was aborting healthy generations ("The operation was aborted due to
-    // timeout") before OpenAI had a chance to respond, failing every still scene.
-    // The scene worker deadline in sceneVideoPipelineService is the safety net.
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(`gpt-image-2 API error (${response.status}): ${errorBody.slice(0, 200)}`);
+        // When the user uploaded a reference/design/hero image, drive the generation from it
+    // via the edits endpoint (input image + prompt). Best-effort: fetch the remote bytes,
+    // POST multipart to /v1/images/edits. If the provider rejects input-image editing,
+    // we fall back to text-only generations (with the reference already injected into the
+    // prompt upstream), so an upload never breaks the pipeline.
+    let b64Json: string | undefined;
+    if (inputImageUrl) {
+      try {
+        b64Json = await this.generateFromInputImage(inputImageUrl, prompt, quality, apiKey);
+        console.log(`[RenderingEngine] Image generated via gpt-image-2 (input-image edit)`);
+      } catch (inputErr: any) {
+        console.warn(`[RenderingEngine] Input-image edit failed, falling back to text-only: ${inputErr.message}`);
+        b64Json = undefined;
+      }
     }
-
-    const data = await response.json();
-    const b64Json = data?.data?.[0]?.b64_json;
-    
     if (!b64Json) {
+      const response = await fetch('https://api.openai.com/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-image-2',
+          prompt,
+          n: 1,
+          quality,
+        }),
+        signal: AbortSignal.timeout(180000)
+      });
+      // gpt-image-2 can legitimately take 60-120s+ to render a high-quality image.
+      // 60s was aborting healthy generations ("The operation was aborted due to
+      // timeout") before OpenAI had a chance to respond, failing every still scene.
+      // The scene worker deadline in sceneVideoPipelineService is the safety net.
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        throw new Error(`gpt-image-2 API error (${response.status}): ${errorBody.slice(0, 200)}`);
+      }
+      const data = await response.json();
+      b64Json = data?.data?.[0]?.b64_json;
+    }
+if (!b64Json) {
       throw new Error('No b64_json in gpt-image-2 response');
     }
 
@@ -164,6 +178,32 @@ export class RenderingEngine {
 
     console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-2 (quality: ${quality})`);
     return outputPath;
+  }
+  /** Drive gpt-image-2 from a user-uploaded image via the multipart edits endpoint. */
+  private async generateFromInputImage(inputImageUrl: string, prompt: string, quality: string, apiKey: string): Promise<string> {
+    const imgRes = await fetch(inputImageUrl, { signal: AbortSignal.timeout(30000) });
+    if (!imgRes.ok) throw new Error(`Could not fetch input image (${imgRes.status})`);
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    const form = new FormData();
+    form.append('model', 'gpt-image-2');
+    form.append('prompt', prompt);
+    form.append('n', '1');
+    form.append('quality', quality);
+    form.append('image', new Blob([buf], { type: 'image/png' }), 'input.png');
+    const response = await fetch('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      body: form as any,
+      signal: AbortSignal.timeout(180000),
+    });
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      throw new Error(`gpt-image-2 edits API error (${response.status}): ${errorBody.slice(0, 200)}`);
+    }
+    const data = await response.json();
+    const b64 = data?.data?.[0]?.b64_json;
+    if (!b64) throw new Error('No b64_json in gpt-image-2 edits response');
+    return b64;
   }
 
   /**
