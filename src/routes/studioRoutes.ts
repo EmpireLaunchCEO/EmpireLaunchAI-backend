@@ -10,6 +10,7 @@ import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION } from '../services/sceneVideoPipelineService.js';
+import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 
 const router = Router();
@@ -1089,6 +1090,16 @@ router.post('/video-project', async (req: Request, res: Response) => {
     // Shared voiceover controls (same options as Customize Video) + screenshot source images.
     const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
     const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
+    // Owner-locked mood (now applies to Scene-Based, shared with Faceless/Twin set).
+    // Accept lowercase/trimmed; 'auto'/empty -> undefined (no mood hint). Reject invalid.
+    let mood: string | undefined;
+    if (req.body.mood !== undefined && req.body.mood !== null && String(req.body.mood).trim() !== '' && String(req.body.mood).toLowerCase() !== 'auto') {
+      const m = String(req.body.mood).toLowerCase();
+      if (!isValidMood(m)) {
+        return res.status(400).json({ status: 'error', error: `Invalid mood "${req.body.mood}". Allowed: ${VIDEO_MOODS.join(', ')}` });
+      }
+      mood = m;
+    }
     const sourceImages = Array.isArray(req.body.sourceImages)
       ? req.body.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : req.body.sourceImages;
@@ -1103,6 +1114,7 @@ router.post('/video-project', async (req: Request, res: Response) => {
       script,
       voice,
       tone,
+      mood,
       sourceImages,
     });
     return res.status(202).json({ status: 'processing', projectId });

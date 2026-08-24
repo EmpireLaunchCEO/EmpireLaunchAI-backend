@@ -96,6 +96,22 @@ export const FACELESS_MOODS = [
   'inspiring',
 ] as const;
 export type FacelessMood = (typeof FACELESS_MOODS)[number];
+/**
+ * Owner-LOCKED mood set, shared across Faceless, Scene-Based and Neural Twin
+ * (greenlit 2026-08-24). Alias of FACELESS_MOODS so we keep one source of truth;
+ * non-faceless paths should reference VIDEO_MOODS. Do NOT change the option set.
+ */
+export const VIDEO_MOODS = FACELESS_MOODS;
+export type VideoMood = (typeof VIDEO_MOODS)[number];
+/** Build a hint string that folds a validated mood into a generation prompt. Empty when none. */
+export function moodHintToString(mood?: string): string {
+  if (!mood || String(mood).trim() === '' || String(mood).toLowerCase() === 'auto') return '';
+  return ` Use a ${String(mood).toLowerCase()} mood across every scene and the narration.`;
+}
+/** True if the given value is a valid VIDEO_MOODS entry. */
+export function isValidMood(value: unknown): value is VideoMood {
+  return typeof value === 'string' && (VIDEO_MOODS as readonly string[]).includes(value.toLowerCase());
+}
 /** Allowed Faceless durations (seconds). Others are rejected at the gate. */
 export const FACELESS_DURATIONS = [10, 15] as const;
 export type FacelessDuration = (typeof FACELESS_DURATIONS)[number];

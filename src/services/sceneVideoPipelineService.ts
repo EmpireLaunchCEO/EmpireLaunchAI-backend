@@ -11,7 +11,7 @@ import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; sourceImages?: string[]; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; }
 /** Sora 2 intermittently reports status:failed ~55-90s into generation. Scene motion
  *  scenes retry up to 2 extra attempts with short backoff (mirrors the single-shot
  *  Customize Video worker in videoQueueService.ts). Worst case: 3 × ~90s + 25s backoff
@@ -210,11 +210,12 @@ export class SceneVideoPipelineService {
       trace(`gpt52_script_start project=${projectId}`);
       try {
         const toneHint = input.tone && input.tone !== 'auto' ? ` Use a ${input.tone} narration tone.` : '';
+        const moodHint = input.mood ? ` Overall mood: ${input.mood} — apply it to the visual tone AND the narration of every scene.` : '';
         // Scale the number of scenes with the duration: ~1 short scene per 6s so every
         // scene stays a renderable single shot (a lone Sora clip cannot produce ~100s).
         const sceneCount = targetSceneCount(duration);
         const perScene = Math.max(1, Math.round(duration / sceneCount));
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
         generatedScript = (decision as any).script || (decision as any).parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
