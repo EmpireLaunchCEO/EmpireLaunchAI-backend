@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
+import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { usageService } from '../services/usageService.js';
 import { creationEngine } from '../services/creationEngine.js';
 import { neuralActionEngine } from '../services/neuralActionEngine.js';
@@ -159,12 +160,22 @@ export class CinemaController {
    */
   async createNeuralTwin(req: Request, res: Response): Promise<void> {
     try {
-      const { photoPath, script, voiceStyle } = req.body;
+      const { photoPath, script, voiceStyle, mood } = req.body;
       const userId = resolveUserId(req) || 'system';
 
       if (!photoPath && !req.body.photoUrl) {
         res.status(400).json({ error: 'photoPath or photoUrl and script are required' });
         return;
+      }
+      // Owner-locked mood (shared with Faceless/Scene-Based). Validate; 'auto'/empty -> undefined.
+      let moodVal: string | undefined;
+      if (mood !== undefined && mood !== null && String(mood).trim() !== '' && String(mood).toLowerCase() !== 'auto') {
+        const m = String(mood).toLowerCase();
+        if (!isValidMood(m)) {
+          res.status(400).json({ error: `Invalid mood "${mood}". Allowed: ${VIDEO_MOODS.join(', ')}` });
+          return;
+        }
+        moodVal = m;
       }
 
       const result = await cinemaEngineService.createNeuralTwin({
@@ -173,6 +184,7 @@ export class CinemaController {
         photoUrl: req.body.photoUrl,
         script,
         voiceStyle,
+        mood: moodVal,
       });
 
       // Save to creations table so it shows up in Operations page

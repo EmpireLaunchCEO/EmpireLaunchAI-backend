@@ -20,6 +20,7 @@ export interface TwinCreationRequest {
   script: string;      // What the twin should say
   voiceStyle?: string; // 'natural' | 'energetic' | 'calm'
   voiceId?: string;
+  mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
 }
 
 export interface CinemaAsset {
@@ -67,7 +68,7 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, photoUrl, script, voiceStyle } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle, mood } = request;
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -83,7 +84,7 @@ export class CinemaEngineService {
 
       // Step 2: Try Sora 2 for direct video generation
       try {
-        const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle);
+        const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle, mood);
         console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
 
         const soraResult = await soraVideoService.generateVideo(soraPrompt);
@@ -159,8 +160,9 @@ export class CinemaEngineService {
   /**
    * Build a Sora 2 prompt from facial DNA + script for Neural Twin generation.
    */
-  private buildSoraTwinPrompt(facialDna: FacialDNA, script: string, voiceStyle?: string): string {
+  private buildSoraTwinPrompt(facialDna: FacialDNA, script: string, voiceStyle?: string, mood?: string): string {
     const style = voiceStyle || 'natural';
+    const moodClause = mood ? `\nOverall mood: ${mood} — the person's delivery, expression and the scene lighting should all convey a ${mood} tone.` : '';
     return `Create a realistic talking-head video of a person with the following characteristics:
 
 Face: ${facialDna.faceShape} face shape, ${facialDna.skinTone} skin tone, ${facialDna.eyeColor} eyes.
@@ -170,7 +172,7 @@ Features: ${facialDna.jawline} jawline, ${facialDna.lipShape} lips, ${facialDna.
 The person is speaking directly to camera in a ${style} tone, delivering this script:
 "${script}"
 
-Style: professional, well-lit studio background, natural head movement, ${style} expression.`;
+Style: professional, well-lit studio background, natural head movement, ${style} expression.${moodClause}`;
   }
 
   /** Load a photo as a base64 data-URI from either a local path or an http(s) URL. */
