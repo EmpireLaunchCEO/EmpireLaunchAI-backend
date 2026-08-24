@@ -173,16 +173,39 @@ The person is speaking directly to camera in a ${style} tone, delivering this sc
 Style: professional, well-lit studio background, natural head movement, ${style} expression.`;
   }
 
+  /** Load a photo as a base64 data-URI from either a local path or an http(s) URL. */
+  private async loadImageDataUri(ref: string): Promise<{ dataUri: string; mime: string }> {
+    const mime = (name: string) =>
+      /\.png$/i.test(name) ? 'image/png'
+      : /\.webp$/i.test(name) ? 'image/webp'
+      : /\.pdf$/i.test(name) ? 'application/pdf'
+      : 'image/jpeg';
+    if (/^https?:\/\//i.test(ref)) {
+      const res = await fetch(ref, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error(`fetch photo failed ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      return { dataUri: `data:${res.headers.get('content-type') || mime(ref)};base64,${buf.toString('base64')}`, mime: res.headers.get('content-type') || mime(ref) };
+    }
+    if (!fs.existsSync(ref)) throw new Error(`photo file not found: ${ref}`);
+    const buf = fs.readFileSync(ref);
+    const m = mime(ref);
+    return { dataUri: `data:${m};base64,${buf.toString('base64')}`, mime: m };
+  }
+
   /**
-   * Extract Facial DNA from a user photo using Gemini Vision.
+   * Extract Facial DNA from the user's uploaded photo.
+   *
+   * The uploaded photo MUST be what drives the "AI person", so this first attempts
+   * a REAL vision call: the raw image bytes are attached (data URI) to a gpt-5.2
+   * chat-completions request so the model actually SEES the face. If the vision
+   * call is unavailable/fails (custom key / model without vision), it degrades to
+   * the legacy text-only LangChain chain, and finally to safe generic defaults —
+   * identical to the pre-hardening behavior, so nothing regresses.
    */
   private async extractFacialDna(userId: string, photoPath: string): Promise<FacialDNA> {
-    const model = await resolveStudioReasoner();
-    
-    const template = `
+    const prompt = `
       Analyze this portrait photo and extract the facial characteristics.
-      
-      Return JSON:
+      Return JSON with EXACTLY these keys:
       - faceShape: "oval" | "round" | "square" | "heart" | "diamond" | "oblong"
       - skinTone: string (e.g. "fair", "medium", "olive", "brown", "dark")
       - eyeColor: string
@@ -193,28 +216,78 @@ Style: professional, well-lit studio background, natural head movement, ${style}
       - noseShape: "straight" | "aquiline" | "button" | "wide"
       - eyebrowShape: "arched" | "straight" | "rounded"
       - distinctiveFeatures: string[]
-    `;
+      Return ONLY the JSON object — no markdown, no commentary.`;
 
-    const prompt = PromptTemplate.fromTemplate(template);
-    const chain = RunnableSequence.from([prompt, model, new JsonOutputParser()]);
+    let result: any = null;
 
-    const result = await chain.invoke({ imagePath: photoPath }) as any;
-    
+    // Attempt 1: true vision — attach the actual photo to a multimodal chat call.
+    const apiKey = process.env.OPENAI_API_KEY;
+    try {
+      if (apiKey) {
+        const { dataUri } = await this.loadImageDataUri(photoPath);
+        const visionRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model: 'gpt-5.2',
+            temperature: 0.2,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: dataUri } },
+              ],
+            }],
+          }),
+          signal: AbortSignal.timeout(90000),
+        });
+        if (visionRes.ok) {
+          const j = await visionRes.json();
+          const text = j?.choices?.[0]?.message?.content;
+          if (typeof text === 'string') {
+            const cleaned = text.replace(/```json|```/g, '').trim();
+            const parsed = JSON.parse(cleaned);
+            if (parsed && typeof parsed === 'object') {
+              result = parsed;
+              console.log(`[CinemaEngine] Facial DNA extracted via vision (image attached) for user ${userId}`);
+            }
+          }
+        } else {
+          console.warn(`[CinemaEngine] Vision DNA call failed (${visionRes.status}); falling back to text chain`);
+        }
+      }
+    } catch (visionErr: any) {
+      console.warn(`[CinemaEngine] Vision DNA error: ${visionErr.message}; falling back to text chain`);
+    }
+
+    // Attempt 2: legacy text-only chain (pre-hardening behavior).
+    if (!result) {
+      try {
+        const model = await resolveStudioReasoner();
+        const chain = RunnableSequence.from([PromptTemplate.fromTemplate(prompt), model, new JsonOutputParser()]);
+        result = await chain.invoke({ imagePath: photoPath }) as any;
+      } catch (leafErr: any) {
+        console.warn(`[CinemaEngine] Text-chain DNA failed: ${leafErr.message}; using generic defaults`);
+      }
+    }
+
     // Save facial DNA to file for reuse
-    const dnaPath = path.join(this.facialDnaDir, `${userId}_dna.json`);
-    fs.writeFileSync(dnaPath, JSON.stringify(result, null, 2));
+    try {
+      const dnaPath = path.join(this.facialDnaDir, `${userId}_dna.json`);
+      fs.writeFileSync(dnaPath, JSON.stringify(result || {}, null, 2));
+    } catch {}
 
     return {
-      faceShape: result.faceShape || 'oval',
-      skinTone: result.skinTone || 'medium',
-      eyeColor: result.eyeColor || 'brown',
-      hairStyle: result.hairStyle || 'straight',
-      hairColor: result.hairColor || 'brown',
-      jawline: result.jawline || 'defined',
-      lipShape: result.lipShape || 'medium',
-      noseShape: result.noseShape || 'straight',
-      eyebrowShape: result.eyebrowShape || 'arched',
-      distinctiveFeatures: result.distinctiveFeatures || [],
+      faceShape: result?.faceShape || 'oval',
+      skinTone: result?.skinTone || 'medium',
+      eyeColor: result?.eyeColor || 'brown',
+      hairStyle: result?.hairStyle || 'straight',
+      hairColor: result?.hairColor || 'brown',
+      jawline: result?.jawline || 'defined',
+      lipShape: result?.lipShape || 'medium',
+      noseShape: result?.noseShape || 'straight',
+      eyebrowShape: result?.eyebrowShape || 'arched',
+      distinctiveFeatures: Array.isArray(result?.distinctiveFeatures) ? result.distinctiveFeatures : [],
     };
   }
 
