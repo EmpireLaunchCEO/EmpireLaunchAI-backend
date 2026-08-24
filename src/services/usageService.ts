@@ -43,12 +43,11 @@ export class UsageService {
    * The app owner (Staci) has unlimited usage on everything.
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
-    // Weekly video-production quotas (168-hour rolling window).
-    // Faceless is a cheap short-clip path and stays at 7/week (owner didn't change it);
-    // Scene-Based (customize_video) and Neural Twin (neural_twin) are the costly renders,
-    // reduced to 5/week (owner cost-control decision).
-    const weeklyFacelessLimit = 7;
-    const weeklyVideoLimit = 5;
+    // Weekly video-production quotas (168-hour rolling window), final owner config:
+    // Scene-Based (customize_video) = 3/wk, Faceless = 10/wk, Neural Twin (neural_twin) = 5/wk.
+    const weeklySceneLimit = 3;   // customize_video
+    const weeklyFacelessLimit = 10;
+    const weeklyTwinLimit = 5;    // neural_twin
     const monthlyDesignLimit = 50;
     // Unidentified / non-UUID caller — never run a Postgres query with the raw
     // value (it would throw a uuid cast error). There is no user row to count
@@ -57,8 +56,9 @@ export class UsageService {
       console.warn(`[UsageService] Quota lookup with non-UUID userId "${userId}" (type=${type}) — returning full allowance`);
       if (type === 'enhanced_video' || type === 'edits') return 'unlimited';
       if (type === 'high_res_design') return monthlyDesignLimit;
+      if (type === 'customize_video') return weeklySceneLimit;
       if (type === 'faceless') return weeklyFacelessLimit;
-      if (type === 'neural_twin' || type === 'customize_video') return weeklyVideoLimit;
+      if (type === 'neural_twin') return weeklyTwinLimit;
       return 3;
     }
 
@@ -100,9 +100,10 @@ export class UsageService {
       } catch {
         periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       }
-      // Faceless is a cheap short-clip path (stays at 7/wk);
-      // Scene-Based + Neural Twin are the costly renders (reduced to 5/wk).
-      limit = (type === 'faceless') ? weeklyFacelessLimit : weeklyVideoLimit;
+      // Final per-type weekly limits: customize_video=3, faceless=10, neural_twin=5.
+      if (type === 'customize_video') limit = weeklySceneLimit;
+      else if (type === 'faceless') limit = weeklyFacelessLimit;
+      else limit = weeklyTwinLimit; // neural_twin
     } else {
       periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       limit = 3; // Default daily limit for others
@@ -167,10 +168,13 @@ export class UsageService {
       if (type === 'high_res_design') {
         period = 'month';
         limit = 50;
+      } else if (type === 'customize_video') {
+        period = 'week';
+        limit = 3;
       } else if (type === 'faceless') {
         period = 'week';
-        limit = 7;
-      } else if (type === 'neural_twin' || type === 'customize_video') {
+        limit = 10;
+      } else if (type === 'neural_twin') {
         period = 'week';
         limit = 5;
       }

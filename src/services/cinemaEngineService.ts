@@ -21,6 +21,7 @@ export interface TwinCreationRequest {
   voiceStyle?: string; // 'natural' | 'energetic' | 'calm'
   voiceId?: string;
   mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
+  duration?: number;   // requested twin video length (seconds); honored via frame pacing (Sora single-clip cannot take a duration param)
 }
 
 export interface CinemaAsset {
@@ -68,7 +69,7 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, photoUrl, script, voiceStyle, mood } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration } = request;
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -82,7 +83,11 @@ export class CinemaEngineService {
       // Step 1: Extract Facial DNA from photo using Gemini Vision
       const facialDna = await this.extractFacialDna(userId, inputPath);
 
-      // Step 2: Try Sora 2 for direct video generation
+      // Step 2: Try Sora 2 for direct video generation.
+      // NOTE: We intentionally do NOT pass a `duration` to Sora — the configured Sora
+      // endpoint rejects an arbitrary duration param (400 unknown parameter: duration).
+      // Target length (when requested) is honored in the fallback frame pipeline via
+      // frame pacing instead.
       try {
         const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle, mood);
         console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
@@ -116,12 +121,15 @@ export class CinemaEngineService {
         console.warn(`[CinemaEngine] Sora 2 error: ${soraErr.message}. Falling back.`);
       }
 
-      // Fallback: legacy frame-by-frame pipeline
+      // Fallback: legacy frame-by-frame pipeline.
+      // Honor the requested twin duration (30/60s) via frame pacing — a Sora single
+      // clip cannot accept a duration param, so we reach the target by generating the
+      // right number of frames and holding each frame for the matching duration.
       const lipSyncData = await this.generateLipSyncReasoning(script);
       const framePaths = await this.generateTalkingFrames(
-        facialDna, lipSyncData, script, this.cinemaDir, assetId
+        facialDna, lipSyncData, script, this.cinemaDir, assetId, duration
       );
-      await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData);
+      await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
 
       // Upload to R2 if available
       const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
@@ -331,10 +339,17 @@ Style: professional, well-lit studio background, natural head movement, ${style}
     lipSyncData: any,
     script: string,
     outputDir: string,
-    assetId: string
+    assetId: string,
+    duration?: number
   ): Promise<string[]> {
     const framePaths: string[] = [];
-    const totalFrames = Math.max(4, Math.ceil((lipSyncData.estimatedDuration || 5) * 2)); // 2fps
+    // When a target duration is requested, derive the frame count at constant 2fps so
+    // the final video reaches ~`duration` seconds. Otherwise keep the original
+    // script-length estimate (~5s).
+    const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+      ? Math.min(duration, 60) // cap at 1 minute to bound render cost
+      : (lipSyncData.estimatedDuration || 5);
+    const totalFrames = Math.max(4, Math.ceil(targetDuration * 2)); // 2fps
 
     // Generate frame descriptions for different parts of the script
     const emotions = lipSyncData.keyEmotions || ['confident'];
@@ -364,7 +379,8 @@ Style: professional, well-lit studio background, natural head movement, ${style}
   private async composeNeuralTwinVideo(
     framePaths: string[],
     outputPath: string,
-    lipSyncData: any
+    lipSyncData: any,
+    duration?: number
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const command = ffmpeg();
@@ -374,7 +390,13 @@ Style: professional, well-lit studio background, natural head movement, ${style}
         command.input(fp).inputOptions(['-framerate', '1/0.5']);
       });
 
-      const fps = Math.max(1, Math.floor(framePaths.length / (lipSyncData.estimatedDuration || 5)));
+      // When a target duration is requested, pace output so the composed length is
+      // ~`duration` (frame count already sized for it); otherwise keep the original
+      // script-length estimate.
+      const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+        ? Math.min(duration, 60)
+        : (lipSyncData.estimatedDuration || 5);
+      const fps = Math.max(1, Math.floor(framePaths.length / targetDuration));
 
       command
         .outputOptions([

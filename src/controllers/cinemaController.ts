@@ -178,6 +178,19 @@ export class CinemaController {
         moodVal = m;
       }
 
+      // Neural Twin requested duration (seconds). Frontend sends 30/60/'' (default '30').
+      // Validate to 30 or 60; empty/absent keeps current default behavior.
+      let durationVal: number | undefined;
+      const rawDuration = req.body.duration;
+      if (rawDuration !== undefined && rawDuration !== null && String(rawDuration).trim() !== '' && String(rawDuration).toLowerCase() !== 'auto') {
+        const d = Number(rawDuration);
+        if (!Number.isFinite(d) || (d !== 30 && d !== 60)) {
+          res.status(400).json({ error: `Invalid Neural Twin duration "${rawDuration}". Allowed: 30 or 60 seconds` });
+          return;
+        }
+        durationVal = d;
+      }
+
       const result = await cinemaEngineService.createNeuralTwin({
         userId,
         photoPath,
@@ -185,6 +198,7 @@ export class CinemaController {
         script,
         voiceStyle,
         mood: moodVal,
+        duration: durationVal,
       });
 
       // Save to creations table so it shows up in Operations page
