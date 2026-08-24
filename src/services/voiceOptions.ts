@@ -113,7 +113,7 @@ export function isValidMood(value: unknown): value is VideoMood {
   return typeof value === 'string' && (VIDEO_MOODS as readonly string[]).includes(value.toLowerCase());
 }
 /** Allowed Faceless durations (seconds). Others are rejected at the gate. */
-export const FACELESS_DURATIONS = [10, 15] as const;
+export const FACELESS_DURATIONS = [10, 15, 30] as const;
 export type FacelessDuration = (typeof FACELESS_DURATIONS)[number];
 /** Default Faceless duration when none supplied. */
 export const DEFAULT_FACELESS_DURATION: FacelessDuration = 15;
