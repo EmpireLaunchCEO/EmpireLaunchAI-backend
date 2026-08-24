@@ -390,7 +390,13 @@ router.post('/process', async (req: Request, res: Response) => {
       case 'image_creation':
       case 'image_editing': {
         try {
-          const imageResult = await renderingEngine.renderImage(decision.prompt, uid);
+                    // Use the user's uploaded design/reference image (if any) to drive GPT-Image,
+          // else text-only. Frontend sends it as sourceImages[0] or imageUrl.
+          let designInputImage: string | undefined;
+          const bodyImages = (req.body as any)?.sourceImages;
+          if (Array.isArray(bodyImages) && bodyImages.length) designInputImage = String(bodyImages[0]);
+          if (!designInputImage && typeof (req.body as any)?.imageUrl === 'string') designInputImage = (req.body as any).imageUrl;
+          const imageResult = await renderingEngine.renderImage(decision.prompt, uid, designInputImage);
 
           if (!imageResult.success) {
             return res.status(500).json({

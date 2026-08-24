@@ -198,6 +198,22 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
   }
   return arc;
 }
+/** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
+function isVideoUrl(url: string): boolean {
+  const clean = (url.split('?')[0] || '').toLowerCase();
+  return /\.(mp4|mov|webm|m4v|mkv|avi)$/.test(clean);
+}
+/** Enrich a per-scene visual prompt so the user's uploaded image becomes the continuous subject. */
+function withSourceSubject(prompt: string, sourceImage?: string): string {
+  if (!sourceImage) return prompt;
+  return `${prompt} — Use the user's uploaded reference image as the hero and continuous subject: ${sourceImage}. Keep this exact subject visible and consistent across every scene; do NOT swap it for a different subject.`;
+}
+/** Enrich the scene-script GPT prompt so the planner keeps the uploaded image as the subject. */
+function sourceScriptHint(sourceImage?: string): string {
+  if (!sourceImage) return '';
+  return ` The user uploaded a reference image as the one continuous subject: ${sourceImage}. Scene 1 (the hook) MUST lead with, and clearly establish, this exact image/subject. Every later scene keeps the SAME subject (the uploaded image's subject) so the video feels coherent — never replace it with a different one.`;
+}
+
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
     trace(`project_create_start user=${input.userId}`);
@@ -215,7 +231,8 @@ export class SceneVideoPipelineService {
         // scene stays a renderable single shot (a lone Sora clip cannot produce ~100s).
         const sceneCount = targetSceneCount(duration);
         const perScene = Math.max(1, Math.round(duration / sceneCount));
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
+        const srcHint = sourceScriptHint(input.sourceImages?.[0]);
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
         generatedScript = (decision as any).script || (decision as any).parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
@@ -236,6 +253,10 @@ export class SceneVideoPipelineService {
     const pmeta = ((projectRow?.metadata as any) || {});
     const voice = pmeta.voice as 'female' | 'male' | undefined;
     const tone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
+    const sourceImages: string[] = Array.isArray(pmeta.sourceImages)
+      ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
+      : [];
+    const heroSource = sourceImages[0];
     if (!skipGeneration) {
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
@@ -248,7 +269,7 @@ export class SceneVideoPipelineService {
       // is unchanged.
       const outcomes = await mapLimit(scenes, SCENE_CONCURRENCY, async (scene: any) => {
         try {
-          await withDeadline(this.processScene(scene, userId, voice, tone), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
           return { status: 'rejected' as const, reason };
@@ -350,10 +371,14 @@ export class SceneVideoPipelineService {
       await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
-      if(scene.visualType==='still'){const result=await renderingEngine.renderImage(scene.visualPrompt); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
+      // Use the uploaded source image as the continuous subject. Where the provider
+      // supports an input image we pass it; otherwise we inject the reference URL
+      // strongly into the prompt so the subject is derived from it.
+      const subjectPrompt = withSourceSubject(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
+      if(scene.visualType==='still'){const result=await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
       else {
         // Motion scenes: Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
         let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
@@ -365,7 +390,7 @@ export class SceneVideoPipelineService {
             trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
-          soraResult = await soraVideoService.generateVideo(scene.visualPrompt, { userId: undefined });
+          soraResult = await soraVideoService.generateVideo(subjectPrompt, { userId: undefined });
           if (soraResult.success && soraResult.videoPath) break;
           trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
         }
