@@ -2,7 +2,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
-const { usageLogs, users, creations } = schema;
+const { usageLogs, users, creations, approvals } = schema;
 
 // Postgres stores user ids as UUID columns. Guard every DB query with this so a
 // non-UUID sentinel ('anonymous', 'system', '') never reaches Postgres and
@@ -48,9 +48,9 @@ export class UsageService {
     // usage against, so report the full allowance for the type (never crash).
     if (!isValidUuid(userId)) {
       console.warn(`[UsageService] Quota lookup with non-UUID userId "${userId}" (type=${type}) — returning full allowance`);
-      if (type === 'faceless' || type === 'enhanced_video' || type === 'edits') return 'unlimited';
+      if (type === 'enhanced_video' || type === 'edits') return 'unlimited';
       if (type === 'high_res_design') return 50;
-      if (type === 'neural_twin' || type === 'customize_video') return 7;
+      if (type === 'neural_twin' || type === 'customize_video' || type === 'faceless') return 7;
       return 3;
     }
 
@@ -60,7 +60,7 @@ export class UsageService {
     }
 
     // Unlimited check
-    if (type === 'faceless' || type === 'enhanced_video' || type === 'edits') {
+    if (type === 'enhanced_video' || type === 'edits') {
       return 'unlimited';
     }
 
@@ -77,7 +77,7 @@ export class UsageService {
       periodStart = startOfMonth;
       limit = monthlyDesignLimit;
       // TODO: Reset on subscription renewal date instead of calendar month
-    } else if (type === 'neural_twin' || type === 'customize_video') {
+    } else if (type === 'neural_twin' || type === 'customize_video' || type === 'faceless') {
       // Calculate 168-hour window from user's signup date
       try {
         const [user] = await db.select({ createdAt: users.createdAt })
@@ -117,6 +117,20 @@ export class UsageService {
         return Math.max(0, limit - Number(result?.count ?? 0));
       }
 
+      if (type === 'faceless') {
+        // Faceless videos are submitted as `approvals` rows with type 'faceless'
+        // (no `creations` row is written for them). Count faceless submissions
+        // within the period so the 7/week quota reflects real submissions.
+        const [result] = await db.select({ count: count() })
+          .from(approvals)
+          .where(and(
+            eq(approvals.userId, userId),
+            eq(approvals.type, 'faceless'),
+            gte(approvals.createdAt, periodStart)
+          ));
+        return Math.max(0, limit - Number(result?.count ?? 0));
+      }
+
       const logs = await db.select()
         .from(usageLogs)
         .where(
@@ -146,7 +160,7 @@ export class UsageService {
       if (type === 'high_res_design') {
         period = 'month';
         limit = 50;
-      } else if (type === 'neural_twin' || type === 'customize_video') {
+      } else if (type === 'neural_twin' || type === 'customize_video' || type === 'faceless') {
         period = 'week';
         limit = 7;
       }
