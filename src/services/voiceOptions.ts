@@ -81,7 +81,26 @@ export function resolveVoice(gender?: VoiceGender, tone?: VoiceTone): GptAudioVo
 
 /** Default gpt-audio voice (used when no gender/tone supplied). */
 export const DEFAULT_VOICE: GptAudioVoice = 'nova';
-
+/**
+ * Owner-LOCKED Faceless mood starter set (do not add/remove — owner-approved
+ * 2026-08-24). Feed `mood` into the per-scene prompt so the video's tone
+ * reflects it. Backend validation + frontend badge must both use these keys.
+ */
+export const FACELESS_MOODS = [
+  'energetic',
+  'sad',
+  'calm',
+  'romantic',
+  'playful',
+  'dramatic',
+  'inspiring',
+] as const;
+export type FacelessMood = (typeof FACELESS_MOODS)[number];
+/** Allowed Faceless durations (seconds). Others are rejected at the gate. */
+export const FACELESS_DURATIONS = [10, 15] as const;
+export type FacelessDuration = (typeof FACELESS_DURATIONS)[number];
+/** Default Faceless duration when none supplied. */
+export const DEFAULT_FACELESS_DURATION: FacelessDuration = 15;
 /**
  * Build the `audio` payload for the gpt-audio chat/completions call.
  * Always mp3 — verified working and smaller than wav for R2/serving.
