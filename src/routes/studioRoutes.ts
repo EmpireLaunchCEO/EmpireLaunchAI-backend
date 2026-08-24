@@ -1089,9 +1089,9 @@ router.post('/video-project', async (req: Request, res: Response) => {
     if (!resolvedUserId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' });
     const { title, idea, platforms, style, script } = req.body;
     const durationTarget = Number(req.body.durationTarget || req.body.duration || 30);
-    // Reject out-of-range durations up front with a clear message (5 min max).
+    // Reject out-of-range durations up front with a clear message (3 min max).
     if (!Number.isFinite(durationTarget) || durationTarget < 1 || durationTarget > MAX_SCENE_DURATION) {
-      return res.status(400).json({ status: 'error', error: `duration must be between 1 and ${MAX_SCENE_DURATION} seconds (5 minutes)` });
+      return res.status(400).json({ status: 'error', error: `duration must be between 1 and ${MAX_SCENE_DURATION} seconds (3 minutes)` });
     }
     // Shared voiceover controls (same options as Customize Video) + screenshot source images.
     const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
