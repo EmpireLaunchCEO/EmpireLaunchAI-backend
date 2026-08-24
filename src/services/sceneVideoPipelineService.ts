@@ -105,13 +105,13 @@ function concatClips(inputs: string[], output: string): Promise<void> { return n
     reject(new Error('xfade concat failed: '+e.message));
   }
 }); }
-/** Max Scene-Based video duration (5 minutes). Durations above this are rejected at the route. */
-export const MAX_SCENE_DURATION = 300;
+/** Max Scene-Based video duration (3 minutes). Durations above this are rejected at the route. */
+export const MAX_SCENE_DURATION = 180;
 /** Target ~1 scene per 6s of video so every scene stays a short, renderable single Sora shot. */
 const SECONDS_PER_SCENE = 6;
 const MIN_SCENES = 3;
 const MAX_SCENES = 60;
-/** Bounded parallelism for scene generation — a 5-min (30–60 scene) video must NOT fire
+/** Bounded parallelism for scene generation — a 3-min (15–30 scene) video must NOT fire
  *  that many concurrent Sora/gpt-audio calls (rate limits, cost spike, memory). */
 const SCENE_CONCURRENCY = 3;
 /** Per-scene provider deadline (unchanged from prior behaviour). */
@@ -222,7 +222,7 @@ export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
-    // Clamp to the 5-min cap (defense in depth — the route also rejects > MAX).
+    // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
     let generatedScript = input.script;
