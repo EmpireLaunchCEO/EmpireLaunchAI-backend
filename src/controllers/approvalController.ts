@@ -3,6 +3,12 @@ import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { usageService } from '../services/usageService.js';
+import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import {
+  FACELESS_MOODS,
+  FACELESS_DURATIONS,
+  DEFAULT_FACELESS_DURATION,
+} from '../services/voiceOptions.js';
 import { db, schema } from '../db/index.js';
 import { eq, sql, and, inArray } from 'drizzle-orm';
 import axios from 'axios';
@@ -56,17 +62,78 @@ export const createApproval = async (req: Request, res: Response) => {
 
     // Shared voiceover controls + screenshot source images (Faceless box).
     // Merged into payload so downstream consumers read them; only present if sent.
-    const enrichedPayload = {
+    const enrichedPayload: any = {
       ...(payload || {}),
       ...(req.body.voice === 'female' || req.body.voice === 'male' ? { voice: req.body.voice } : {}),
       ...(['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? { tone: req.body.tone } : {}),
       ...(Array.isArray(req.body.sourceImages) && req.body.sourceImages.length ? { sourceImages: req.body.sourceImages } : {}),
     };
 
-    const approval = await approvalService.createRequest(
-      userId,
-      type,
-      description,
+    // ── Faceless: validate + persist mood/duration, then render via scene
+    //    composition (NOT a Sora `duration` param — the endpoint rejects it).
+    //    The scene pipeline gives a beginning→middle→CTA arc with smooth xfade
+    //    transitions and targets ~10–15s by splitting duration across scenes.
+    let facelessProjectId: string | undefined;
+    if (type === 'faceless') {
+      const moodRaw = req.body.mood !== undefined ? req.body.mood : (payload as any)?.mood;
+      const durationRaw = req.body.duration !== undefined ? req.body.duration : (payload as any)?.duration;
+      const mood = moodRaw !== undefined && moodRaw !== null && String(moodRaw).trim() !== '' && String(moodRaw).toLowerCase() !== 'auto'
+        ? String(moodRaw).toLowerCase()
+        : undefined;
+      if (mood && !(FACELESS_MOODS as readonly string[]).includes(mood)) {
+        return res.status(400).json({ error: `Invalid faceless mood "${mood}". Allowed: ${FACELESS_MOODS.join(', ')}` });
+      }
+      const durationNum = durationRaw !== undefined && durationRaw !== null && String(durationRaw).trim() !== ''
+        ? Number(durationRaw)
+        : DEFAULT_FACELESS_DURATION;
+      const duration: number = Number.isFinite(durationNum) ? durationNum : DEFAULT_FACELESS_DURATION;
+      if (!(FACELESS_DURATIONS as readonly number[]).includes(duration)) {
+        return res.status(400).json({ error: `Invalid faceless duration "${durationRaw}". Allowed: ${FACELESS_DURATIONS.join(', ')} seconds` });
+      }
+      enrichedPayload.mood = mood;
+      enrichedPayload.duration = duration;
+      // Feed mood into the per-scene prompt so the video's tone reflects it.
+      const moodHint = mood ? ` Use a ${mood} mood across every scene and the narration.` : '';
+      const facelessIdea = `${description.trim()}${moodHint}`;
+      try {
+        facelessProjectId = await sceneVideoPipelineService.createProject({
+          userId,
+          title: description.trim().slice(0, 80),
+          idea: facelessIdea,
+          durationTarget: duration,
+          style: mood ?? '',
+          platforms: [],
+          voice: enrichedPayload.voice,
+          tone: enrichedPayload.tone,
+          sourceImages: enrichedPayload.sourceImages,
+        });
+        if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
+      } catch (renderErr: any) {
+        // Render init must not fail the submission receipt / quota; log and
+        // continue so the user still gets a faceless approval row.
+        console.error('[Approval] Faceless render init failed:', renderErr?.message);
+      }
+    }
+
+    // Persist the approval. Faceless rows are the 7/week quota record + a
+    // submission receipt (the actual delivered video surfaces from the scene
+    // pipeline as a completed `video` creation/approval). Use a terminal status
+    // (approved = auto-launched, no manual gate) so this receipt does NOT show
+    // as a dangling 'pending' or a broken asset-less 'completed' card in the
+    // Operations feed, while still being counted for the 7/week quota.
+    const approval = type === 'faceless'
+      ? (await db.insert(approvals).values({
+          userId,
+          type,
+          payload: { ...enrichedPayload, category: enrichedPayload.category || 'faceless-video', status: 'processing', projectId: facelessProjectId },
+          status: 'approved',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }).returning())[0]
+      : await approvalService.createRequest(
+          userId,
+          type,
+          description,
       enrichedPayload
     );
 
