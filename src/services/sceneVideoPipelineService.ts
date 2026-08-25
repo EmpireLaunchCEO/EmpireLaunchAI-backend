@@ -332,51 +332,59 @@ export class SceneVideoPipelineService {
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
-      // ── Deliver to Operations page: mirror single-shot path — create a `creations`
-      //    row (type 'video', status 'completed') so the project's final video shows up in
-      //    GET /api/studio/assets AND an approvals row so it appears in the approval feed.
-      //    Scene projects previously wrote ONLY to video_projects/video_scenes, so completed
-      //    videos never surfaced on the Operations page. (Owner: "delivered to Operations page".)
+      // ── Deliver to Operations page AS DRAFTS (owner auto-save change) ────
+      //    Videos + variants do NOT auto-go to the Library. They land in Operations
+      //    as draft approval rows; the client previews/downloads there and taps
+      //    Save (POST /api/approval/save-to-library) which moves each into the
+      //    Client Asset Library with the 90-day expiry starting at save time.
+      //    We therefore write ONLY approvals here — never `creations`/Library rows.
+      //    The approvals feed IS the Operations feed (GET /api/approval/pending)
+      //    and each payload carries videoUrl + ratioLabel + shape so preview,
+      //    download and save-to-library all work per variant.
       try {
-        const creationId = uuidv4();
         const projectRow = projectId;
         let projectTitle = 'Scene-Based Video';
         try {
           const [pRow] = await db.select({ title: schema.videoProjects.title }).from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId));
           if (pRow?.title) projectTitle = pRow.title;
         } catch {}
-        // Primary 9:16 master — label it so it reads "Vertical · TikTok" alongside variants.
-        await db.insert(schema.creations).values({
-          id: creationId,
+
+        // Shared draft metadata: mode:'scene' marks these for the scene quota
+        // (counted by distinct projectId — see usageService.getDailyRemaining),
+        // saved:false flags them as not-yet-in-Library drafts.
+        const draftBase = {
+          projectId,
+          mode: 'scene',
+          provider: 'ffmpeg',
+          saved: false,
+        };
+
+        // Primary 9:16 master — labelled "Vertical · TikTok" alongside variants.
+        await db.insert(schema.approvals).values({
+          id: uuidv4(),
           userId,
           type: 'video',
-          title: projectTitle,
-          status: 'completed',
-          fileUrl: finalUrl,
-          metadata: {
-            source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg',
-            aspectRatio: '9:16', ratioLabel: 'AI Video (9:16 · TikTok/Reels/Shorts)', shape: 'vertical',
-            ...(primaryR2Key ? { r2Key: primaryR2Key } : {}),
+          status: 'completed', // generation done; still a draft until Saved
+          payload: {
+            assetId: uuidv4(),
+            title: projectTitle,
+            videoUrl: finalUrl,
+            r2Key: primaryR2Key,
+            platforms: [],
+            status: 'completed',
+            aspectRatio: '9:16',
+            ratioLabel: 'AI Video (9:16 · TikTok/Reels/Shorts)',
+            shape: 'vertical',
+            ...draftBase,
           },
           createdAt: new Date(),
           updatedAt: new Date(),
         });
-        trace(`project_library_creation project=${projectId} creation=${creationId}`);
-        try {
-          await db.insert(schema.approvals).values({
-            id: uuidv4(),
-            userId,
-            type: 'video',
-            status: 'completed',
-            payload: { assetId: creationId, title: projectTitle, videoUrl: finalUrl, platforms: [], status: 'completed', aspectRatio: '9:16', ratioLabel: 'AI Video (9:16 · TikTok/Reels/Shorts)', shape: 'vertical' },
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-        } catch (apprErr: any) { trace(`scene_approval_insert_failed project=${projectId} err=${apprErr?.message}`); }
+        trace(`scene_draft_master project=${projectId}`);
 
         // ── Export variants (16:9, 1:1, 2:3): pure FFmpeg contain/pad refits from the
-        //    assembled master — no AI calls, no crop. Each becomes its own creation +
-        //    approval row so it surfaces in Library/Operations with a distinct ratio label.
+        //    assembled master — no AI calls, no crop. Each becomes its own draft
+        //    approval row (NOT a creation/Library row) with a distinct ratio label.
         let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
         try {
           variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
@@ -386,42 +394,34 @@ export class SceneVideoPipelineService {
         }
         for (const vr of variantResults) {
           try {
-            const vCreationId = uuidv4();
-            await db.insert(schema.creations).values({
-              id: vCreationId,
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
               userId,
               type: 'video',
-              title: `${projectTitle}`,
               status: 'completed',
-              fileUrl: vr.fileUrl,
-              metadata: {
-                source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg',
-                aspectRatio: vr.variant.aspectRatio, ratioLabel: vr.variant.label, shape: vr.variant.shape,
-                variantOf: creationId,
-                ...(vr.r2Key ? { r2Key: vr.r2Key } : {}),
+              payload: {
+                assetId: uuidv4(),
+                title: `${projectTitle} (${vr.variant.aspectRatio})`,
+                videoUrl: vr.fileUrl,
+                r2Key: vr.r2Key,
+                platforms: [],
+                status: 'completed',
+                aspectRatio: vr.variant.aspectRatio,
+                ratioLabel: vr.variant.label,
+                shape: vr.variant.shape,
+                ...draftBase,
               },
               createdAt: new Date(),
               updatedAt: new Date(),
             });
-            try {
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId,
-                type: 'video',
-                status: 'completed',
-                payload: { assetId: vCreationId, title: `${projectTitle} (${vr.variant.aspectRatio})`, videoUrl: vr.fileUrl, platforms: [], status: 'completed', aspectRatio: vr.variant.aspectRatio, ratioLabel: vr.variant.label, shape: vr.variant.shape },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
-            } catch (apprErr: any) { trace(`scene_variant_approval_failed project=${projectId} err=${apprErr?.message}`); }
-            trace(`export_variant_creation project=${projectId} ratio=${vr.variant.key} creation=${vCreationId}`);
-          } catch (vLibErr: any) {
-            trace(`scene_variant_library_insert_failed project=${projectId} err=${vLibErr?.message}`);
+            trace(`scene_draft_variant project=${projectId} ratio=${vr.variant.key}`);
+          } catch (vApprErr: any) {
+            trace(`scene_variant_draft_failed project=${projectId} err=${vApprErr?.message}`);
           }
         }
       } catch (libErr: any) {
-        // Library/approval persistence must never fail the pipeline — log and continue.
-        trace(`scene_library_insert_failed project=${projectId} err=${libErr?.message}`);
+        // Draft persistence must never fail the pipeline — log and continue.
+        trace(`scene_draft_insert_failed project=${projectId} err=${libErr?.message}`);
       }
     } catch(assemblyErr:any) {
       trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
