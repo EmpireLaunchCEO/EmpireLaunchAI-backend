@@ -9,6 +9,7 @@ import { soraVideoService } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
+import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; }
@@ -325,8 +326,9 @@ export class SceneVideoPipelineService {
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
       const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
       let finalUrl=assembled;
+      let primaryR2Key: string | undefined;
       if(r2Storage.isAvailable) {
-        try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; }
+        try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; primaryR2Key=uploaded.r2Key; }
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
@@ -343,6 +345,7 @@ export class SceneVideoPipelineService {
           const [pRow] = await db.select({ title: schema.videoProjects.title }).from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId));
           if (pRow?.title) projectTitle = pRow.title;
         } catch {}
+        // Primary 9:16 master — label it so it reads "Vertical · TikTok" alongside variants.
         await db.insert(schema.creations).values({
           id: creationId,
           userId,
@@ -350,7 +353,11 @@ export class SceneVideoPipelineService {
           title: projectTitle,
           status: 'completed',
           fileUrl: finalUrl,
-          metadata: { source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg' },
+          metadata: {
+            source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg',
+            aspectRatio: '9:16', ratioLabel: 'AI Video (9:16 · TikTok/Reels/Shorts)', shape: 'vertical',
+            ...(primaryR2Key ? { r2Key: primaryR2Key } : {}),
+          },
           createdAt: new Date(),
           updatedAt: new Date(),
         });
@@ -361,11 +368,57 @@ export class SceneVideoPipelineService {
             userId,
             type: 'video',
             status: 'completed',
-            payload: { assetId: creationId, title: projectTitle, videoUrl: finalUrl, platforms: [], status: 'completed' },
+            payload: { assetId: creationId, title: projectTitle, videoUrl: finalUrl, platforms: [], status: 'completed', aspectRatio: '9:16', ratioLabel: 'AI Video (9:16 · TikTok/Reels/Shorts)', shape: 'vertical' },
             createdAt: new Date(),
             updatedAt: new Date(),
           });
         } catch (apprErr: any) { trace(`scene_approval_insert_failed project=${projectId} err=${apprErr?.message}`); }
+
+        // ── Export variants (16:9, 1:1, 2:3): pure FFmpeg contain/pad refits from the
+        //    assembled master — no AI calls, no crop. Each becomes its own creation +
+        //    approval row so it surfaces in Library/Operations with a distinct ratio label.
+        let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
+        try {
+          variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
+          trace(`export_variants_ok project=${projectId} count=${variantResults.length}`);
+        } catch (varErr: any) {
+          trace(`export_variants_failed project=${projectId} err=${varErr?.message}`);
+        }
+        for (const vr of variantResults) {
+          try {
+            const vCreationId = uuidv4();
+            await db.insert(schema.creations).values({
+              id: vCreationId,
+              userId,
+              type: 'video',
+              title: `${projectTitle}`,
+              status: 'completed',
+              fileUrl: vr.fileUrl,
+              metadata: {
+                source: 'scene-based-video', projectId: projectRow, mode: 'scene', provider: 'ffmpeg',
+                aspectRatio: vr.variant.aspectRatio, ratioLabel: vr.variant.label, shape: vr.variant.shape,
+                variantOf: creationId,
+                ...(vr.r2Key ? { r2Key: vr.r2Key } : {}),
+              },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+            try {
+              await db.insert(schema.approvals).values({
+                id: uuidv4(),
+                userId,
+                type: 'video',
+                status: 'completed',
+                payload: { assetId: vCreationId, title: `${projectTitle} (${vr.variant.aspectRatio})`, videoUrl: vr.fileUrl, platforms: [], status: 'completed', aspectRatio: vr.variant.aspectRatio, ratioLabel: vr.variant.label, shape: vr.variant.shape },
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              });
+            } catch (apprErr: any) { trace(`scene_variant_approval_failed project=${projectId} err=${apprErr?.message}`); }
+            trace(`export_variant_creation project=${projectId} ratio=${vr.variant.key} creation=${vCreationId}`);
+          } catch (vLibErr: any) {
+            trace(`scene_variant_library_insert_failed project=${projectId} err=${vLibErr?.message}`);
+          }
+        }
       } catch (libErr: any) {
         // Library/approval persistence must never fail the pipeline — log and continue.
         trace(`scene_library_insert_failed project=${projectId} err=${libErr?.message}`);
