@@ -2,7 +2,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
-const { usageLogs, users, creations, approvals } = schema;
+const { usageLogs, users, approvals } = schema;
 
 // Postgres stores user ids as UUID columns. Guard every DB query with this so a
 // non-UUID sentinel ('anonymous', 'system', '') never reaches Postgres and
@@ -111,17 +111,20 @@ export class UsageService {
 
     try {
       if (type === 'customize_video') {
-        // Customize Video creations are stored in `creations` with type
-        // 'enhanced_video'. Count those within the period instead of usage_logs
-        // (which is never written for customize_video) so the 7/week quota and
-        // the client-facing counter both reflect real usage.
+        // Scene-Based / Customize Video quota. Since the owner auto-save change,
+        // completed scene videos are delivered as Operations draft APPROVAL rows
+        // (payload.mode='scene', payload.projectId) — NOT `creations` rows anymore.
+        // Count DISTINCT scene projectIds within the period so each generation
+        // counts once regardless of how many export variants it produced.
         const [result] = await db.select({ count: count() })
-          .from(creations)
-          .where(and(
-            eq(creations.userId, userId),
-            eq(creations.type, 'enhanced_video'),
-            gte(creations.createdAt, periodStart)
-          ));
+          .from(sql`(
+            SELECT DISTINCT payload->>'projectId' AS pid
+            FROM approvals
+            WHERE user_id = ${userId}
+              AND payload->>'mode' = 'scene'
+              AND payload->>'projectId' IS NOT NULL
+              AND created_at >= ${periodStart}
+          ) AS _scene_drafts`);
         return Math.max(0, limit - Number(result?.count ?? 0));
       }
 
