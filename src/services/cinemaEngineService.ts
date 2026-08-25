@@ -347,7 +347,7 @@ Style: professional, well-lit studio background, natural head movement, ${style}
     // the final video reaches ~`duration` seconds. Otherwise keep the original
     // script-length estimate (~5s).
     const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-      ? Math.min(duration, 60) // cap at 1 minute to bound render cost
+      ? Math.min(duration, 30) // cap at 30s (max allowed Neural Twin duration; bounds render cost)
       : (lipSyncData.estimatedDuration || 5);
     const totalFrames = Math.max(4, Math.ceil(targetDuration * 2)); // 2fps
 
@@ -394,7 +394,7 @@ Style: professional, well-lit studio background, natural head movement, ${style}
       // ~`duration` (frame count already sized for it); otherwise keep the original
       // script-length estimate.
       const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-        ? Math.min(duration, 60)
+        ? Math.min(duration, 30)
         : (lipSyncData.estimatedDuration || 5);
       const fps = Math.max(1, Math.floor(framePaths.length / targetDuration));
 
