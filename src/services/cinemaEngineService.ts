@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
 import { soraVideoService } from './soraVideoService.js';
+import { generateVideoExportVariants, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
@@ -31,6 +32,7 @@ export interface CinemaAsset {
   status: 'processing' | 'completed' | 'failed';
   metadata: any;
   error?: string;
+  variants?: ExportVariantResult[];
 }
 
 export interface FacialDNA {
@@ -74,6 +76,17 @@ export class CinemaEngineService {
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
 
+    // Export variants (16:9, 1:1, 2:3) generated from the twin master — pure FFmpeg
+    // contain/pad refits (no AI calls, no crop). Populated after the master render.
+    let exportVariants: Awaited<ReturnType<typeof generateVideoExportVariants>> = [];
+    const generateTwinVariants = async () => {
+      try {
+        exportVariants = await generateVideoExportVariants(outputPath, userId, 'cinema/twins');
+      } catch (e: any) {
+        console.warn(`[CinemaEngine] Twin export variants failed: ${e?.message}`);
+      }
+    };
+
     try {
       if (!inputPath) throw new Error('No input photo provided');
 
@@ -104,6 +117,7 @@ export class CinemaEngineService {
 
           await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'sora-2' });
 
+          await generateTwinVariants();
           return {
             id: assetId,
             videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
@@ -114,6 +128,7 @@ export class CinemaEngineService {
               facialDna,
               engine: 'Sora 2 Neural Twin',
             },
+            variants: exportVariants,
           };
         }
         console.warn(`[CinemaEngine] Sora 2 failed: ${soraResult.error}. Falling back to frame pipeline...`);
@@ -140,6 +155,7 @@ export class CinemaEngineService {
         try { fs.unlinkSync(fp); } catch {}
       }
 
+      await generateTwinVariants();
       return {
         id: assetId,
         videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
@@ -151,6 +167,7 @@ export class CinemaEngineService {
           lipSyncComplexity: lipSyncData.phonemeComplexity,
           engine: 'Empire Cinema Neural Layer v2 (fallback)',
         },
+        variants: exportVariants,
       };
     } catch (error: any) {
       console.error('[CinemaEngine] Neural Twin failed:', error.message);
