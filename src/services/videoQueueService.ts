@@ -378,18 +378,56 @@ export function startVideoQueueWorker(): void {
           updatedAt: new Date(),
         }).where(eq(schema.creations.id, creationId));
 
-        // Approval
+        // Approval (master = draft in Operations; NOT auto-saved to Library)
         try {
           await db.insert(schema.approvals).values({
             id: uuidv4(),
             userId,
             type: 'video',
             status: 'completed',
-            payload: { assetId: creationId, title: prompt.slice(0, 60), videoUrl, platforms, status: 'completed' },
+            payload: { assetId: creationId, title: prompt.slice(0, 60), videoUrl, platforms, status: 'completed', mode: 'single-shot', saved: false },
             createdAt: new Date(),
             updatedAt: new Date(),
           });
         } catch {}
+
+        // ── Export variants (16:9, 1:1, 2:3): pure FFmpeg contain/pad refits
+        //    from the assembled master — no AI calls, no crop. Each becomes its
+        //    own draft approval row (Operations), never auto-saved to Library.
+        if (soraResult.videoPath && fs.existsSync(soraResult.videoPath)) {
+          try {
+            const { generateVideoExportVariants } = await import('./videoExportVariants.js');
+            const variants = await generateVideoExportVariants(soraResult.videoPath, userId, 'video-projects');
+            for (const v of variants) {
+              try {
+                await db.insert(schema.approvals).values({
+                  id: uuidv4(),
+                  userId,
+                  type: 'video',
+                  status: 'completed',
+                  payload: {
+                    assetId: uuidv4(),
+                    title: `${prompt.slice(0, 50)} (${v.variant.aspectRatio})`,
+                    videoUrl: v.fileUrl,
+                    r2Key: v.r2Key,
+                    platforms,
+                    status: 'completed',
+                    aspectRatio: v.variant.aspectRatio,
+                    ratioLabel: v.variant.label,
+                    shape: v.variant.shape,
+                    mode: 'single-shot',
+                    saved: false,
+                  },
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+              } catch {}
+            }
+            console.log(`[VideoQueue] Export variants published: ${variants.length} for ${creationId}`);
+          } catch (varErr: any) {
+            console.warn(`[VideoQueue] Export variants failed: ${varErr.message}`);
+          }
+        }
 
         console.log(`[VideoQueue] Job completed: ${creationId}`);
       } catch (err: any) {

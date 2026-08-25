@@ -325,6 +325,11 @@ export const saveToLibrary = async (req: Request, res: Response) => {
       approval.type === 'design' ? 'design' : 'video';
     const brandId = userId; // Use userId as fallback brand
 
+    // Preserve export-variant labels on the saved Library asset (UI-only).
+    const variantMeta = (payload?.ratioLabel ? {
+      aspectRatio: payload.aspectRatio, ratioLabel: payload.ratioLabel, shape: payload.shape,
+    } : {});
+
     let asset: any;
 
     if (videoUrl && videoUrl.startsWith('brands/')) {
@@ -342,7 +347,7 @@ export const saveToLibrary = async (req: Request, res: Response) => {
           name: title.slice(0, 60),
           filePath: copyResult.key,
           mimeType: `video/${ext}`,
-          metadata: { source: 'approval', approvalId },
+          metadata: { source: 'approval', approvalId, ...variantMeta },
         });
       } else {
         return res.status(500).json({ error: 'R2 copy failed', detail: copyResult.error });
@@ -365,7 +370,7 @@ export const saveToLibrary = async (req: Request, res: Response) => {
           userId,
           assetType as any,
           title.slice(0, 60),
-          { source: 'approval', approvalId, originalUrl: videoUrl },
+          { source: 'approval', approvalId, originalUrl: videoUrl, ...variantMeta },
         );
       } catch (downloadErr: any) {
         return res.status(500).json({ error: 'Download failed', detail: downloadErr.message });
@@ -385,7 +390,7 @@ export const saveToLibrary = async (req: Request, res: Response) => {
             name: title.slice(0, 60),
             filePath: copyResult.key,
             mimeType: `image/${ext}`,
-            metadata: { source: 'approval', approvalId },
+            metadata: { source: 'approval', approvalId, ...variantMeta },
           });
         } else {
           return res.status(500).json({ error: 'R2 copy failed', detail: copyResult.error });
@@ -402,7 +407,7 @@ export const saveToLibrary = async (req: Request, res: Response) => {
           userId,
           'design',
           title.slice(0, 60),
-          { source: 'approval', approvalId, originalUrl: imageUrl },
+          { source: 'approval', approvalId, originalUrl: imageUrl, ...variantMeta },
         );
       }
     } else {

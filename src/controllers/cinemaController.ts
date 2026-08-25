@@ -212,6 +212,58 @@ export class CinemaController {
           fileUrl: result.videoUrl,
           metadata: { photoPath, voiceStyle, script: script?.slice(0, 100) },
         }).onConflictDoNothing();
+
+        // Owner auto-save change: also deliver the twin + its export variants as
+        // OPERATIONS DRAFTS (draft approval rows, saved:false) so the client can
+        // preview/download each and Save (POST /api/approval/save-to-library) to
+        // move it into the Library with 90-day expiry from save time. Never auto-
+        // saved to Library.
+        try {
+          // Master draft
+          await db.insert(schema.approvals).values({
+            id: uuidv4(),
+            userId,
+            type: 'video',
+            status: 'completed',
+            payload: {
+              assetId: uuidv4(),
+              title: `Neural Twin - ${path.basename(result.videoUrl || '')}`,
+              videoUrl: result.videoUrl,
+              platforms: [],
+              status: 'completed',
+              mode: 'twin',
+              saved: false,
+            },
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+          // Variant drafts
+          for (const v of (result.variants || [])) {
+            await db.insert(schema.approvals).values({
+              id: uuidv4(),
+              userId,
+              type: 'video',
+              status: 'completed',
+              payload: {
+                assetId: uuidv4(),
+                title: `Neural Twin (${v.variant.aspectRatio})`,
+                videoUrl: v.fileUrl,
+                r2Key: v.r2Key,
+                platforms: [],
+                status: 'completed',
+                aspectRatio: v.variant.aspectRatio,
+                ratioLabel: v.variant.label,
+                shape: v.variant.shape,
+                mode: 'twin',
+                saved: false,
+              },
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+          }
+        } catch (draftErr: any) {
+          console.warn('[Cinema] Twin draft approvals failed:', draftErr?.message);
+        }
       }
 
       res.json({
