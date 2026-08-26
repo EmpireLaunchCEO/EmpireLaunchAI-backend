@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 export const onboardUser = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     
     let stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
 
@@ -38,7 +38,7 @@ export const onboardUser = async (req: Request, res: Response) => {
 
 export const getAccountStatus = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
 
     if (!stripeAccountId) {
@@ -59,7 +59,7 @@ export const getAccountStatus = async (req: Request, res: Response) => {
 
 export const createPaymentLink = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { name, description, priceInCents } = req.body;
 
     const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
@@ -130,7 +130,7 @@ export const createPaymentLink = async (req: Request, res: Response) => {
 
 export const createPaymentButton = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { name, description, priceInCents, buttonText, buttonColor } = req.body;
 
     const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
@@ -180,7 +180,7 @@ export const createPaymentButton = async (req: Request, res: Response) => {
 
 export const triggerInstantPayout = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { amountInCents } = req.body;
 
     const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
@@ -266,7 +266,7 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
 
 export const createFinancialConnectionsSession = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const stripeAccountId = await vaultService.getSecret(userId, 'stripe', 'stripe_account_id');
 
     if (!stripeAccountId) {
