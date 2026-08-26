@@ -70,33 +70,72 @@ function concatClips(inputs: string[], output: string): Promise<void> { return n
   if (inputs.length === 1) {
     const cmd = ffmpeg().input(inputs[0]);
     cmd.outputOptions(['-c:v','libx264','-pix_fmt','yuv420p','-r','30']);
+    // single-input re-encode carries all streams (incl. audio) through by default
     return void cmd.save(output).on('end',()=>resolve()).on('error',reject);
   }
-  try {
-    // First pass: probe each clip's duration via ffprobe so xfade offsets are exact.
-    const seconds = inputs.map((f)=>{
+  const probe = (f: string): { seconds: number; hasAudio: boolean } => {
+    try {
+      const dur = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
+      const seconds = Number.isFinite(parseFloat(dur)) ? parseFloat(dur) : 3;
+      let hasAudio = false;
       try {
-        const out = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
-        const n = parseFloat(out); return Number.isFinite(n) ? n : 3; // default 3s
-      } catch { return 3; }
-    });
-    const filter = [];
+        const a = execFileSync('ffprobe',['-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0',f],{maxBuffer:1024*1024}).toString().trim();
+        hasAudio = a.length > 0;
+      } catch { hasAudio = false; }
+      return { seconds, hasAudio };
+    } catch { return { seconds: 3, hasAudio: false }; }
+  };
+  try {
+    // First pass: probe each clip's duration + whether it has an audio track so
+    // xfade offsets are exact and audio can be crossfaded and mapped into the final.
+    const probes = inputs.map(probe);
+    const seconds = probes.map(p => p.seconds);
     const tr = TR_MS/1000;
+    const filter = [];
     let offsetAcc = 0;
-    // xfade chain. IMPORTANT: the FIRST input is stream 0:v (it is never renamed),
-    // so the first transition is [0:v][1:v]xfade[v1]. Each following transition
-    // reuses the previous output label: [v1][2:v]xfade[v2], [v2][3:v]xfade[v3], ...
+    // xfade chain (VIDEO). IMPORTANT: the FIRST input is stream 0:v (never renamed),
+    // so the first transition is [0:v][1:v]xfade[v1]; each following reuses the
+    // previous output: [v1][2:v]xfade[v2], ...
     offsetAcc = Math.max(0, seconds[0] - tr);
     filter.push(`[0:v][1:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
     for (let i=2;i<inputs.length;i++){
       offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
       filter.push(`[v${i-1}][${i}:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
     }
+    // ── AUDIO: carry each clip's narration through with acrossfade between
+    //    consecutive audio-bearing clips (same overlap tr as the video xfade), then
+    //    map it into the output. This was the missing piece — the old assembler ran
+    //    xfade on video only and mapped ONLY [vN], silently dropping every clip's
+    //    audio track (the gpt-audio narration), producing a silent final MP4.
+    const anyAudio = probes.some(p => p.hasAudio);
+    const audioFilter: string[] = [];
+    let audioMap: string | null = null;
+    if (anyAudio) {
+      let aIdx = 0;
+      let audioLast: string | null = null;
+      for (let i = 0; i < inputs.length; i++) {
+        if (!probes[i].hasAudio) continue;
+        const tag = `[${i}:a]`;
+        if (audioLast === null) { audioLast = tag; }
+        else {
+          audioFilter.push(`${audioLast}${tag}acrossfade=d=${tr}[amix${aIdx}]`);
+          audioLast = `[amix${aIdx}]`;
+          aIdx++;
+        }
+      }
+      if (audioLast) {
+        // filter-output labels stay bracketed for -map ([amixN]); a lone input
+        // stream (only one clip has audio) must map bare (e.g. 0:a).
+        audioMap = aIdx > 0 ? audioLast : audioLast.replace(/^\[|\]$/g, '');
+      }
+    }
     return void (async()=>{
-      const fc = filter.join(';');
+      const fc = filter.concat(audioFilter).join(';');
       const args:string[] = [];
       inputs.forEach(i=>{ args.push('-i',i); });
-      args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']','-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
+      args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']');
+      if (audioMap) { args.push('-map', audioMap, '-c:a','aac','-b:a','128k'); }
+      args.push('-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
       execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
         if(err) reject(new Error('ffmpeg xfade exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
         else resolve();
@@ -138,18 +177,25 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
   const rem = durationTarget - base * count;
   return Array.from({ length: count }, (_, i) => {
     const f = count <= 1 ? 0.5 : i / (count - 1); // 0..1 story progress
-    const beat = f < 0.25 ? 'hook' : f < 0.75 ? 'development' : 'payoff';
+    // Distinct beats so every scene ADVANCES the narrative instead of repeating a
+    // handful of near-identical variants (quality bug from the old 3-group arc).
     let narration: string;
     let visualPrompt: string;
-    if (beat === 'hook') {
-      narration = `Opening scene: introducing ${idea}.`;
-      visualPrompt = `Cinematic opening establishing shot: ${idea} — the hook, subject clearly introduced`;
-    } else if (beat === 'development') {
-      narration = `Development scene: seeing ${idea} come to life and its benefit in action.`;
-      visualPrompt = `Cinematic middle shot: ${idea} developing, the transformation or key benefit in action, continuous with the opening subject`;
+    if (f < 0.25) {
+      narration = `Opening — introducing ${idea}.`;
+      visualPrompt = `Cinematic establishing shot: hook intro of ${idea}, the subject shown clearly for the first time`;
+    } else if (f < 0.5) {
+      narration = `Getting started: the essentials of ${idea} come into focus.`;
+      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${idea}, subject continues from the opening, early stage`;
+    } else if (f < 0.75) {
+      narration = `Now it comes together — the transformation and key benefit of ${idea} in action.`;
+      visualPrompt = `Cinematic wide shot: ${idea} delivering its key benefit, the transformation in progress, same continuous subject`;
+    } else if (f < 1) {
+      narration = `The payoff: look at the result ${idea} delivers.`;
+      visualPrompt = `Cinematic close-up: the payoff result of ${idea}, same continuous subject, breakthrough moment`;
     } else {
       narration = `Call to action: ready to take the next step with ${idea}?`;
-      visualPrompt = `Cinematic closing shot: ${idea} — payoff and a clear call-to-action, same continuous subject as the opening`;
+      visualPrompt = `Cinematic closing shot: ${idea} final call-to-action, same continuous subject, confident ending`;
     }
     return {
       sceneNumber: i + 1,
@@ -188,9 +234,13 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
     // Evenly distribute durationTarget across exactly `count` short scenes so every
     // clip is ~5-6s and renderable (a single Sora shot cannot produce ~100s). Use
     // GPT's visual/narration per scene when available; pad to `count` with the arc
-    // if GPT under-delivers.
+    // if GPT under-delivers. IMPORTANT: do NOT clamp the candidate index to the last
+    // element — clamping made every beyond-range slot a CLONE of the final scene
+    // (typically the CTA), which is why longer videos repeated the same visuals.
+    // Instead, read the candidate at `i` (undefined past the end) and fall back to
+    // the corresponding progressive arc beat so every scene stays distinct.
     return Array.from({ length: count }, (_, i) => {
-      const s = candidates[Math.min(i, candidates.length - 1)];
+      const s = candidates[i];
       const a = arc[i];
       return {
         sceneNumber: i + 1,
@@ -237,7 +287,7 @@ export class SceneVideoPipelineService {
         const sceneCount = targetSceneCount(duration);
         const perScene = Math.max(1, Math.round(duration / sceneCount));
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.`, mode: 'generate' });
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
         generatedScript = (decision as any).script || (decision as any).parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
