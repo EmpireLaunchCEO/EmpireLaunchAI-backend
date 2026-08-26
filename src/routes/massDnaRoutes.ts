@@ -58,7 +58,7 @@ router.post('/start', async (req: Request, res: Response) => {
  * POST /api/mass-dna/canva-gallery-harvest
  * Manually trigger the Canva gallery template DNA harvest.
  * Logs into Canva via Playwright using saved credentials and browses
- * trending templates across 14 categories (public + Pro).
+ * trending free/public templates across 14 categories (no Pro dependency).
  */
 router.post('/canva-gallery-harvest', async (req: Request, res: Response) => {
   try {

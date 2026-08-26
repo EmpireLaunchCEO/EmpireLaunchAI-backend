@@ -9,9 +9,12 @@ import { v4 as uuidv4 } from 'uuid';
  * Canva template DNA harvester.
  *
  * Uses the user's LINKED CANVA account credentials (saved during onboarding)
- * to log in via Playwright and browse BOTH public AND Pro templates across
+ * to log in via Playwright and browse FREE / PUBLIC templates across
  * 14 design categories. Extracts colors, fonts, backgrounds, and layout
  * DNA from each trending template and stores the results as DNA strands.
+ *
+ * No Canva Pro subscription required — the search explicitly requests
+ * free/public templates (pro=0) so the harvest never depends on a Pro account.
  *
  * No separate API keys needed — uses the same Neural Handshake credentials
  * the user already linked during onboarding.
@@ -50,10 +53,11 @@ export class CanvaDnaHarvesterService {
   // Pages of infinite scroll to load per search
   private readonly MAX_SCROLLS = 3;
 
-  // Canva search URL for each category (Pro filters enabled)
+  // Canva search URL for each category (FREE-only filter enabled — no Pro dependency.
+  // pro=0 requests free/public templates only, so the harvest runs without a Canva Pro subscription)
   private categoryUrl(category: string, keyword?: string): string {
     const query = keyword ? `${keyword} ${category}` : category;
-    return `https://www.canva.com/templates/?q=${encodeURIComponent(query)}&sort=trending&pro=1`;
+    return `https://www.canva.com/templates/?q=${encodeURIComponent(query)}&sort=trending&pro=0`;
   }
 
   /**
@@ -64,7 +68,7 @@ export class CanvaDnaHarvesterService {
   async harvestForUser(userId: string): Promise<{ totalStrands: number; categoriesHarvested: number }> {
     console.log(`[CanvaDnaHarvester] Starting harvest for user ${userId}`);
     webSocketService.notifyUser(userId, 'ai-log', {
-      message: '[CANVA] 🧬 Starting Playwright-based template DNA harvest (public + Pro)...',
+      message: '[CANVA] 🧬 Starting Playwright-based template DNA harvest (free/public templates)...',
     });
 
     let totalStrands = 0;

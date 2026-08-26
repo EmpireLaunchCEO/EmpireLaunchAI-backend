@@ -60,7 +60,7 @@ export class SchedulerService {
     }
 
     try {
-      // 2. Gallery template DNA (public + Pro) via Playwright-based harvester
+      // 2. Gallery template DNA (free/public, no Pro dependency) via Playwright-based harvester
       console.log(`[Scheduler] Starting Canva Gallery template DNA harvest for user ${canvaUserId}...`);
       const result = await canvaDnaHarvesterService.harvestForUser(canvaUserId);
       console.log(`[Scheduler] Gallery harvest: ${result.totalStrands} strands from ${result.categoriesHarvested} categories`);
