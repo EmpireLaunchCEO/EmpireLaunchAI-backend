@@ -39,17 +39,42 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
     );
   });
 }
+function inputHasAudio(input: string): boolean {
+  try {
+    return execFileSync('ffprobe', [
+      '-v', 'error', '-select_streams', 'a:0',
+      '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', input,
+    ], { maxBuffer: 1024 * 1024 }).toString().trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function renderClip(input: string, output: string, duration: number, audio?: string): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
     const isImage = /\.(png|jpe?g|webp|gif)$/i.test(input);
+    const sourceHasAudio = Boolean(audio && !isImage && inputHasAudio(input));
     const args: string[] = [];
     if (isImage) args.push('-loop','1','-i',input);
     else args.push('-i',input);
     if (audio) args.push('-i',audio);
     args.push('-map','0:v:0');
-    if (audio) args.push('-map','1:a:0','-shortest');
+    if (audio) {
+      if (sourceHasAudio) {
+        // Preserve dialogue/ambient audio from the generated clip while keeping
+        // narration subordinate. The old map selected only stream 1:a and
+        // silently discarded the people speaking in stream 0:a.
+        args.push(
+          '-filter_complex',
+          '[0:a:0]volume=1.0[program];[1:a:0]volume=0.42[narration];[program][narration]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0,alimiter=limit=0.95[aout]',
+          '-map', '[aout]',
+        );
+      } else {
+        args.push('-map','1:a:0');
+      }
+    }
     args.push('-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2');
     args.push('-t',String(duration));
     args.push('-c:v','libx264','-pix_fmt','yuv420p');
@@ -172,7 +197,14 @@ function targetSceneCount(durationTarget: number): number {
  * fallback when GPT returns no script and as the per-scene pad when it under-delivers.
  * Durations are distributed so the exact sum equals durationTarget.
  */
+function compactCreativeSubject(idea: string, maxChars = 160): string {
+  const firstSentence = String(idea || '').split(/(?<=[.!?])\s+/)[0]?.trim() || String(idea || '').trim();
+  if (firstSentence.length <= maxChars) return firstSentence;
+  return `${firstSentence.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
 function buildArcScenes(idea: string, count: number, durationTarget: number): SceneScript[] {
+  const subject = compactCreativeSubject(idea);
   const base = Math.floor(durationTarget / count);
   const rem = durationTarget - base * count;
   return Array.from({ length: count }, (_, i) => {
@@ -182,20 +214,20 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
     let narration: string;
     let visualPrompt: string;
     if (f < 0.25) {
-      narration = `Opening — introducing ${idea}.`;
-      visualPrompt = `Cinematic establishing shot: hook intro of ${idea}, the subject shown clearly for the first time`;
+      narration = `Opening — introducing ${subject}.`;
+      visualPrompt = `Cinematic establishing shot: hook intro of ${subject}, the subject shown clearly for the first time`;
     } else if (f < 0.5) {
-      narration = `Getting started: the essentials of ${idea} come into focus.`;
-      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${idea}, subject continues from the opening, early stage`;
+      narration = `Getting started: the essentials of ${subject} come into focus.`;
+      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${subject}, subject continues from the opening, early stage`;
     } else if (f < 0.75) {
-      narration = `Now it comes together — the transformation and key benefit of ${idea} in action.`;
-      visualPrompt = `Cinematic wide shot: ${idea} delivering its key benefit, the transformation in progress, same continuous subject`;
+      narration = `Now it comes together — the transformation and key benefit of ${subject} in action.`;
+      visualPrompt = `Cinematic wide shot: ${subject} delivering its key benefit, the transformation in progress, same continuous subject`;
     } else if (f < 1) {
-      narration = `The payoff: look at the result ${idea} delivers.`;
-      visualPrompt = `Cinematic close-up: the payoff result of ${idea}, same continuous subject, breakthrough moment`;
+      narration = `The payoff: look at the result ${subject} delivers.`;
+      visualPrompt = `Cinematic close-up: the payoff result of ${subject}, same continuous subject, breakthrough moment`;
     } else {
-      narration = `Call to action: ready to take the next step with ${idea}?`;
-      visualPrompt = `Cinematic closing shot: ${idea} final call-to-action, same continuous subject, confident ending`;
+      narration = `Call to action: ready to take the next step with ${subject}?`;
+      visualPrompt = `Cinematic closing shot: ${subject} final call-to-action, same continuous subject, confident ending`;
     }
     return {
       sceneNumber: i + 1,
@@ -226,7 +258,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
 
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const count = targetSceneCount(durationTarget);
-  const candidates = Array.isArray(raw?.scenes) ? raw.scenes : [];
+  const candidates = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
   const arc = buildArcScenes(idea, count, durationTarget);
   const base = Math.floor(durationTarget / count);
   const rem = durationTarget - base * count;
@@ -246,8 +278,8 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
         sceneNumber: i + 1,
         duration: base + (i < rem ? 1 : 0),
         visualType: s?.visualType === 'still' ? 'still' : 'motion',
-        narration: String(s?.narration || a.narration || ''),
-        visualPrompt: String(s?.visualPrompt || s?.visual_prompt || a.visualPrompt || idea),
+        narration: sceneCopyOrFallback(s?.narration, a.narration, a.duration, true),
+        visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
       };
     });
   }
@@ -269,10 +301,53 @@ function sourceScriptHint(sourceImage?: string): string {
   return ` The user uploaded a reference image as the one continuous subject: ${sourceImage}. Scene 1 (the hook) MUST lead with, and clearly establish, this exact image/subject. Every later scene keeps the SAME subject (the uploaded image's subject) so the video feels coherent — never replace it with a different one.`;
 }
 
+/**
+ * The consultant can hand the scene endpoint a transcript instead of a clean
+ * creative brief. Keep the actual idea while removing known UI/consultant
+ * framing so fallback scenes never narrate internal planning dialogue.
+ */
+function normalizeVideoIdea(rawIdea: string): string {
+  let idea = String(rawIdea || '').replace(/\s+/g, ' ').trim();
+  const ideaMarker = /here(?:\u2019|')s\s+my\s+video\s+idea\s*:/i;
+  const markerMatch = idea.match(ideaMarker);
+  if (markerMatch?.index !== undefined) idea = idea.slice(markerMatch.index + markerMatch[0].length).trim();
+
+  const endMarkers = [
+    /\bone\s+quick\s+detail\s+so\s+i\s+can\s+tailor\b/i,
+    /\bwhat(?:\u2019|')s\s+the\s+platform\s+name\s+you\s+want\s+shown\b/i,
+    /\bwhat\s+color\s+palette\s+should\b/i,
+    /\bgreat,\s*tap\s+the\s+wand\s+to\s+generate!?/i,
+  ];
+  for (const marker of endMarkers) {
+    const match = idea.match(marker);
+    if (match?.index !== undefined) idea = idea.slice(0, match.index).trim();
+  }
+
+  // Remove a consultant hand-off left at the end of the extracted brief.
+  idea = idea.replace(/\s+locked\s+in[.!]?\s*$/i, '').trim();
+  return idea || String(rawIdea || '').trim().slice(0, 1000);
+}
+
+const CONSULTANT_META_PATTERN = /let(?:\u2019|')s\s+design\s+your\s+video|what\s+visuals\s+are\s+you\s+imagining|i(?:\u2019|')ll\s+refine\s+the\s+script|one\s+quick\s+detail|default\s+suggestion|tap\s+the\s+wand\s+to\s+generate|what(?:\u2019|')s\s+the\s+platform\s+name|what\s+color\s+palette\s+should/i;
+
+function sceneCopyOrFallback(value: unknown, fallback: string, duration: number, narration: boolean): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text || CONSULTANT_META_PATTERN.test(text)) return fallback;
+  // A six-second scene can only carry a short complete line. Returning the
+  // arc fallback is safer than sending long text to TTS, which gets cut off by
+  // the scene's fixed duration and sounds like a clipped sentence.
+  const maxWords = narration ? Math.max(14, Math.round(duration * 2.75)) : 90;
+  if (text.split(/\s+/).length > maxWords) return fallback;
+  return text;
+}
+
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
+    // The consultant UI may send its transcript as `idea`; isolate the actual
+    // creative brief before it reaches the planner or fallback arc.
+    const cleanIdea = normalizeVideoIdea(input.idea);
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
@@ -287,12 +362,13 @@ export class SceneVideoPipelineService {
         const sceneCount = targetSceneCount(duration);
         const perScene = Math.max(1, Math.round(duration / sceneCount));
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script for this video idea: ${input.idea}. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
-        generatedScript = (decision as any).script || (decision as any).parameters?.script;
+        const maxNarrationWords = Math.max(14, Math.round(perScene * 2.75));
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt. Narration is the spoken copy for the final audience, not a description of the planning process. Each narration must be one complete, natural sentence of no more than ${maxNarrationWords} words so it finishes within its scene; never use phrases such as "Let's design your video", "One quick detail", "Default suggestion", "Locked in", or "tap the wand to generate".${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
+        generatedScript = decision.script || decision.parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
-    const script = parseScenes(generatedScript || {}, input.idea, duration);
+    const script = parseScenes(generatedScript || {}, cleanIdea, duration);
     await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[]}});
     await db.insert(schema.videoScenes).values(script.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending'})));
     trace(`project_created id=${projectId} scenes=${script.length}`);
