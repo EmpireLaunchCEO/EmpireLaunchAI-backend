@@ -27,6 +27,8 @@ export interface RouterDecision {
   requiresNewVisualContent?: boolean; // Video editing needs AI generation
   response?: string;                  // Natural language response (ai_assistant / interactive)
   needsRefinement?: boolean;          // If true, return to user for more input
+  /** Optional structured payload returned by specialized planners (for example scene scripts). */
+  script?: any;
 }
 
 export interface RouterRequest {
@@ -189,6 +191,10 @@ Return ONLY a JSON object with this exact structure:
         requiresNewVisualContent: parsed.requiresNewVisualContent || false,
         response: parsed.response,
         needsRefinement: parsed.needsRefinement || false,
+        // Specialized planner calls may return a structured script/scenes
+        // payload instead of the normal router fields. Preserve it so the
+        // caller does not silently fall back to a polluted raw chat transcript.
+        script: parsed.script || parsed.parameters?.script || (Array.isArray(parsed.scenes) ? { scenes: parsed.scenes } : undefined),
       };
     } catch {
       console.warn('[AiRouter] Failed to parse AI JSON. Raw text:', cleaned.slice(0, 200));
