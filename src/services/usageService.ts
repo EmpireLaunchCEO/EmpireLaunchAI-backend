@@ -1,8 +1,47 @@
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { OWNER_CONFIG } from '../config/owner.js';
 
 const { usageLogs, users, approvals } = schema;
+
+/**
+ * Gmail (and Googlemail) treat the local part as case-insensitive AND ignore
+ * '.' — so first.last@gmail.com, firstlast@gmail.com, First.Last@GMAIL.com are
+ * all the same mailbox. The owner's stored email can arrive in any dot-variant
+ * depending on how she signed up, so comparison must normalize those away or the
+ * exact-string owner check silently fails (real defect — the owner would be
+ * counted against client quota). Non-gmail addresses are lowercased only.
+ */
+function normalizeOwnerEmail(email: string): string {
+  const raw = String(email || '').trim().toLowerCase();
+  const at = raw.indexOf('@');
+  if (at <= 0) return raw;
+  const domain = raw.slice(at + 1);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    const local = raw.slice(0, at).replace(/\./g, '');
+    return `${local}@gmail.com`;
+  }
+  return raw;
+}
+
+/**
+ * Everything the app considers an owner account. Every entry is normalized so
+ * Gmail dot-variants collapse to one canonical comparison. OWNER_CONFIG.email is
+ * the primary owner email; the .ai address and the dotted variant are kept for
+ * robustness against older rows / internal accounts. The owner (Staci) is
+ * unlimited on ALL quotas.
+ */
+const OWNER_EMAILS = new Set([
+  normalizeOwnerEmail(OWNER_CONFIG.email),        // stacipeabody@gmail.com (canonical)
+  normalizeOwnerEmail('staci.peabody@gmail.com'), // dotted variant -> same mailbox
+  normalizeOwnerEmail('staci@empirelaunch.ai'),   // internal .ai account
+]);
+
+/** Tiers that are unbounded everywhere else in the codebase (subscriptionGuard,
+ *  revenueOracle) — treat them as owner-exempt here too for quota (defense in
+ *  depth beyond the email match; the owner's DB row is provisioned OWNER_MASTER). */
+const UNLIMITED_TIERS: ReadonlySet<string> = new Set(['OWNER_MASTER', 'BETA_TESTER']);
 
 // Postgres stores user ids as UUID columns. Guard every DB query with this so a
 // non-UUID sentinel ('anonymous', 'system', '') never reaches Postgres and
@@ -22,6 +61,13 @@ export class UsageService {
     // is a UUID FK). Unidentified callers simply have no quota attributable to them.
     if (!isValidUuid(userId)) {
       console.warn(`[UsageService] Skipping usage log for non-UUID userId "${userId}" (type=${type})`);
+      return;
+    }
+    // Owner is unlimited and her quota MUST NEVER be decremented by usage logs,
+    // nor should her rows accumulate in the shared usage_logs table. Skip writing
+    // usage for the owner entirely (client-facing counts are unaffected because
+    // every read is scoped to the caller's own userId).
+    if (await this.isOwner(userId)) {
       return;
     }
     try {
@@ -188,19 +234,29 @@ export class UsageService {
 
   /**
    * Check if a user is the app owner (unlimited usage).
+   * Owner detection is robust to Gmail dot-variants: the owner's stored email may
+   * be 'stacipeabody@gmail.com' or 'staci.peabody@gmail.com' (same Gmail mailbox),
+   * so we compare normalized addresses. We ALSO treat the unbounded tiers
+   * (OWNER_MASTER / BETA_TESTER) as owner-exempt as a defense in depth, because
+   * the owner's DB row is provisioned OWNER_MASTER and those tiers are already
+   * unbounded in subscriptionGuard/revenueOracle.
    */
   private ownerCache = new Set<string>();
   private async isOwner(userId: string): Promise<boolean> {
     if (this.ownerCache.has(userId)) return true;
     if (!isValidUuid(userId)) return false;
     try {
-      const [user] = await db.select({ email: users.email })
+      const [user] = await db.select({ email: users.email, tier: users.tier })
         .from(users)
         .where(eq(users.id, userId))
         .limit(1);
-      // Owner emails that get unlimited access
-      const ownerEmails = ['staci@empirelaunch.ai', 'staci.peabody@gmail.com'];
-      if (user?.email && ownerEmails.includes(user.email.toLowerCase())) {
+      // Tier-based exemption (defense in depth) — the owner's row is OWNER_MASTER.
+      if (user?.tier && UNLIMITED_TIERS.has(user.tier)) {
+        this.ownerCache.add(userId);
+        return true;
+      }
+      // Email-based exemption — normalized so Gmail dot/alias variants match.
+      if (user?.email && OWNER_EMAILS.has(normalizeOwnerEmail(user.email))) {
         this.ownerCache.add(userId);
         return true;
       }
@@ -208,6 +264,15 @@ export class UsageService {
       // Silently fail — default to limited
     }
     return false;
+  }
+
+  /**
+   * Public owner check for callers that bypass getDailyRemaining (e.g. the inline
+   * single-shot /process video quota gate in studioRoutes). Removes duplicate
+   * owner-listing logic from the route and keeps it centralized here.
+   */
+  async isOwnerUser(userId: string): Promise<boolean> {
+    return this.isOwner(userId);
   }
 }
 
