@@ -12,6 +12,7 @@ import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION } from '../services/sceneVideoPipelineService.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
+import { usageService } from '../services/usageService.js';
 
 const router = Router();
 
@@ -485,7 +486,7 @@ router.post('/process', async (req: Request, res: Response) => {
         } catch (quotaErr: any) {
           console.warn('[StudioRoute] Quota check failed, allowing video creation:', quotaErr.message);
         }
-        if (Number(videoCount) >= 7) {
+        if (Number(videoCount) >= 7 && !(await usageService.isOwnerUser(resolvedUserId))) {
           return res.status(429).json({
             status: 'error',
             error: 'You\'ve used 7/7 videos this week. Try again later when a slot frees up (rolling 7-day window).',
