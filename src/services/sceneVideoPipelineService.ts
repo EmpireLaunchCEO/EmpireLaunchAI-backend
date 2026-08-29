@@ -57,8 +57,20 @@ function renderClip(input: string, output: string, duration: number, audio?: str
     const isImage = /\.(png|jpe?g|webp|gif)$/i.test(input);
     const sourceHasAudio = Boolean(audio && !isImage && inputHasAudio(input));
     const args: string[] = [];
-    if (isImage) args.push('-loop','1','-i',input);
-    else args.push('-i',input);
+    if (isImage) {
+      // Still image: `-loop 1` feeds frames indefinitely so `-t duration` yields a
+      // clip of exactly the target length.
+      args.push('-loop','1','-i',input);
+    } else {
+      // Motion (Sora) clip: Sora frequently returns a shot SHORTER than the scene's
+      // configured duration (e.g. ~3.9s when the scene targets 6s). `-stream_loop -1`
+      // loops the whole input (video + any dialogue/ambient audio) so the clip is
+      // extended to fill the scene, and `-t duration` below caps it at exactly the
+      // target. Without this the clip was only truncated (never extended) and every
+      // under-length Sora shot silently shrank the delivered video (~35% short in the
+      // E2E QA render).
+      args.push('-stream_loop','-1','-i',input);
+    }
     if (audio) args.push('-i',audio);
     args.push('-map','0:v:0');
     if (audio) {
@@ -447,7 +459,14 @@ export class SceneVideoPipelineService {
         const local=String((scene.metadata as any)?.localPath||'');
         if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber}`); continue; }
         const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`); const audioLocal=String((scene.metadata as any)?.audioLocalPath||'');
-        if(scene.assetType==='image/png' || audioLocal) await renderClip(local,clip,scene.duration||3,audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined); else { fs.copyFileSync(local,clip); } clips.push(clip);
+        // Every scene is rendered through renderClip so the delivered clip is
+        // exactly scene.duration seconds: stills loop to length, and motion clips
+        // use `-stream_loop -1` to pad short Sora shots up to their target (the
+        // copyFileSync shortcut below was removed because it shipped raw Sora clips
+        // at their native short length — the root cause of ~35% duration under-delivery).
+        const sceneAudio = audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined;
+        await renderClip(local,clip,scene.duration||3,sceneAudio);
+        clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
       const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
