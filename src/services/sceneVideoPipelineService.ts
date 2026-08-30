@@ -12,7 +12,7 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; }
 /** Sora 2 intermittently reports status:failed ~55-90s into generation. Scene motion
  *  scenes retry up to 2 extra attempts with short backoff (mirrors the single-shot
  *  Customize Video worker in videoQueueService.ts). Worst case: 3 × ~90s + 25s backoff
@@ -50,17 +50,27 @@ function inputHasAudio(input: string): boolean {
   }
 }
 
-function renderClip(input: string, output: string, duration: number, audio?: string): Promise<void> {
+function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
     const isImage = /\.(png|jpe?g|webp|gif)$/i.test(input);
+    // Ken Burns applies ONLY to Faceless stills (gpt-image-2 + FFmpeg zoompan). Scene-Based
+    // and Neural Twin stay untouched. When enabled we feed the image ONCE (no `-loop 1`)
+    // and let zoompan synthesize the target number of frames for gentle pan/zoom motion.
+    const kenburns = Boolean(opts?.kenburns) && isImage;
     const sourceHasAudio = Boolean(audio && !isImage && inputHasAudio(input));
     const args: string[] = [];
     if (isImage) {
-      // Still image: `-loop 1` feeds frames indefinitely so `-t duration` yields a
-      // clip of exactly the target length.
-      args.push('-loop','1','-i',input);
+      if (kenburns) {
+        // Faceless: single still input; zoompan below generates `d` frames per second
+        // to produce smooth Ken Burns motion for the whole scene duration.
+        args.push('-i',input);
+      } else {
+        // Still image: `-loop 1` feeds frames indefinitely so `-t duration` yields a
+        // clip of exactly the target length (static hold — Scene-Based stills).
+        args.push('-loop','1','-i',input);
+      }
     } else {
       // Motion (Sora) clip: Sora frequently returns a shot SHORTER than the scene's
       // configured duration (e.g. ~3.9s when the scene targets 6s). `-stream_loop -1`
@@ -87,7 +97,14 @@ function renderClip(input: string, output: string, duration: number, audio?: str
         args.push('-map','1:a:0');
       }
     }
-    args.push('-vf','scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2');
+    args.push('-vf', kenburns
+      // Faceless Ken Burns: contain/refit the still to 1080x1920, then zoompan a slow,
+      // smooth center zoom-in. `d` = total frames for the scene (duration × 30fps) so
+      // the still animates for the whole scene instead of holding static. Zoom starts
+      // at 1.0 and creeps ~0.0015/frame, capped at 1.15 (gentle, never jumpy) — paced
+      // by scene length, never sped up. Keeps the exact 1080x1920 / 9:16 / 30fps contract.
+      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':d=${Math.max(1, Math.round(duration * 30))}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30`
+      : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`);
     args.push('-t',String(duration));
     args.push('-c:v','libx264','-pix_fmt','yuv420p');
     if (audio) args.push('-c:a','aac');
@@ -381,7 +398,12 @@ export class SceneVideoPipelineService {
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
     const script = parseScenes(generatedScript || {}, cleanIdea, duration);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[]}});
+    // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
+    // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
+    // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
+    const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
+    if (mode === 'faceless') { for (const s of script) { s.visualType = 'still'; } }
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode}});
     await db.insert(schema.videoScenes).values(script.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending'})));
     trace(`project_created id=${projectId} scenes=${script.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
@@ -400,6 +422,10 @@ export class SceneVideoPipelineService {
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
     const heroSource = sourceImages[0];
+    // Faceless projects animate every still scene with Ken Burns (FFmpeg zoompan); the
+    // flag flows into renderClip so ONLY faceless scenes pan/zoom (Scene scenes hold
+    // still or use Sora motion, and Neural Twin is a separate engine).
+    const isFaceless = (pmeta as any).mode === 'faceless';
     if (!skipGeneration) {
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
@@ -465,7 +491,7 @@ export class SceneVideoPipelineService {
         // copyFileSync shortcut below was removed because it shipped raw Sora clips
         // at their native short length — the root cause of ~35% duration under-delivery).
         const sceneAudio = audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined;
-        await renderClip(local,clip,scene.duration||3,sceneAudio);
+        await renderClip(local,clip,scene.duration||3,sceneAudio,{kenburns:isFaceless});
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
