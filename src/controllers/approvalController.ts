@@ -106,6 +106,9 @@ export const createApproval = async (req: Request, res: Response) => {
           voice: enrichedPayload.voice,
           tone: enrichedPayload.tone,
           sourceImages: enrichedPayload.sourceImages,
+          // Faceless renders scenes as gpt-image-2 stills animated with FFmpeg Ken Burns
+          // (zoompan) — never Sora motion — per the owner-approved cost model.
+          mode: 'faceless',
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
