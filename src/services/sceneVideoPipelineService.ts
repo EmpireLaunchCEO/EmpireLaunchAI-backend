@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService, snapSoraSeconds } from './soraVideoService.js';
+import { soraVideoService, snapSoraSeconds, SORA_SCENE_SIZE } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -674,16 +674,19 @@ export class SceneVideoPipelineService {
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
           const sceneSeconds = Math.min(20, scene.duration || 20);
+          const isImportant = Boolean(scene.metadata?.importantSora);
           soraResult = await soraVideoService.generateVideo(subjectPrompt, {
             userId: undefined,
             // ONE consolidated call for the important ~20s block. Length is set with
             // the OFFICIAL Sora 2 `seconds` enum (the live API rejects `duration` and
             // does not change length from prose). snapSoraSeconds picks the nearest
             // enum ≤ the scene target; FFmpeg -stream_loop -1 + -t in renderClip is a
-            // safety net only (never the primary length mechanism).
-            seconds: scene.metadata?.importantSora ? snapSoraSeconds(sceneSeconds) : undefined,
+            // safety net only (never the primary length mechanism). size is set
+            // EXPLICITLY to SORA_SCENE_SIZE so the 9:16 contract is deterministic.
+            seconds: isImportant ? snapSoraSeconds(sceneSeconds) : undefined,
+            size: isImportant ? SORA_SCENE_SIZE : undefined,
             // secondary content-continuity steer only (cannot change clip length).
-            promptHint: scene.metadata?.importantSora ? `Render ONE continuous ~${sceneSeconds}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
+            promptHint: isImportant ? `Render ONE continuous ~${sceneSeconds}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
           });
           if (soraResult.success && soraResult.videoPath) break;
           trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);

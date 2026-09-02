@@ -10,6 +10,12 @@ import { r2Storage } from './r2StorageService.js';
  *  enum only. */
 export type SoraSeconds = '4' | '8' | '12' | '16' | '20';
 
+/** Official Sora 2 resolution (`size`). sora-2 supports "720x1280" (default,
+ *  9:16 portrait) and "1280x720" (16:9). We set "720x1280" EXPLICITLY so the
+ *  9:16 scene contract is deterministic rather than relying on the API default. */
+export const SORA_SCENE_SIZE = '720x1280' as const;
+export type SoraSize = typeof SORA_SCENE_SIZE | '1280x720';
+
 const SORA_SECONDS_ENUM: SoraSeconds[] = ['4', '8', '12', '16', '20'];
 
 /** Snap a target clip length (seconds) to the OFFICIAL Sora `seconds` enum.
@@ -36,6 +42,7 @@ export function snapSoraSeconds(target: number): SoraSeconds {
 export function buildSoraCreateBody(model: string, prompt: string, options: SoraGenerationOptions): Record<string, unknown> {
   const body: Record<string, unknown> = { model, prompt };
   if (options.seconds) body.seconds = options.seconds;
+  if (options.size) body.size = options.size;
   if (options.promptHint) body.prompt = `${prompt}\n\n${options.promptHint}`;
   return body;
 }
@@ -47,6 +54,10 @@ export interface SoraGenerationOptions {
    *  `duration` and does NOT change length from prose. For the Scene hybrid's ONE
    *  important block we send "20" (snapped to the nearest enum ≤ the block target). */
   seconds?: SoraSeconds;
+  /** Official Sora 2 resolution. sora-2 supports "720x1280" (default, 9:16 portrait)
+   *  and "1280x720". We set SORA_SCENE_SIZE ("720x1280") EXPLICITLY on scene motion
+   *  so the 9:16 output contract is deterministic, not default-dependent. */
+  size?: SoraSize;
   /** LEGACY NO-OP — the live API rejects `duration` (400 "unknown parameter:
    *  duration"). Kept so old call sites (videoQueueService etc.) still compile;
    *  NEVER sent to the API. Length is achieved via `seconds` or FFmpeg loop-pad. */
@@ -99,7 +110,7 @@ export class SoraVideoService {
       // a safety net for short/fallback clips, never as the primary length mechanism.
       console.log(`[SoraVideoService] POST to Sora create video...`);
       const createBody = buildSoraCreateBody(model, prompt, options);
-      console.log(`[PIPELINE] sora_create_body model=${model} seconds=${createBody.seconds ?? 'default(4)'} prompt_length=${String(createBody.prompt).length}`);
+      console.log(`[PIPELINE] sora_create_body model=${model} seconds=${createBody.seconds ?? 'default(4)'} size=${createBody.size ?? 'default(720x1280)'} prompt_length=${String(createBody.prompt).length}`);
       const createResponse = await fetch('https://api.openai.com/v1/videos', {
         method: 'POST',
         headers: {
