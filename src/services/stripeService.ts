@@ -330,7 +330,7 @@ export class StripeService {
     };
   }
 
-  async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {
+  async createCheckoutSession(userId: string, type: 'subscription' | 'expansion', options: { clientName?: string; referral?: string } = {}): Promise<string> {
     const session = await getStripe().checkout.sessions.create({
       mode: 'subscription',
       line_items: [{
@@ -347,6 +347,12 @@ export class StripeService {
       client_reference_id: userId,
       success_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/dashboard?paid=true`,
       cancel_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/onboarding`,
+      metadata: {
+        userId,
+        type,
+        ...(options.clientName ? { clientName: options.clientName } : {}),
+        ...(options.referral ? { referral: options.referral } : {}),
+      },
     });
     return session.url!;
   }
