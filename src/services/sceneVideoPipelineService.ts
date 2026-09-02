@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService } from './soraVideoService.js';
+import { soraVideoService, snapSoraSeconds, SORA_SCENE_SIZE } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -314,6 +314,52 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
   }
   return arc;
 }
+/**
+ * Parse the GPT 5.2 DIRECTOR output into the executable scene list.
+ *
+ * - FACELESS: legacy scene-script shape (scenes[] of {sceneNumber,duration,visualType,
+ *   narration,visualPrompt}) → parseScenes() → stills forced downstream.
+ * - SCENE (hybrid, owner-locked): the director emits a FULL-VIDEO PLAN with
+ *   `soraContent` (the ONE ~20s important block) + `scenes[]` where EXACTLY ONE scene
+ *   is type "sora" (carries the important motion) and the rest are "gpt-image" stills
+ *   that FFmpeg animates with Ken Burns (mirroring Faceless). We read the scene list
+ *   with per-scene type→visualType mapping, and attach the ONE soraContent prompt to
+ *   the sora scene's visualPrompt so processScene knows it's the consolidated call.
+ *
+ * If the planner returns the legacy shape (or nothing), we fall back to parseScenes()
+ * so Scene still renders (motion scenes stay Sora per scene — degraded but functional).
+ */
+function parseScenePlan(raw: any, idea: string, durationTarget: number, mode: 'faceless' | 'scene'): SceneScript[] {
+  if (mode === 'faceless') return parseScenes(raw, idea, durationTarget);
+  const scenesRaw = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
+  // Hybrid shape requires a soraContent block AND at least one scene typed "sora".
+  const soraContent = raw?.soraContent;
+  const hasSoraTyped = scenesRaw.some((s: any) => String(s?.type || s?.sceneType || '').toLowerCase() === 'sora');
+  if (soraContent && scenesRaw.length >= 2 && hasSoraTyped) {
+    const soraPrompt = String(soraContent.prompt || '');
+    const soraDuration = Number.isFinite(Number(soraContent.duration)) ? Math.max(1, Math.round(Number(soraContent.duration))) : 0;
+    const totalPlan = scenesRaw.reduce((a: number, s: any) => a + (Number.isFinite(Number(s?.duration)) ? Number(s.duration) : 0), 0);
+    const scale = totalPlan > 0 ? durationTarget / totalPlan : 1;
+    const base = Math.floor(durationTarget / Math.max(1, scenesRaw.length));
+    const rem = durationTarget - base * scenesRaw.length;
+    const scenes: SceneScript[] = scenesRaw.map((s: any, i: number): SceneScript => {
+      const isSora = String(s?.type || s?.sceneType || '').toLowerCase() === 'sora';
+      const dur = Math.round((Number.isFinite(Number(s?.duration)) ? Number(s.duration) : 0) * scale);
+      return {
+        sceneNumber: i + 1,
+        duration: dur > 0 ? dur : base + (i < rem ? 1 : 0),
+        visualType: isSora ? 'motion' : 'still',
+        narration: s?.narration || '',
+        visualPrompt: isSora && soraPrompt ? `${s.visualPrompt || ''} — ${soraPrompt}`.trim() : (s?.visualPrompt || s?.visual_prompt || ''),
+      };
+    });
+    // Normalize the sum to exactly durationTarget (rounding drift).
+    const drift = durationTarget - scenes.reduce((a, s) => a + s.duration, 0);
+    if (scenes.length) scenes[scenes.length - 1].duration = Math.max(1, scenes[scenes.length - 1].duration + drift);
+    return scenes;
+  }
+  return parseScenes(raw, idea, durationTarget);
+}
 /** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
 function isVideoUrl(url: string): boolean {
   const clean = (url.split('?')[0] || '').toLowerCase();
@@ -392,19 +438,29 @@ export class SceneVideoPipelineService {
         const perScene = Math.max(1, Math.round(duration / sceneCount));
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
         const maxNarrationWords = Math.max(14, Math.round(perScene * 2.75));
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s). Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt. Narration is the spoken copy for the final audience, not a description of the planning process. Each narration must be one complete, natural sentence of no more than ${maxNarrationWords} words so it finishes within its scene; never use phrases such as "Let's design your video", "One quick detail", "Default suggestion", "Locked in", or "tap the wand to generate".${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
+        // Hybrid Scene director (owner-locked): GPT 5.2 plans the WHOLE video up front —
+        // which ~20s of content is the SINGLE most-important block (the ONE Sora call),
+        // and the full scene list/order/timings. Everything else renders as gpt-image-2
+        // stills animated with slow FFmpeg Ken Burns (mirroring Faceless). Sora is called
+        // ONCE per ~20s of important content, NOT fragmented into many 5-6s clips.
+        const importantBlock = Math.min(20, duration);
+        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s }, and a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.`;
+        const legacyConstrain = input.mode === 'faceless'
+          ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
+          : hybridDirective;
+        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${legacyConstrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
         generatedScript = decision.script || decision.parameters?.script;
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
-    const script = parseScenes(generatedScript || {}, cleanIdea, duration);
+    const script = parseScenePlan(generatedScript || {}, cleanIdea, duration, input.mode === 'faceless' ? 'faceless' : 'scene');
     // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
     // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
     // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
     const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
     if (mode === 'faceless') { for (const s of script) { s.visualType = 'still'; } }
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode}});
-    await db.insert(schema.videoScenes).values(script.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending'})));
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,plan:{scenes:script}}});
+    await db.insert(schema.videoScenes).values(script.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion'}})));
     trace(`project_created id=${projectId} scenes=${script.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
@@ -422,10 +478,6 @@ export class SceneVideoPipelineService {
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
     const heroSource = sourceImages[0];
-    // Faceless projects animate every still scene with Ken Burns (FFmpeg zoompan); the
-    // flag flows into renderClip so ONLY faceless scenes pan/zoom (Scene scenes hold
-    // still or use Sora motion, and Neural Twin is a separate engine).
-    const isFaceless = (pmeta as any).mode === 'faceless';
     if (!skipGeneration) {
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
@@ -490,8 +542,11 @@ export class SceneVideoPipelineService {
         // use `-stream_loop -1` to pad short Sora shots up to their target (the
         // copyFileSync shortcut below was removed because it shipped raw Sora clips
         // at their native short length — the root cause of ~35% duration under-delivery).
+        // Ken Burns (slow zoompan) applies to EVERY still scene — Faceless by design and
+        // Scene's gpt-image scenes (mirroring the owner-approved Faceless look). Motion
+        // (Sora) scenes are NOT Ken Burns'ed — they carry real motion already.
         const sceneAudio = audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined;
-        await renderClip(local,clip,scene.duration||3,sceneAudio,{kenburns:isFaceless});
+        await renderClip(local,clip,scene.duration||3,sceneAudio,{kenburns:scene.visualType==='still'});
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
@@ -618,7 +673,21 @@ export class SceneVideoPipelineService {
             trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
-          soraResult = await soraVideoService.generateVideo(subjectPrompt, { userId: undefined });
+          const sceneSeconds = Math.min(20, scene.duration || 20);
+          const isImportant = Boolean(scene.metadata?.importantSora);
+          soraResult = await soraVideoService.generateVideo(subjectPrompt, {
+            userId: undefined,
+            // ONE consolidated call for the important ~20s block. Length is set with
+            // the OFFICIAL Sora 2 `seconds` enum (the live API rejects `duration` and
+            // does not change length from prose). snapSoraSeconds picks the nearest
+            // enum ≤ the scene target; FFmpeg -stream_loop -1 + -t in renderClip is a
+            // safety net only (never the primary length mechanism). size is set
+            // EXPLICITLY to SORA_SCENE_SIZE so the 9:16 contract is deterministic.
+            seconds: isImportant ? snapSoraSeconds(sceneSeconds) : undefined,
+            size: isImportant ? SORA_SCENE_SIZE : undefined,
+            // secondary content-continuity steer only (cannot change clip length).
+            promptHint: isImportant ? `Render ONE continuous ~${sceneSeconds}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
+          });
           if (soraResult.success && soraResult.videoPath) break;
           trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
         }
