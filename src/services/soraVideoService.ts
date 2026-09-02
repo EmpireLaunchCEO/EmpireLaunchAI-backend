@@ -3,16 +3,56 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { r2Storage } from './r2StorageService.js';
 
+/** Official Sora 2 clip-length values (video-generation guide: sora-2 supports
+ *  16- and 20-second generations; the prompting guide lists `seconds` as
+ *  "4"|"8"|"12"|"16"|"20", default "4"). Container params (resolution/duration)
+ *  are NOT steerable by prose like "make it longer" — length goes through this
+ *  enum only. */
+export type SoraSeconds = '4' | '8' | '12' | '16' | '20';
+
+const SORA_SECONDS_ENUM: SoraSeconds[] = ['4', '8', '12', '16', '20'];
+
+/** Snap a target clip length (seconds) to the OFFICIAL Sora `seconds` enum.
+ *  Picks the NEAREST value (ties → the shorter, cost-honest) and never exceeds
+ *  20s. FFmpeg `-stream_loop -1` + `-t` in renderClip handles the ≤4s enum
+ *  remainder as a safety net (it is NOT the primary length mechanism). */
+export function snapSoraSeconds(target: number): SoraSeconds {
+  const t = Math.max(1, Math.round(target));
+  let best: SoraSeconds = '4';
+  let bestDist = Infinity;
+  for (const e of SORA_SECONDS_ENUM) {
+    const dist = Math.abs(Number(e) - t);
+    if (dist < bestDist || (dist === bestDist && Number(e) < Number(best))) {
+      best = e;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+/** Build the POST body for /v1/videos. `seconds` is the ONLY length parameter the
+ *  live Sora 2 API accepts (enum above); the legacy `duration` option is deliberately
+ *  NEVER included — the live API rejects it as an unknown parameter (400). */
+export function buildSoraCreateBody(model: string, prompt: string, options: SoraGenerationOptions): Record<string, unknown> {
+  const body: Record<string, unknown> = { model, prompt };
+  if (options.seconds) body.seconds = options.seconds;
+  if (options.promptHint) body.prompt = `${prompt}\n\n${options.promptHint}`;
+  return body;
+}
+
 export interface SoraGenerationOptions {
   userId?: string;        // For R2 upload
-  /** DO NOT pass `duration` to Sora — the live API rejects an arbitrary duration
-   *  parameter (400 "unknown parameter: duration"). Length is achieved in FFmpeg
-   *  (`-stream_loop -1` + `-t` pad the delivered clip to the scene target). Keep
-   *  the old field for call sites that still reference it (legacy no-op). */
-  duration?: number;      // LEGACY NO-OP — never sent to the API (see above)
-  /** Optional prose hint appended to the prompt to steer toward a longer take
-   *  (e.g. "one continuous ~20 second take, no cuts"). Not a hard API contract —
-   *  the delivered clip is still loop-padded to the exact target in FFmpeg. */
+  /** Official Sora 2 clip-length (`seconds`, enum "4"|"8"|"12"|"16"|"20", default
+   *  "4"). This is the ONLY length control — the live API rejects a free-form
+   *  `duration` and does NOT change length from prose. For the Scene hybrid's ONE
+   *  important block we send "20" (snapped to the nearest enum ≤ the block target). */
+  seconds?: SoraSeconds;
+  /** LEGACY NO-OP — the live API rejects `duration` (400 "unknown parameter:
+   *  duration"). Kept so old call sites (videoQueueService etc.) still compile;
+   *  NEVER sent to the API. Length is achieved via `seconds` or FFmpeg loop-pad. */
+  duration?: number;
+  /** Prose steer for CONTENT continuity only (e.g. "one continuous take, no cuts").
+   *  Secondary to `seconds` — it cannot change clip length. */
   promptHint?: string;
 }
 
@@ -52,19 +92,21 @@ export class SoraVideoService {
     try {
       console.log(`[PIPELINE] sora_create_start model=${model} prompt_length=${prompt.length}`);
 
-      // Step 1: Create video generation. NEVER send `duration` — the live Sora API
-      // rejects it (400 unknown parameter: duration). The prompt + optional promptHint
-      // steer toward a longer take; FFmpeg loop-pads the delivered clip to the exact
-      // target length downstream.
+      // Step 1: Create video generation. Length is controlled ONLY via the official
+      // `seconds` enum (4|8|12|16|20) — the live Sora 2 API rejects a free-form
+      // `duration` (400 unknown parameter) and does NOT change length from prose.
+      // promptHint is secondary: content continuity only. FFmpeg loop-pads below as
+      // a safety net for short/fallback clips, never as the primary length mechanism.
       console.log(`[SoraVideoService] POST to Sora create video...`);
-      const createPrompt = options.promptHint ? `${prompt}\n\n${options.promptHint}` : prompt;
+      const createBody = buildSoraCreateBody(model, prompt, options);
+      console.log(`[PIPELINE] sora_create_body model=${model} seconds=${createBody.seconds ?? 'default(4)'} prompt_length=${String(createBody.prompt).length}`);
       const createResponse = await fetch('https://api.openai.com/v1/videos', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model, prompt: createPrompt }),
+        body: JSON.stringify(createBody),
         signal: AbortSignal.timeout(60000),
       });
 

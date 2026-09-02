@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService } from './soraVideoService.js';
+import { soraVideoService, snapSoraSeconds } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -673,12 +673,17 @@ export class SceneVideoPipelineService {
             trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
             await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
           }
+          const sceneSeconds = Math.min(20, scene.duration || 20);
           soraResult = await soraVideoService.generateVideo(subjectPrompt, {
             userId: undefined,
-            // ONE consolidated call for the important ~20s block. The live Sora API
-            // rejects `duration`, so this is a prose hint only; FFmpeg loop-pads the
-            // delivered clip to the exact scene target in renderClip.
-            promptHint: scene.metadata?.importantSora ? `Render ONE continuous ~${Math.min(20, scene.duration || 20)}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
+            // ONE consolidated call for the important ~20s block. Length is set with
+            // the OFFICIAL Sora 2 `seconds` enum (the live API rejects `duration` and
+            // does not change length from prose). snapSoraSeconds picks the nearest
+            // enum ≤ the scene target; FFmpeg -stream_loop -1 + -t in renderClip is a
+            // safety net only (never the primary length mechanism).
+            seconds: scene.metadata?.importantSora ? snapSoraSeconds(sceneSeconds) : undefined,
+            // secondary content-continuity steer only (cannot change clip length).
+            promptHint: scene.metadata?.importantSora ? `Render ONE continuous ~${sceneSeconds}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
           });
           if (soraResult.success && soraResult.videoPath) break;
           trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
