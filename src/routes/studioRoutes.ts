@@ -951,8 +951,6 @@ router.get('/assets', async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
-
-// ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
 router.get('/download/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -963,18 +961,29 @@ router.get('/download/:id', async (req: Request, res: Response) => {
     const resolvedUserId = await resolveUserId(String(uid));
     if (!resolvedUserId) return res.status(401).json({ error: 'User not found' });
 
+    // Resolve the underlying media row across BOTH namespaces the Operations
+    // page surfaces: single-shot creations AND scene-based video projects.
+    // (Operations "video boxes" are video_projects rows — their file lives in
+    // finalVideoUrl, not the creations table.)
     const [creation] = await db.select()
       .from(schema.creations)
       .where(and(eq(schema.creations.id, id), eq(schema.creations.userId, resolvedUserId)))
       .limit(1);
 
-    if (!creation?.fileUrl) return res.status(404).json({ error: 'Not found' });
+    const [project] = creation?.fileUrl ? [null] : await db.select()
+      .from(schema.videoProjects)
+      .where(and(eq(schema.videoProjects.id, id), eq(schema.videoProjects.userId, resolvedUserId)))
+      .limit(1);
+
+    const mediaUrl = creation?.fileUrl || project?.finalVideoUrl;
+    if (!creation && !project) return res.status(404).json({ error: 'Not found' });
+    if (!mediaUrl) return res.status(404).json({ error: 'Not found' });
 
     // Extract R2 key and download via S3 client (avoids signed URL expiry entirely).
     // Fall back to metadata.r2Key (stored since the URL-clobber fix) when the
     // fileUrl formatting can't be parsed — legacy rows may hold dead local paths.
-    const meta = (creation.metadata as any) || {};
-    const r2Key = extractR2Key(creation.fileUrl) || (typeof meta.r2Key === 'string' ? meta.r2Key : null);
+    const meta: any = (creation?.metadata as any) || (project?.metadata as any) || {};
+    const r2Key = extractR2Key(mediaUrl) || (typeof meta.r2Key === 'string' ? meta.r2Key : null);
     if (!r2Key) {
       return res.status(502).json({ error: 'Could not parse R2 key from URL' });
     }
