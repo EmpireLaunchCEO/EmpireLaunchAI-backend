@@ -5,7 +5,7 @@ import { protectedButtonService } from '../services/protectedButtonService.js';
 import { vaultService } from '../services/vaultService.js';
 import { db, schema } from '../db/index.js';
 const { users, products, paymentLinks, subscriptions } = schema;
-import { eq, sql } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 export const onboardUser = async (req: Request, res: Response) => {
@@ -199,14 +199,20 @@ export const triggerInstantPayout = async (req: Request, res: Response) => {
 export const createPlatformCheckout = async (req: Request, res: Response) => {
   try {
     const userId = req.headers['x-user-id'] as string;
-    const { returnUrl, currency, amountInCents } = req.body;
+    const { returnUrl, currency, amountInCents, clientName, referral } = req.body;
     if (!userId) return res.status(401).json({ error: 'Auth required' });
 
     const validCurrencies = ['usd', 'eur', 'gbp', 'jpy', 'cny', 'krw', 'cad', 'aud', 'brl', 'mxn', 'inr'];
     const checkoutCurrency = currency && validCurrencies.includes(currency) ? currency : 'usd';
     const checkoutAmount = typeof amountInCents === 'number' && amountInCents > 0 ? amountInCents : 5000;
 
-    const session = await stripeService.createPlatformCheckoutSession(userId, returnUrl, checkoutCurrency, checkoutAmount);
+    const session = await stripeService.createPlatformCheckoutSession(
+      userId,
+      returnUrl,
+      checkoutCurrency,
+      checkoutAmount,
+      { clientName, referral }
+    );
     res.json({ url: session.url });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -216,10 +222,14 @@ export const createPlatformCheckout = async (req: Request, res: Response) => {
 export const createExpansionCheckout = async (req: Request, res: Response) => {
   try {
     const userId = req.headers['x-user-id'] as string;
-    const { returnUrl } = req.body;
+    const { returnUrl, clientName, referral } = req.body;
     if (!userId) return res.status(401).json({ error: 'Auth required' });
 
-    const session = await stripeService.createExpansionCheckoutSession(userId, returnUrl);
+    const session = await stripeService.createExpansionCheckoutSession(
+      userId,
+      returnUrl,
+      { clientName, referral }
+    );
     res.json({ url: session.url });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -232,10 +242,31 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
     if (!sessionId) return res.status(400).json({ error: 'Session ID required' });
 
     const session = await stripeService.getSession(sessionId as string);
-    const customerName = (session as any).customer_details?.name || null;
+    const customerName = (session as any).customer_details?.name || session.metadata?.clientName || null;
     if (session.payment_status === 'paid') {
       const userId = session.client_reference_id;
       if (userId) {
+        // Persist the client's full name on the users row when provided at checkout.
+        if (customerName) {
+          await db.update(users).set({ name: customerName, updatedAt: new Date() }).where(eq(users.id, userId));
+        }
+        // Record referral attribution (salesperson first name) — commission payout later.
+        const referral = session.metadata?.referral;
+        if (referral) {
+          const [existing] = await db.select().from(schema.referrals)
+            .where(and(
+              eq(schema.referrals.clientUserId, userId),
+              eq(schema.referrals.salespersonName, referral)
+            )).limit(1);
+          if (!existing) {
+            await db.insert(schema.referrals).values({
+              id: uuidv4(),
+              clientUserId: userId,
+              salespersonName: referral,
+              createdAt: new Date(),
+            });
+          }
+        }
         if (session.metadata?.type === 'expansion') {
            // Increment business slots
            await db.update(users).set({ 
