@@ -93,7 +93,7 @@ export const getUserSubscriptions = async (req: Request, res: Response) => {
 export const createCheckoutSession = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
-    const { type } = req.body;
+    const { type, clientName, referral } = req.body;
 
     if (!userId) {
       return res.status(400).json({ error: 'Authentication required' });
@@ -102,7 +102,7 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Type must be "subscription" or "expansion"' });
     }
 
-    const url = await stripeService.createCheckoutSession(userId, type);
+    const url = await stripeService.createCheckoutSession(userId, type, { clientName, referral });
     res.json({ url });
   } catch (error: any) {
     console.error('[Subscription] Checkout session error:', error);

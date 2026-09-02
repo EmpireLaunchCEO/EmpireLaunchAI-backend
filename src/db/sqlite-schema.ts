@@ -3,6 +3,7 @@ import { sqliteTable, text, integer, real, blob } from 'drizzle-orm/sqlite-core'
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
   email: text('email').notNull().unique(),
+  name: text('name'), // customer full name captured at checkout (clientName)
   stripeAccountId: text('stripe_account_id'),
   paypalMerchantId: text('paypal_merchant_id'),
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
@@ -724,4 +725,14 @@ export const sessionMemory = sqliteTable('session_memory', {
   lastSummary: text('last_summary'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+/**
+ * Referrals — SQLite mirror of referrals (dev/local parity). Salesperson
+ * attribution for commission payouts, recorded once per client+referral.
+ */
+export const referrals = sqliteTable('referrals', {
+  id: text('id').primaryKey(),
+  clientUserId: text('client_user_id').references(() => users.id).notNull(),
+  salespersonName: text('salesperson_name').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });

@@ -3,6 +3,7 @@ import { pgTable, text, timestamp, uuid, jsonb, boolean, integer } from 'drizzle
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull().unique(),
+  name: text('name'), // customer full name captured at checkout (clientName)
   stripeAccountId: text('stripe_account_id'),
   paypalMerchantId: text('paypal_merchant_id'),
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
@@ -318,6 +319,19 @@ export const subscriptions = pgTable('subscriptions', {
   stripeSubscriptionId: text('stripe_subscription_id'),
   canceledAt: timestamp('canceled_at'),
   customerName: text('customer_name'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+/**
+ * Referrals — salesperson attribution for commission payouts.
+ * A row is recorded once per client+referral when a completed checkout
+ * carries a `referral` (salesperson first name). "Still a customer"
+ * (active subscription) is what triggers payout later — for now we only
+ * record the attribution row.
+ */
+export const referrals = pgTable('referrals', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  clientUserId: uuid('client_user_id').references(() => users.id).notNull(),
+  salespersonName: text('salesperson_name').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

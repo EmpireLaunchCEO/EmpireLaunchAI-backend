@@ -172,7 +172,13 @@ export class StripeService {
     };
   }
 
-  async createPlatformCheckoutSession(userId: string, returnUrl: string, currency: string = 'usd', amountInCents: number = 5000) {
+  async createPlatformCheckoutSession(
+    userId: string,
+    returnUrl: string,
+    currency: string = 'usd',
+    amountInCents: number = 5000,
+    options: { clientName?: string; referral?: string } = {},
+  ) {
     const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -193,12 +199,18 @@ export class StripeService {
       success_url: `${returnUrl}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${returnUrl}?canceled=true`,
       client_reference_id: userId,
-      metadata: { userId, currency, amountInCents: String(amountInCents) },
+      metadata: {
+        userId,
+        currency,
+        amountInCents: String(amountInCents),
+        ...(options.clientName ? { clientName: options.clientName } : {}),
+        ...(options.referral ? { referral: options.referral } : {}),
+      },
     });
     return session;
   }
 
-  async createExpansionCheckoutSession(userId: string, returnUrl: string) {
+  async createExpansionCheckoutSession(userId: string, returnUrl: string, options: { clientName?: string; referral?: string } = {}) {
     const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -218,7 +230,12 @@ export class StripeService {
       success_url: `${returnUrl}?session_id={CHECKOUT_SESSION_ID}&expansion=true`,
       cancel_url: `${returnUrl}?canceled=true`,
       client_reference_id: userId,
-      metadata: { userId, type: 'expansion' },
+      metadata: {
+        userId,
+        type: 'expansion',
+        ...(options.clientName ? { clientName: options.clientName } : {}),
+        ...(options.referral ? { referral: options.referral } : {}),
+      },
     });
     return session;
   }
@@ -313,7 +330,7 @@ export class StripeService {
     };
   }
 
-  async createCheckoutSession(userId: string, type: 'subscription' | 'expansion'): Promise<string> {
+  async createCheckoutSession(userId: string, type: 'subscription' | 'expansion', options: { clientName?: string; referral?: string } = {}): Promise<string> {
     const session = await getStripe().checkout.sessions.create({
       mode: 'subscription',
       line_items: [{
@@ -330,6 +347,12 @@ export class StripeService {
       client_reference_id: userId,
       success_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/dashboard?paid=true`,
       cancel_url: `${process.env.FRONTEND_URL || 'https://empire-launch-ai-frontend.vercel.app'}/onboarding`,
+      metadata: {
+        userId,
+        type,
+        ...(options.clientName ? { clientName: options.clientName } : {}),
+        ...(options.referral ? { referral: options.referral } : {}),
+      },
     });
     return session.url!;
   }
