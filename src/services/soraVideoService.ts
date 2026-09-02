@@ -5,7 +5,15 @@ import { r2Storage } from './r2StorageService.js';
 
 export interface SoraGenerationOptions {
   userId?: string;        // For R2 upload
-  duration?: number;      // seconds the caller wants the video to be (passed to the model; may be approximate)
+  /** DO NOT pass `duration` to Sora — the live API rejects an arbitrary duration
+   *  parameter (400 "unknown parameter: duration"). Length is achieved in FFmpeg
+   *  (`-stream_loop -1` + `-t` pad the delivered clip to the scene target). Keep
+   *  the old field for call sites that still reference it (legacy no-op). */
+  duration?: number;      // LEGACY NO-OP — never sent to the API (see above)
+  /** Optional prose hint appended to the prompt to steer toward a longer take
+   *  (e.g. "one continuous ~20 second take, no cuts"). Not a hard API contract —
+   *  the delivered clip is still loop-padded to the exact target in FFmpeg. */
+  promptHint?: string;
 }
 
 export interface SoraGenerationResult {
@@ -44,15 +52,19 @@ export class SoraVideoService {
     try {
       console.log(`[PIPELINE] sora_create_start model=${model} prompt_length=${prompt.length}`);
 
-      // Step 1: Create video generation
+      // Step 1: Create video generation. NEVER send `duration` — the live Sora API
+      // rejects it (400 unknown parameter: duration). The prompt + optional promptHint
+      // steer toward a longer take; FFmpeg loop-pads the delivered clip to the exact
+      // target length downstream.
       console.log(`[SoraVideoService] POST to Sora create video...`);
+      const createPrompt = options.promptHint ? `${prompt}\n\n${options.promptHint}` : prompt;
       const createResponse = await fetch('https://api.openai.com/v1/videos', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model, prompt, ...(options.duration ? { duration: options.duration } : {}) }),
+        body: JSON.stringify({ model, prompt: createPrompt }),
         signal: AbortSignal.timeout(60000),
       });
 
