@@ -73,7 +73,7 @@ function probeDuration(input: string): number {
  * The caller logs the report and can attach it to the draft payload so the GPT-5.2
  * exception-handler router (decision-only, no pixel/audio edits) can SELECT a fix.
  */
-function runRenderQC(media: string): Record<string, any> {
+export function runRenderQC(media: string): Record<string, any> {
   const report: Record<string, any> = { ok: true, flags: [] as string[] };
   try {
     const fmt = execFileSync('ffprobe', [
@@ -141,7 +141,7 @@ function runRenderQC(media: string): Record<string, any> {
   return report;
 }
 
-function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean }): Promise<void> {
+export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
@@ -222,7 +222,7 @@ function renderClip(input: string, output: string, duration: number, audio?: str
     });
   });
 }
-function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{
+export function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
   // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
   // be crossfaded directly. Each xfade overlaps by TRANSITION_MS.
