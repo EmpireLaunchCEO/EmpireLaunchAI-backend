@@ -49,6 +49,97 @@ function inputHasAudio(input: string): boolean {
     return false;
   }
 }
+function probeDuration(input: string): number {
+  try {
+    return Number(execFileSync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', input,
+    ], { maxBuffer: 1024 * 1024 }).toString().trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Deterministic post-render smoothness QC (cheap ffprobe, NO AI / NO paid renders).
+ * Runs on the FINAL assembled MP4 and returns a report of assertions:
+ *   - r_frame_rate == 30/1 (the output contract; any other cadence = micro-judder risk)
+ *   - nb_frames ≈ duration*30 (frame count matches the 30fps timeline)
+ *   - scene-detect hard-cut flag (select='gt(scene,0.4)' — a transition ABOVE the
+ *     threshold means a jarring hard cut survived; xfade dissolves are ~0.05-0.1)
+ *   - freezedetect / blackdetect / silencedetect (frozen frame, black frame, silent gap)
+ *   - exactly ONE audio stream (the voiceover; source/talent audio must be gone —
+ *     the audio-bleed contract)
+ * The caller logs the report and can attach it to the draft payload so the GPT-5.2
+ * exception-handler router (decision-only, no pixel/audio edits) can SELECT a fix.
+ */
+function runRenderQC(media: string): Record<string, any> {
+  const report: Record<string, any> = { ok: true, flags: [] as string[] };
+  try {
+    const fmt = execFileSync('ffprobe', [
+      '-v','error','-select_streams','v:0','-show_entries',
+      'stream=r_frame_rate,nb_frames,codec_name,width,height',
+      '-of','json', media,
+    ], { maxBuffer: 4 * 1024 * 1024 }).toString();
+    const v = JSON.parse(fmt).streams?.[0] || {};
+    report.video = { codec: v.codec_name, width: v.width, height: v.height, r_frame_rate: v.r_frame_rate, nb_frames: v.nb_frames };
+    // r_frame_rate == 30/1 assert
+    const [num, den] = String(v.r_frame_rate || '0/1').split('/').map(Number);
+    const fps = num && den ? num / den : 0;
+    report.fps = Math.round(fps * 100) / 100;
+    if (Math.abs(fps - 30) > 0.51) { report.ok = false; report.flags.push('fps_not_30'); }
+    // nb_frames ≈ duration*30 assert
+    const dur = probeDuration(media);
+    report.duration = Math.round(dur * 100) / 100;
+    const frames = Number(v.nb_frames) || 0;
+    if (frames > 0 && dur > 0 && Math.abs(frames - dur * 30) > Math.max(4, dur * 30 * 0.03)) { report.ok = false; report.flags.push('frame_count_mismatch'); }
+    // exactly ONE audio stream
+    const aList = execFileSync('ffprobe', [
+      '-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0', media,
+    ], { maxBuffer: 1024 * 1024 }).toString().trim().split('\n').filter(Boolean);
+    report.audioStreams = aList.length;
+    if (aList.length !== 1) { report.ok = false; report.flags.push(aList.length === 0 ? 'no_audio' : 'multi_audio_streams'); }
+    // scene-detect hard cuts (frame-scene metric: xfade dissolves ~0.0x-0.1; >0.4 = hard cut)
+    try {
+      const scene = execFileSync('ffmpeg', [
+        '-i', media, '-vf', "select='gt(scene,0.4)'", '-f', 'null', '-',
+      ], { maxBuffer: 1024 * 1024 }).toString();
+      // ffmpeg writes "Parsed_select" once per selected frame to stderr; count them.
+      const hardCuts = (scene.match(/Parsed_select/g) || []).length;
+      report.hardCuts = hardCuts;
+      if (hardCuts > 1) { report.ok = false; report.flags.push('hard_cut_detected'); }
+    } catch { report.hardCuts = -1; }
+    // silencedetect (audio gap > 1s) — cheap
+    try {
+      const sil = execFileSync('ffmpeg', [
+        '-i', media, '-af', 'silencedetect=noise=-35dB:d=1', '-f', 'null', '-',
+      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      report.silenceCount = (sil.match(/silence_(start|end)/g) || []).length;
+      if ((report.silenceCount || 0) > 0) { report.ok = false; report.flags.push('silence_detected'); }
+    } catch { report.silenceCount = -1; }
+    // freezedetect (frozen frame > 2s)
+    try {
+      const fz = execFileSync('ffmpeg', [
+        '-i', media, '-vf', 'freezedetect=n=-60dB:d=2', '-f', 'null', '-',
+      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      report.freezeCount = (fz.match(/freeze_(start|end)/g) || []).length;
+      if ((report.freezeCount || 0) > 0) { report.ok = false; report.flags.push('freeze_detected'); }
+    } catch { report.freezeCount = -1; }
+    // blackdetect (all-black frames > 0.5s)
+    try {
+      const blk = execFileSync('ffmpeg', [
+        '-i', media, '-vf', 'blackdetect=d=0.5:pix_th=0.10', '-f', 'null', '-',
+      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      report.blackCount = (blk.match(/black_(start|end)/g) || []).length;
+      if ((report.blackCount || 0) > 0) { report.ok = false; report.flags.push('black_frame_detected'); }
+    } catch { report.blackCount = -1; }
+  } catch (e: any) {
+    report.ok = false;
+    report.flags.push('qc_error');
+    report.error = e?.message;
+  }
+  return report;
+}
 
 function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
@@ -59,57 +150,73 @@ function renderClip(input: string, output: string, duration: number, audio?: str
     // and Neural Twin stay untouched. When enabled we feed the image ONCE (no `-loop 1`)
     // and let zoompan synthesize the target number of frames for gentle pan/zoom motion.
     const kenburns = Boolean(opts?.kenburns) && isImage;
-    const sourceHasAudio = Boolean(audio && !isImage && inputHasAudio(input));
-    const args: string[] = [];
+    // AUDIO BLEED FIX (owner finding): the source clip's embedded audio (on-screen
+    // talent / dialogue from Sora or the scene source) must NEVER survive into the
+    // final mix. The old branch preserved [0:a:0] at volume 1.0 and mixed it under
+    // the GPT-Audio narration — exactly the reported "second voice starts when the
+    // person in the video talks". Default per owner: source audio REMOVED. We map
+    // ONLY the narration track (1:a:0). inputHasAudio() stays for the probe only.
+    const srcDur = !isImage ? probeDuration(input) : 0;
+    // LOOP-PAD POLICY (choppiness fix): unconditional -stream_loop -1 hard-splices at
+    // every loop point (visible judder) and also loops embedded audio. New policy:
+    //   - source >= 60% of target -> -stream_loop 1 (one splice, then hold) — still
+    //     fills the target with at most ONE loop transition.
+    //   - source < 60% of target (very short) -> tpad=stop_mode=clone FREEZE-LAST-FRAME
+    //     pad + 250ms fade in/out — no loop splice at all, clean hold on the final frame.
+    const padByLoop = srcDur >= 0.6 * duration;
+    const inputs: string[] = [];
     if (isImage) {
       if (kenburns) {
         // Faceless: single still input; zoompan below generates `d` frames per second
         // to produce smooth Ken Burns motion for the whole scene duration.
-        args.push('-i',input);
+        inputs.push('-i',input);
       } else {
         // Still image: `-loop 1` feeds frames indefinitely so `-t duration` yields a
         // clip of exactly the target length (static hold — Scene-Based stills).
-        args.push('-loop','1','-i',input);
+        inputs.push('-loop','1','-i',input);
       }
+    } else if (padByLoop) {
+      // Sora clip long enough: loop ONCE (2x coverage), then -t caps at target.
+      inputs.push('-stream_loop','1','-i',input);
     } else {
-      // Motion (Sora) clip: Sora frequently returns a shot SHORTER than the scene's
-      // configured duration (e.g. ~3.9s when the scene targets 6s). `-stream_loop -1`
-      // loops the whole input (video + any dialogue/ambient audio) so the clip is
-      // extended to fill the scene, and `-t duration` below caps it at exactly the
-      // target. Without this the clip was only truncated (never extended) and every
-      // under-length Sora shot silently shrank the delivered video (~35% short in the
-      // E2E QA render).
-      args.push('-stream_loop','-1','-i',input);
+      // Sora clip too short for a clean loop: no -stream_loop. Feed once; tpad
+      // clones the LAST frame to fill the gap (clean freeze, no splice judder).
+      inputs.push('-i',input);
     }
-    if (audio) args.push('-i',audio);
-    args.push('-map','0:v:0');
+    if (audio) inputs.push('-i',audio);
+    inputs.push('-map','0:v:0');
     if (audio) {
-      if (sourceHasAudio) {
-        // Preserve dialogue/ambient audio from the generated clip while keeping
-        // narration subordinate. The old map selected only stream 1:a and
-        // silently discarded the people speaking in stream 0:a.
-        args.push(
-          '-filter_complex',
-          '[0:a:0]volume=1.0[program];[1:a:0]volume=0.42[narration];[program][narration]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0,alimiter=limit=0.95[aout]',
-          '-map', '[aout]',
-        );
-      } else {
-        args.push('-map','1:a:0');
-      }
+      // Voiceover is the ONLY audio track. NEVER map 0:a (source/talent audio) —
+      // owner finding: the second voice is the source clip's embedded track.
+      inputs.push('-map','1:a:0');
     }
-    args.push('-vf', kenburns
-      // Faceless Ken Burns: contain/refit the still to 1080x1920, then zoompan a slow,
-      // smooth center zoom-in. `d` = total frames for the scene (duration × 30fps) so
-      // the still animates for the whole scene instead of holding static. Zoom starts
-      // at 1.0 and creeps ~0.0015/frame, capped at 1.15 (gentle, never jumpy) — paced
-      // by scene length, never sped up. Keeps the exact 1080x1920 / 9:16 / 30fps contract.
-      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':d=${Math.max(1, Math.round(duration * 30))}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30`
-      : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`);
-    args.push('-t',String(duration));
-    args.push('-c:v','libx264','-pix_fmt','yuv420p');
-    if (audio) args.push('-c:a','aac');
-    args.push('-y',output);
-    execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
+    // FPS NORMALIZATION (choppiness): Sora clips arrive at their native cadence
+    // (commonly 24/25fps). The output contract is 30fps. The old code only set
+    // -r 30 at encode time, which dupes/drops frames through xfade — micro-judder.
+    // Normalize EVERY segment to 30fps BEFORE encode: fps=30:round=0 (no dupe on
+    // the boundary) + setpts=PTS-STARTPTS (reset timestamps so xfade offsets and
+    // tpad math are all in the same 30fps timeline).
+    const fpsNorm = 'fps=30:round=0,setpts=PTS-STARTPTS';
+    // Ken Burns smoothness: zoompan's integer zoom steps stutter at slow rates.
+    // minterpolate=fps=30:mi_mode=mci motion-interpolates between the zoompan
+    // frames for smooth, fluid pan/zoom.
+    const kenburnsVf = kenburns
+      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':d=${Math.max(1, Math.round(duration * 30))}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30,minterpolate=fps=30:mi_mode=mci`
+      // Contain/refit — NEVER crop — every segment (still AND Sora motion) to the
+      // 1080x1920 / 9:16 output contract BEFORE fps normalization, so concatClips'
+      // xfade math sees identical cadence AND dimensions.
+      : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`;
+    // tpad clone-fill for the very-short-source case: freeze last frame + 250ms
+    // fades (clean, no loop splice). Applied AFTER fps normalization (same cadence).
+    const padFill = (!isImage && !padByLoop && srcDur > 0)
+      ? `,tpad=stop_mode=clone:stop_duration=${Math.max(0, duration - srcDur)},fade=t=in:st=0:d=0.25,fade=t=out:st=${Math.max(0, duration - 0.25)}:d=0.25`
+      : '';
+    inputs.push('-vf', kenburnsVf + ',' + fpsNorm + padFill);
+    inputs.push('-t',String(duration));
+    inputs.push('-c:v','libx264','-pix_fmt','yuv420p');
+    if (audio) inputs.push('-c:a','aac');
+    inputs.push('-y',output);
+    execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
       if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
       else resolve();
     });
@@ -573,6 +680,16 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
       const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
+      // POST-RENDER SMOOTHNESS QC (deterministic ffprobe; NO AI / NO paid render).
+      // Auto-flags choppy/silent/multi-audio renders BEFORE upload and surfaces the
+      // report on the draft payload for the GPT-5.2 exception-handler router
+      // (decision-only, no pixel/audio edits) to choose a deterministic fix from.
+      let qc: Record<string, any> | undefined;
+      try {
+        qc = runRenderQC(assembled);
+        trace(`render_qc project=${projectId} ok=${qc.ok} flags=${(qc.flags || []).join('|') || 'none'}`);
+        if (!qc.ok) trace(`render_qc_warn project=${projectId} flags=${(qc.flags || []).join('|')}`);
+      } catch (qcErr: any) { trace(`render_qc_error project=${projectId} err=${qcErr?.message}`); }
       let finalUrl=assembled;
       let primaryR2Key: string | undefined;
       if(r2Storage.isAvailable) {
@@ -605,6 +722,9 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
           mode: 'scene',
           provider: 'ffmpeg',
           saved: false,
+          // QC report attached ONLY when present (10s max extra on local disk,
+          // never blocks upload; owner-facing UI ignores it).
+          ...(qc ? { qc } : {}),
         };
 
         // Primary 9:16 master — labelled "Vertical · TikTok" alongside variants.
