@@ -194,7 +194,15 @@ Return ONLY a JSON object with this exact structure:
         // Specialized planner calls may return a structured script/scenes
         // payload instead of the normal router fields. Preserve it so the
         // caller does not silently fall back to a polluted raw chat transcript.
-        script: parsed.script || parsed.parameters?.script || (Array.isArray(parsed.scenes) ? { scenes: parsed.scenes } : undefined),
+        // IMPORTANT: for the Scene hybrid director, the planner returns the FULL
+        // object { soraContent, scenes:[{type:"sora"|"gpt-image",...}] }. The old
+        // clause below kept ONLY {scenes:[...]} (dropping top-level soraContent),
+        // which made parseScenePlan's hybrid gate always fail and silently fell
+        // back to per-scene Sora (5 calls). Preserve the WHOLE parsed object when
+        // it carries scenes (and/or soraContent) so the hybrid path can engage.
+        script: parsed.script
+          || parsed.parameters?.script
+          || (Array.isArray(parsed.scenes) || parsed.soraContent ? parsed : undefined),
       };
     } catch {
       console.warn('[AiRouter] Failed to parse AI JSON. Raw text:', cleaned.slice(0, 200));
