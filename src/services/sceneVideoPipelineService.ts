@@ -261,7 +261,11 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
     return {
       sceneNumber: i + 1,
       duration: base + (i < rem ? 1 : 0),
-      visualType: 'motion' as const,
+      // Arc scenes are the NO-PLAN fallback — default to 'still' (gpt-image-2 +
+      // Ken Burns, ~free) so a malformed/missing Hybrid director plan degrades to
+      // ZERO Sora calls instead of N. Motion (the ONE important block) only comes
+      // from the hybrid plan path or an explicit GPT visualType in parseScenes.
+      visualType: 'still' as const,
       narration,
       visualPrompt,
     };
@@ -300,13 +304,27 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
     // (typically the CTA), which is why longer videos repeated the same visuals.
     // Instead, read the candidate at `i` (undefined past the end) and fall back to
     // the corresponding progressive arc beat so every scene stays distinct.
+    //
+    // FALLBACK COST GUARD (D): this fallback runs when the hybrid director plan is
+    // malformed/missing. It must NOT default every scene to motion — that fired ONE
+    // Sora call per scene (5 calls ≈ $2+, owner's cost risk). Honor an EXPLICIT
+    // GPT visualType, but cap motion scenes to AT MOST ONE (the most important
+    // block); every other scene becomes a 'still' (gpt-image-2 + Ken Burns, ~free).
+    // So a malformed plan degrades to ≤1 Sora call, never N.
+    const wantMotion = candidates
+      .map((c: any) => c?.visualType || c?.type || c?.sceneType)
+      .map((t: any) => String(t || '').toLowerCase());
+    let motionUsed = false;
     return Array.from({ length: count }, (_, i) => {
       const s = candidates[i];
       const a = arc[i];
+      const askedMotion = wantMotion[i] === 'motion' || wantMotion[i] === 'sora';
+      const keepMotion = askedMotion && !motionUsed;
+      if (keepMotion) motionUsed = true;
       return {
         sceneNumber: i + 1,
         duration: base + (i < rem ? 1 : 0),
-        visualType: s?.visualType === 'still' ? 'still' : 'motion',
+        visualType: keepMotion ? 'motion' : 'still',
         narration: sceneCopyOrFallback(s?.narration, a.narration, a.duration, true),
         visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
       };
@@ -444,7 +462,11 @@ export class SceneVideoPipelineService {
         // stills animated with slow FFmpeg Ken Burns (mirroring Faceless). Sora is called
         // ONCE per ~20s of important content, NOT fragmented into many 5-6s clips.
         const importantBlock = Math.min(20, duration);
-        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s }, and a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.`;
+        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s }, and a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.
+
+FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 3-scene video this is the required JSON:
+{"soraContent": {"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The important block — hero moment close-up", "narration": "This is the moment it comes together."}, {"sceneNumber": 3, "duration": 8, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
+Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const legacyConstrain = input.mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
           : hybridDirective;
