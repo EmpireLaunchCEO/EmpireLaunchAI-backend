@@ -425,3 +425,34 @@ export const saveToLibrary = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 };
+
+/**
+ * Neural Feedback → auto-fix loop (owner direction, $0 constraint).
+ * Receives feedback on an Operations video approval. When the text indicates an
+ * audio or smoothness issue, deterministically re-renders from the STORED
+ * per-scene components (no Sora, no AI audio — pure FFmpeg replay of R2 clips +
+ * gpt-audio VO) and lands a NEW draft in Operations flagged reMixOf + reMixType.
+ * Non-actionable feedback is recorded note-only. Component expiry surfaces the
+ * honest "can't auto-fix — components expired".
+ */
+export const submitNeuralFeedback = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const approvalId = (req.params.id || req.body.approvalId) as string;
+    const { feedback } = req.body || {};
+    if (!approvalId) return res.status(400).json({ error: 'approvalId required' });
+    if (!feedback || !feedback.trim()) return res.status(400).json({ error: 'feedback text required' });
+
+    const { submitNeuralFeedbackAndAutoFix } = await import('../services/neuralFeedbackAutoFixService.js');
+    const result = await submitNeuralFeedbackAndAutoFix({ approvalId, userId, feedback });
+
+    if (result.status === 'not_found') return res.status(404).json(result);
+    if (result.status === 'forbidden') return res.status(403).json(result);
+    if (result.status === 'error') return res.status(400).json(result);
+    return res.json(result);
+  } catch (error: any) {
+    console.error('[submitNeuralFeedback] Error:', error);
+    res.status(500).json({ status: 'error', error: error.message || 'Internal server error' });
+  }
+};
