@@ -7,7 +7,7 @@ import os from 'os';
 import axios from 'axios';
 import { r2Storage } from './r2StorageService.js';
 import { renderClip, concatClips, runRenderQC } from './sceneVideoPipelineService.js';
-import { classifyFeedback, type FeedbackIntent } from './neuralFeedbackClassifier.js';
+import { classifyFeedback, r2KeyFromUrl, type FeedbackIntent } from './neuralFeedbackClassifier.js';
 
 const { approvals, videoScenes, videoProjects } = schema;
 
@@ -33,11 +33,41 @@ export interface FeedbackAutoFixResult {
   qc?: Record<string, any>;
 }
 
+/**
+ * Download a stored scene component (asset or VO audio) to a temp file.
+ *
+ * TRUST-CRITICAL FIX (task 926fc16c): the stored `asset_url`/`audio_url` are R2
+ * PRESIGNED URLs (X-Amz-Expires=3600) that die ~1h after minting. Old videos'
+ * components are still in R2, but their stored URLs are dead — downloading via
+ * the signed URL fails and the auto-fix wrongly returns components_expired.
+ *
+ * Instead: derive the R2 OBJECT KEY from the stored URL (r2KeyFromUrl) and fetch
+ * the object DIRECTLY from R2 through the SDK (GetObjectCommand via
+ * r2Storage.downloadBuffer) — the key is stable, not time-limited. The raw-HTTP
+ * signed-URL path is only a last-resort fallback (e.g. non-R2 URLs), and any
+ * failure returns null → the caller honestly reports components_expired.
+ */
 async function downloadToTemp(url: string, ext: string): Promise<string | null> {
+  let buffer: Buffer | null = null;
+
+  // Preferred: authoritative R2-key path (key derivation strips the bucket
+  // segment from real prod path-style URLs — see r2KeyFromUrl).
+  const key = r2KeyFromUrl(url);
+  if (key && r2Storage.isAvailable) {
+    buffer = await r2Storage.downloadBuffer(key);
+  }
+  if (!buffer) {
+    // Last resort: raw HTTP on the stored URL (e.g. custom domain / non-R2).
+    try {
+      const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 60_000 });
+      buffer = Buffer.from(resp.data);
+    } catch {
+      return null;
+    }
+  }
   try {
     const tmp = path.join(os.tmpdir(), `neural-feedback-${uuidv4()}.${ext}`);
-    const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 60_000 });
-    fs.writeFileSync(tmp, Buffer.from(resp.data));
+    fs.writeFileSync(tmp, buffer);
     return tmp;
   } catch {
     return null;

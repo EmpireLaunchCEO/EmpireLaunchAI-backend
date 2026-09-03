@@ -28,12 +28,28 @@ export function classifyFeedback(text: string): FeedbackIntent {
 }
 
 /**
- * Extract the R2 object key from a URL.
- * R2 host form: https://<bucket>.<account>.r2.cloudflarestorage.com/<key> —
- * the bucket lives in the HOSTNAME, so the whole path is the key.
- * The legacy public-endpoint form https://<custom>/<bucket>/<key>/... may
- * include a bucket segment; for custom domains (no 'r2.cloudflarestorage.com')
- * we keep the whole path (client custom domains serve keys at path root).
+ * Extract the R2 object key from a stored URL (signed, public, custom domain).
+ * Deterministic and env-free (no process.env reads) so it stays unit-testable.
+ *
+ * Handles BOTH R2 URL styles produced by this codebase (S3 client uses
+ * forcePathStyle:true, so signed URLs are PATH-style):
+ *
+ * 1. PATH-STYLE (what prod video_scenes actually stores):
+ *      https://<ACCOUNT_ID>.<ACCT>.r2.cloudflarestorage.com/<BUCKET>/<KEY>
+ *    Cloudflare R2 account IDs are 32-hex (e.g. 2ac5a2e3cb490826386d96fe89d58ab4).
+ *    When the hostname's first label is a 32-hex account ID, the FIRST path
+ *    segment is the BUCKET and the rest is the object key → strip it.
+ *    (Mirrors studioRoutes.extractR2Key's bucket-strip — proven against the
+ *    production download proxy.)
+ *
+ * 2. VIRTUAL-HOST style:
+ *      https://<BUCKET>.<ACCOUNT>.r2.cloudflarestorage.com/<KEY>
+ *    (bucket in hostname, "abc123"-style non-hex first label) → whole path is key.
+ *
+ * 3. CUSTOM PUBLIC DOMAIN (no 'r2.cloudflarestorage.com'):
+ *      https://<custom>/<KEY> → whole path is key (R2_PUBLIC_URL serves keys at
+ *    the path root).
+ *
  * Returns null for unparseable/empty input.
  */
 export function r2KeyFromUrl(url: string | null | undefined): string | null {
@@ -41,6 +57,15 @@ export function r2KeyFromUrl(url: string | null | undefined): string | null {
   try {
     const u = new URL(url);
     const pathParts = u.pathname.split('/').filter(Boolean);
+    if (pathParts.length === 0) return null;
+    const hostname = u.hostname;
+    const firstLabel = hostname.split('.')[0] || '';
+    // PATH-STYLE R2 endpoint: first host label is the 32-hex account id, so the
+    // first path segment is the BUCKET and must be stripped from the key.
+    if (hostname.endsWith('.r2.cloudflarestorage.com') && /^[a-f0-9]{32}$/i.test(firstLabel)) {
+      return decodeURIComponent(pathParts.slice(1).join('/')) || null;
+    }
+    // VIRTUAL-HOST R2 or custom public domain: the whole path is the key.
     const key = decodeURIComponent(pathParts.join('/'));
     return key || null;
   } catch {
