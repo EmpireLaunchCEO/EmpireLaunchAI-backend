@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyFeedback, r2KeyFromUrl } from '../neuralFeedbackClassifier.js';
+import { classifyFeedback, parseLineChange, matchLineToScene, r2KeyFromUrl } from '../neuralFeedbackClassifier.js';
 
 test('classifyFeedback: audio intent', () => {
   assert.equal(classifyFeedback('fix the audio'), 'audio');
@@ -28,6 +28,87 @@ test('classifyFeedback: note-only', () => {
   assert.equal(classifyFeedback('the colors look off, use warmer tones'), 'none');
   assert.equal(classifyFeedback('add more scenes please'), 'none');
   assert.equal(classifyFeedback(''), 'none');
+});
+
+// ── LINE_CHANGE intent (Phase 1, task 7793564b) ─────────────────────────────
+test('classifyFeedback: line_change intent', () => {
+  assert.equal(classifyFeedback('change this line to "we save you money"'), 'line_change');
+  assert.equal(classifyFeedback('the line about pricing should say "starting at $9"'), 'line_change');
+  assert.equal(classifyFeedback('scene 3 line should say "ready to begin?"'), 'line_change');
+  assert.equal(classifyFeedback('change the line "call now" to "text us instead"'), 'line_change');
+  assert.equal(classifyFeedback('reword the last line'), 'line_change');
+  assert.equal(classifyFeedback('fix the script, line 2 says the wrong thing, make it "we ship free"'), 'line_change');
+});
+
+test('classifyFeedback: line_change does NOT hijack audio/smoothness', () => {
+  // "line" appears, but the complaint is AUDIO (bleed/voice) or SMOOTHNESS — must NOT classify as line_change.
+  assert.equal(classifyFeedback('fix the line audio, there is a second voice'), 'audio');
+  assert.equal(classifyFeedback('the line audio is too quiet'), 'audio');
+  assert.equal(classifyFeedback('the line is choppy / stutters'), 'smoothness');
+  assert.equal(classifyFeedback('the line freezes mid-video'), 'smoothness');
+});
+
+// ── parseLineChange ─────────────────────────────────────────────────────────
+test('parseLineChange: scene number + new text', () => {
+  const r = parseLineChange('scene 3 line should say "ready to begin?"');
+  assert.equal(r.sceneNumber, 3);
+  assert.equal(r.newText, 'ready to begin?');
+});
+
+test('parseLineChange: change this line to X', () => {
+  const r = parseLineChange('change this line to "we save you money"');
+  assert.equal(r.newText, 'we save you money');
+});
+
+test('parseLineChange: the line to X / replace with X', () => {
+  const r1 = parseLineChange('change the line "call now" to "text us instead"');
+  assert.equal(r1.newText, 'text us instead');
+  const r2 = parseLineChange('replace the line with "we ship free"');
+  assert.equal(r2.newText, 'we ship free');
+});
+
+test('parseLineChange: this line: OLD I want NEW (colon form)', () => {
+  const r = parseLineChange('this line: "call now" I want "text us instead"');
+  assert.equal(r.newText, 'text us instead');
+  assert.equal(r.oldText, 'call now');
+});
+
+test('parseLineChange: no replacement → empty newText', () => {
+  const r = parseLineChange('reword the last line');
+  assert.equal(r.newText, undefined);
+  assert.equal(r.sceneNumber, undefined);
+});
+
+// ── matchLineToScene ────────────────────────────────────────────────────────
+const fakeScenes = [
+  { sceneNumber: 1, narration: 'Opening: meet the product.' },
+  { sceneNumber: 2, narration: 'This is the moment it comes together.' },
+  { sceneNumber: 3, narration: 'Ready to take the next step?' },
+];
+
+test('matchLineToScene: by explicit scene number', () => {
+  const r = matchLineToScene(fakeScenes, { sceneNumber: 2 });
+  assert.deepEqual(r, { sceneNumber: 2, narration: 'This is the moment it comes together.' });
+});
+
+test('matchLineToScene: by exact narration match', () => {
+  const r = matchLineToScene(fakeScenes, { oldText: 'Ready to take the next step?' });
+  assert.deepEqual(r, { sceneNumber: 3, narration: 'Ready to take the next step?' });
+});
+
+test('matchLineToScene: by normalized contains match', () => {
+  const r = matchLineToScene(fakeScenes, { oldText: 'moment it comes together' });
+  assert.deepEqual(r, { sceneNumber: 2, narration: 'This is the moment it comes together.' });
+});
+
+test('matchLineToScene: no match → null (ask, never guess)', () => {
+  const r = matchLineToScene(fakeScenes, { oldText: 'something totally unrelated' });
+  assert.equal(r, null);
+});
+
+test('matchLineToScene: explicit scene number out of range → null', () => {
+  const r = matchLineToScene(fakeScenes, { sceneNumber: 99 });
+  assert.equal(r, null);
 });
 
 test('r2KeyFromUrl: R2 host extraction', () => {
