@@ -6,8 +6,8 @@ import path from 'path';
 import os from 'os';
 import axios from 'axios';
 import { r2Storage } from './r2StorageService.js';
-import { renderClip, concatClips, runRenderQC } from './sceneVideoPipelineService.js';
-import { classifyFeedback, r2KeyFromUrl, type FeedbackIntent } from './neuralFeedbackClassifier.js';
+import { renderClip, concatClips, runRenderQC, generateSceneAudio } from './sceneVideoPipelineService.js';
+import { classifyFeedback, parseLineChange, matchLineToScene, r2KeyFromUrl, type FeedbackIntent } from './neuralFeedbackClassifier.js';
 
 const { approvals, videoScenes, videoProjects } = schema;
 
@@ -20,17 +20,28 @@ const { approvals, videoScenes, videoProjects } = schema;
  * re-mix (source untouched, flagged with reMixOf + reMixType) so the owner can
  * compare/Save.
  *
+ * LINE-CHANGE (owner direction, task 6428c854 → build task 7793564b, Phase 1):
+ * "change this line to X" edits ONE scene's narration: the edited line is re-voiced
+ * via GPT-Audio in the SAME project voice (project.metadata voice/tone →
+ * resolveVoice → same OpenAI voice id), then that ONE scene is re-rendered with the
+ * new audio and concatenated with the OTHER stored scenes → NEW draft
+ * (reMixType:'line_change', payload.lineChange {sceneNumber, oldText, newText}).
+ * No lip-sync/GPU here (Phase 2 design) — deterministic audio swap only, ~$0.
+ *
  * TRUST-CRITICAL: this service NEVER auto-spends Sora or re-renders from
  * scratch on feedback. If components are gone, it surfaces the honest
- * "can't auto-fix — components expired" instead of silently spending.
+ * "can't auto-fix — components expired" instead of silently spending. For
+ * line changes it NEVER guesses a line → if a line can't be matched to a scene,
+ * it returns line_not_found ("which line?") with zero spend.
  */
 
 export interface FeedbackAutoFixResult {
-  status: 'note_only' | 'auto_fixed' | 'components_expired' | 'not_found' | 'forbidden' | 'error';
+  status: 'note_only' | 'auto_fixed' | 'line_changed' | 'line_not_found' | 'components_expired' | 'not_found' | 'forbidden' | 'error';
   intent: FeedbackIntent;
   newApprovalId?: string;
   reason?: string;
   qc?: Record<string, any>;
+  lineChange?: { sceneNumber?: number; oldText?: string; newText?: string };
 }
 
 /**
@@ -153,6 +164,118 @@ async function remixFromStoredComponents(
 }
 
 /**
+ * Line-change re-mix (Phase 1, audio swap only — no lip sync/GPU).
+ *
+ * Matches the user's LINE_CHANGE request to ONE scene (by scene number, then
+ * narration text), re-voices that scene's narration via GPT-Audio in the SAME
+ * project voice (project.metadata.voice/tone → resolveVoice), re-renders ONLY
+ * that scene with the new audio (deterministic FFmpeg, VO-only), and
+ * concatenates it with the OTHER stored scenes (their stored narrations) →
+ * NEW draft (reMixType:'line_change'). $0-ish: exactly ONE gpt-audio micro-call
+ * + FFmpeg replay; NO Sora, NO GPU, no new paid infra.
+ *
+ * Honest statuses: line_not_found (no scene match — ask, never guess),
+ * components_expired (missing R2 components), error (audio regen failed).
+ */
+async function remixLineChange(
+  projectId: string,
+  userId: string,
+  projectVoice: 'female' | 'male' | undefined,
+  projectTone: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined,
+  lineChange: { sceneNumber?: number; oldText?: string; newText?: string },
+): Promise<
+  { finalUrl: string; r2Key?: string; qc: Record<string, any>; sceneNumber?: number; oldText?: string; newText?: string }
+  | { error: 'components_expired' | 'line_not_found' | 'audio_failed'; reason: string; lineChange?: { sceneNumber?: number; oldText?: string; newText?: string } }
+> {
+  if (!lineChange?.newText?.trim()) {
+    return { error: 'line_not_found', reason: 'no replacement line detected — which line? (scene number or exact words)', lineChange };
+  }
+
+  const scenes = await db.select()
+    .from(videoScenes)
+    .where(and(eq(videoScenes.projectId, projectId), eq(videoScenes.status, 'completed')))
+    .orderBy(videoScenes.sceneNumber);
+  if (scenes.length === 0) {
+    return { error: 'components_expired', reason: "can't edit line — no stored scene components" };
+  }
+
+  // Match the edited line to a scene — explicit scene number first, then
+  // narration transcript match. NEVER guess: no match → line_not_found.
+  const match = matchLineToScene(scenes, lineChange);
+  if (!match) {
+    return {
+      error: 'line_not_found',
+      reason: "couldn't match that line to a scene — which line? (scene number or exact words)",
+      lineChange,
+    };
+  }
+
+  const target = scenes.find((s: any) => s.sceneNumber === match.sceneNumber);
+  if (!target || !target.assetUrl) {
+    return { error: 'components_expired', reason: 'matched scene has no stored asset', lineChange: { sceneNumber: match.sceneNumber } };
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-linechange-'));
+  try {
+    // Re-voice the edited line in the SAME voice (ONE gpt-audio micro-call).
+    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone);
+    if (!audio?.localPath) {
+      return { error: 'audio_failed', reason: 'could not regenerate the edited line audio', lineChange: { sceneNumber: match.sceneNumber, oldText: match.narration, newText: lineChange.newText } };
+    }
+
+    const isTargetImage = target.assetType === 'image/png' || /\.(png|jpe?g|webp|gif)$/i.test(target.assetUrl || '');
+    const targetExt = isTargetImage ? 'png' : 'mp4';
+    const targetLocal = await downloadToTemp(target.assetUrl, targetExt);
+    if (!targetLocal) {
+      return { error: 'components_expired', reason: 'target scene asset expired/missing in R2', lineChange: { sceneNumber: match.sceneNumber } };
+    }
+
+    // Re-render the changed scene with the NEW audio; every OTHER scene keeps its
+    // stored VO (VO-only, fps/loop/kenburns fixes per merged PR #66).
+    const clips: string[] = [];
+    let clipIdx = 0;
+    for (const s of scenes) {
+      if (!s.assetUrl) continue;
+      const isImage = s.assetType === 'image/png' || /\.(png|jpe?g|webp|gif)$/i.test(s.assetUrl || '');
+      const ext = isImage ? 'png' : 'mp4';
+      const local = s.sceneNumber === match.sceneNumber
+        ? targetLocal
+        : await downloadToTemp(s.assetUrl, ext);
+      if (!local) return { error: 'components_expired', reason: 'a stored scene component expired in R2' };
+      let audioLocal: string | undefined;
+      if (s.sceneNumber === match.sceneNumber) {
+        audioLocal = audio.localPath; // NEW edited line
+      } else if (s.audioUrl) {
+        audioLocal = (await downloadToTemp(s.audioUrl, 'mp3')) ?? undefined;
+        if (s.audioUrl && !audioLocal) return { error: 'components_expired', reason: 'a stored VO expired in R2' };
+      }
+      const clip = path.join(dir, `clip-${clipIdx++}.mp4`);
+      await renderClip(local, clip, s.duration || 3, audioLocal, { kenburns: s.visualType === 'still' });
+      clips.push(clip);
+    }
+
+    const assembled = path.join(dir, 'final.mp4');
+    await concatClips(clips, assembled);
+    const qc = runRenderQC(assembled);
+
+    if (!r2Storage.isAvailable) {
+      return { error: 'components_expired', reason: 'R2 unavailable' };
+    }
+    const uploaded = await r2Storage.uploadLocalFile(assembled, userId, 'video-projects/remix', 'video/mp4');
+    return {
+      finalUrl: uploaded.url,
+      r2Key: uploaded.r2Key,
+      qc,
+      sceneNumber: match.sceneNumber,
+      oldText: match.narration,
+      newText: lineChange.newText,
+    };
+  } catch (e: any) {
+    return { error: 'audio_failed', reason: `line-change re-mix failed: ${e?.message}`, lineChange: { sceneNumber: match.sceneNumber, oldText: match.narration, newText: lineChange.newText } };
+  }
+}
+
+/**
  * Submit Neural Feedback on an Operations approval; when the intent is
  * auto-fixable, deterministically re-render from stored components and land a
  * NEW draft. NEVER spends Sora/AI on feedback.
@@ -200,6 +323,64 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
   }
   if (project.userId !== userId) {
     return { status: 'forbidden', intent, reason: 'not your asset' };
+  }
+
+  // ── LINE_CHANGE branch (Phase 1: audio swap in the SAME voice, no lip sync/GPU) ──
+  if (intent === 'line_change') {
+    const lineChange = parseLineChange(feedback);
+    const pmeta: any = (project.metadata as any) || {};
+    const projectVoice = pmeta.voice as 'female' | 'male' | undefined;
+    const projectTone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
+
+    const lcResult = await remixLineChange(projectId, userId, projectVoice, projectTone, lineChange);
+    if ('error' in lcResult) {
+      if (lcResult.error === 'line_not_found') {
+        return { status: 'line_not_found', intent, reason: lcResult.reason, lineChange: lcResult.lineChange };
+      }
+      if (lcResult.error === 'components_expired') {
+        return { status: 'components_expired', intent, reason: lcResult.reason, lineChange: lcResult.lineChange };
+      }
+      // audio_failed / unexpected — honest error, no spend result persisted
+      return { status: 'components_expired', intent, reason: lcResult.reason, lineChange: lcResult.lineChange };
+    }
+
+    const lcApprovalId = uuidv4();
+    const lcPayload = {
+      ...payload,
+      assetId: uuidv4(),
+      videoUrl: lcResult.finalUrl,
+      r2Key: lcResult.r2Key,
+      title: `${payload.title || 'Video'} (line edited)`,
+      status: 'completed',
+      aspectRatio: payload.aspectRatio || '9:16',
+      ratioLabel: payload.ratioLabel || 'AI Video (9:16 · TikTok/Reels/Shorts)',
+      shape: payload.shape || 'vertical',
+      projectId,
+      mode: payload.mode || 'scene',
+      provider: 'ffmpeg',
+      saved: false,
+      reMixOf: approvalId,
+      reMixType: 'line_change',
+      reMixFeedback: feedback,
+      lineChange: { sceneNumber: lcResult.sceneNumber, oldText: lcResult.oldText, newText: lcResult.newText },
+      qc: lcResult.qc,
+    };
+    await db.insert(approvals).values({
+      id: lcApprovalId,
+      userId,
+      type: 'video',
+      status: 'completed',
+      payload: lcPayload,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return {
+      status: 'line_changed',
+      intent,
+      newApprovalId: lcApprovalId,
+      qc: lcResult.qc,
+      lineChange: { sceneNumber: lcResult.sceneNumber, oldText: lcResult.oldText, newText: lcResult.newText },
+    };
   }
 
   const result = await remixFromStoredComponents(projectId, userId, approvalId, intent, feedback);

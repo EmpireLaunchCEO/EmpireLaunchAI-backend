@@ -842,28 +842,15 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
+  /**
+   * Regenerate ONE scene's narration audio via GPT-Audio (or TTS fallback) in the
+   * SAME voice the project used (project.metadata.voice/tone → resolveVoice).
+   * Exposed standalone (no instance state) so the LINE_CHANGE auto-fix loop
+   * (neuralFeedbackAutoFixService) can re-voice an edited line in place without a
+   * full scene re-render. $0-ish: ONE gpt-audio call (~micro-cost per line).
+   */
   private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
-    const key=process.env.OPENAI_API_KEY; const dir=path.join(process.cwd(),'temp','scene-audio'); fs.mkdirSync(dir,{recursive:true});
-    if(!key) return {localPath:path.join(dir,`${sceneId}.mp3`)};
-    const uploadAudio=async(lp:string,mime:string):Promise<string|undefined>=>{ if(!r2Storage.isAvailable) return undefined; try{ await fs.promises.copyFile(lp,`${lp}.r2-upload`); const up=await r2Storage.uploadLocalFile(`${lp}.r2-upload`,userId,'video-scenes/audio',mime); return up.url; }catch{ return undefined; } };
-    // ---- Attempt 1: gpt-audio (owner's explicitly-enabled model) via Chat Completions ----
-    // gpt-audio does NOT map to /v1/audio/speech (404 "Invalid URL"). It is an audio
-    // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
-    // Returns message.audio.data as base64 WAV. Verified 200 in prod ownership checks.
-    try {
-      const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-audio',modalities:['text','audio'],audio:{voice:resolveVoice(voice,tone),format:'mp3'},messages:[{role:'user',content:text}]}),signal:AbortSignal.timeout(90000)});
-      if(r.ok){ const j=await r.json(); const aud=j?.choices?.[0]?.message?.audio; if(aud&&aud.data){ const buf=Buffer.from(aud.data as string,'base64'); if(buf.length>0){ const lp=path.join(dir,`${sceneId}.mp3`); fs.writeFileSync(lp,buf); trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(voice,tone)} sceneId=${sceneId}`); const url=await uploadAudio(lp,'audio/mpeg'); return {url,localPath:lp}; } } trace(`scene_audio_model_failed model=gpt-audio status=no_audio sceneId=${sceneId}`); } else { trace(`scene_audio_model_failed model=gpt-audio status=${r.status} sceneId=${sceneId}`); }
-    } catch(e:any){ trace(`scene_audio_gptaudio_err sceneId=${sceneId} err=${e?.message}`); }
-    // ---- Attempt 2: classic TTS speech chain (/v1/audio/speech -> mp3) ----
-    const localPath=path.join(dir,`${sceneId}.mp3`);
-    const ttsModels=['gpt-4o-mini-tts','tts-1','tts-1-hd'];
-    let response:Response|null=null; let lastStatus=0;
-    for(const model of ttsModels){
-      response=await fetch('https://api.openai.com/v1/audio/speech',{method:'POST',headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({model,voice:resolveVoice(voice,tone),input:text,response_format:'mp3'}),signal:AbortSignal.timeout(60000)});
-      if(response.ok) break; lastStatus=response.status; trace(`scene_audio_model_failed model=${model} status=${response.status} sceneId=${sceneId}`);
-    }
-    if(!response||!response.ok) throw new Error(`GPT Audio ${lastStatus}`); fs.writeFileSync(localPath,Buffer.from(await response.arrayBuffer())); let url:string|undefined;
-    if(r2Storage.isAvailable){const copyPath=`${localPath}.r2-upload`; fs.copyFileSync(localPath,copyPath); const up=await r2Storage.uploadLocalFile(copyPath,userId,'video-scenes/audio','audio/mpeg'); url=up.url;} return {url,localPath};
+    return generateSceneAudio(text, userId, sceneId, voice, tone);
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
   async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
@@ -944,3 +931,94 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
   }
 }
 export const sceneVideoPipelineService = new SceneVideoPipelineService();
+
+/**
+ * Generate (or regenerate) ONE scene narration audio file in the project's SAME
+ * voice/tone (project.metadata.voice/tone → resolveVoice → same OpenAI voice id),
+ * via GPT-Audio first then the classic TTS chain. Standalone and instance-free so
+ * the LINE_CHANGE auto-fix can re-voice an edited line without a full re-render.
+ * Returns the R2 upload URL (if R2 configured) + the local file path.
+ */
+export async function generateSceneAudio(
+  text: string,
+  userId: string,
+  sceneId: string,
+  voice?: 'female' | 'male',
+  tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto',
+): Promise<{ url?: string; localPath: string }> {
+  const key = process.env.OPENAI_API_KEY;
+  const dir = path.join(process.cwd(), 'temp', 'scene-audio');
+  fs.mkdirSync(dir, { recursive: true });
+  if (!key) return { localPath: path.join(dir, `${sceneId}.mp3`) };
+  const uploadAudio = async (lp: string, mime: string): Promise<string | undefined> => {
+    if (!r2Storage.isAvailable) return undefined;
+    try {
+      await fs.promises.copyFile(lp, `${lp}.r2-upload`);
+      const up = await r2Storage.uploadLocalFile(`${lp}.r2-upload`, userId, 'video-scenes/audio', mime);
+      return up.url;
+    } catch {
+      return undefined;
+    }
+  };
+  // ---- Attempt 1: gpt-audio (owner's explicitly-enabled model) via Chat Completions ----
+  // gpt-audio does NOT map to /v1/audio/speech (404 "Invalid URL"). It is an audio
+  // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
+  // Returns message.audio.data as base64 WAV. Verified 200 in prod ownership checks.
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-audio', modalities: ['text', 'audio'],
+        audio: { voice: resolveVoice(voice, tone), format: 'mp3' },
+        messages: [{ role: 'user', content: text }],
+      }),
+      signal: AbortSignal.timeout(90000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const aud = j?.choices?.[0]?.message?.audio;
+      if (aud && aud.data) {
+        const buf = Buffer.from(aud.data as string, 'base64');
+        if (buf.length > 0) {
+          const lp = path.join(dir, `${sceneId}.mp3`);
+          fs.writeFileSync(lp, buf);
+          trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(voice, tone)} sceneId=${sceneId}`);
+          const url = await uploadAudio(lp, 'audio/mpeg');
+          return { url, localPath: lp };
+        }
+      }
+      trace(`scene_audio_model_failed model=gpt-audio status=no_audio sceneId=${sceneId}`);
+    } else {
+      trace(`scene_audio_model_failed model=gpt-audio status=${r.status} sceneId=${sceneId}`);
+    }
+  } catch (e: any) {
+    trace(`scene_audio_gptaudio_err sceneId=${sceneId} err=${e?.message}`);
+  }
+  // ---- Attempt 2: classic TTS speech chain (/v1/audio/speech -> mp3) ----
+  const localPath = path.join(dir, `${sceneId}.mp3`);
+  const ttsModels = ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'];
+  let response: Response | null = null;
+  let lastStatus = 0;
+  for (const model of ttsModels) {
+    response = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, voice: resolveVoice(voice, tone), input: text, response_format: 'mp3' }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (response.ok) break;
+    lastStatus = response.status;
+    trace(`scene_audio_model_failed model=${model} status=${response.status} sceneId=${sceneId}`);
+  }
+  if (!response || !response.ok) throw new Error(`GPT Audio ${lastStatus}`);
+  fs.writeFileSync(localPath, Buffer.from(await response.arrayBuffer()));
+  let url: string | undefined;
+  if (r2Storage.isAvailable) {
+    const copyPath = `${localPath}.r2-upload`;
+    fs.copyFileSync(localPath, copyPath);
+    const up = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes/audio', 'audio/mpeg');
+    url = up.url;
+  }
+  return { url, localPath };
+}
