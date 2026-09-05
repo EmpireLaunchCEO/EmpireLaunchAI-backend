@@ -4,7 +4,18 @@
  * without touching the database or spending anything.
  */
 
-export type FeedbackIntent = 'audio' | 'smoothness' | 'line_change' | 'none';
+export type FeedbackIntent = 'audio' | 'smoothness' | 'line_change' | 'repetitive' | 'none';
+
+/** Rich multi-intent view of a feedback string (a sentence can carry several wishes:
+ *  "fix the voiceover AND get rid of repetitive parts" → audio + repetitive).
+ *  The service satisfies EVERY detected intent — we never silently ignore part of
+ *  a request. */
+export interface FeedbackIntents {
+  audio: boolean;
+  smoothness: boolean;
+  lineChange: boolean;
+  repetitive: boolean;
+}
 
 export interface LineChangeMatch {
   /** Explicit scene number if the user named one (e.g. "scene 3 line"). */
@@ -15,38 +26,61 @@ export interface LineChangeMatch {
   newText?: string;
 }
 
-/** Deterministic keyword classification (cheap, no LLM in the hot path). */
-export function classifyFeedback(text: string): FeedbackIntent {
+// ── REPETITIVE intent (task 5c058d1f): "cut the repeats", "same scene twice",
+//    "redundant", "drags", "too long / shorten the video", "remove duplicates".
+//    "repeat" ALONE is ambiguous ("please repeat the voiceover" = audio playback),
+//    so the bare token only counts when it co-occurs with a dedup/trim signal or
+//    an explicit repetition complaint (repeats/repeating/repeated/repetitive). ──
+const REPETITIVE_WORD_RE = /\b(repetitive|repeats|repeating|repeated|redundant|duplicate|duplicates|drags|dragging)\b/i;
+const REPETITIVE_BARE_REPEAT_RE = /\brepeat\b/i;
+const REPETITIVE_PHRASE_RE = /same scene twice|too long|cut (the )?repeats?|shorten the video|remove (the )?duplicates?/i;
+const REPETITIVE_CONTEXT_RE = /cut|trim|drop|remove|dedup|duplicate|shorten|short|scene|part|section|bit|clip|too long|again and again|over and over/i;
+
+/** Pure, deterministic: does the text ask to cut/deduplicate repetitive scenes? */
+export function classifyRepetitive(text: string): boolean {
   const t = (text || '').toLowerCase();
-  // ── LINE_CHANGE (checked FIRST: "change this line to X", "line should say", etc.
-  //    must win over the generic 'audio'/'smoothness' buckets that share words
-  //    like "say"/"line" with no audio/smoothness signal). ──
-  if (/line|reword|rewrite|say .* instead|replace .* with|change .* to say|edit the script|fix the script|fix .* line/.test(t)) {
-    // But "fix the audio" / "fix the line audio" stays AUDIO; a pure line edit
-    // means the user is changing WORDS, not complaining about sound.
-    const hasAudioBleed = t.includes('audio') || t.includes('voice') || t.includes('sound') || t.includes('bleed');
-    const hasSmoothness = t.includes('choppy') || t.includes('judder') || t.includes('stutter') ||
-      t.includes('smooth') || t.includes('jitter') || t.includes('fps') || t.includes('frame rate') ||
-      t.includes('jerky') || t.includes('laggy') || t.includes('stuck') || t.includes('freeze');
-    if (!hasAudioBleed && !hasSmoothness) {
-      return 'line_change';
-    }
-  }
-  // Audio-bleed / voiceover complaints → AUDIO_REMIX
-  // (loose stem matching: 'voice' matches 'voiceover', 'second voice')
-  if (t.includes('audio') || t.includes('voice') || t.includes('sound') ||
-      t.includes('narration') || t.includes('bleed') || t.includes('mute') ||
-      t.includes('speaker') || t.includes('talking') || t.includes('speak')) {
-    return 'audio';
-  }
-  // Choppy / judder / stutter / smoothness → SMOOTHNESS_REMIX
-  // (loose: 'smooth' matches 'smoother', 'frame rate' matches 'framerate')
-  if (t.includes('choppy') || t.includes('judder') || t.includes('stutter') ||
-      t.includes('smooth') || t.includes('jitter') || t.includes('fps') ||
-      t.includes('frame rate') || t.includes('framerate') || t.includes('jerky') ||
-      t.includes('laggy') || t.includes('stuck') || t.includes('freeze')) {
-    return 'smoothness';
-  }
+  if (REPETITIVE_WORD_RE.test(t)) return true;
+  // "repeat" alone is ambiguous — require a dedup/trim/shorten context.
+  if (REPETITIVE_BARE_REPEAT_RE.test(t) && REPETITIVE_CONTEXT_RE.test(t)) return true;
+  return REPETITIVE_PHRASE_RE.test(t);
+}
+
+/**
+ * Rich intent detection — returns ALL intents present in a feedback string.
+ * Cheap, deterministic, no LLM. Keeps the shared audio/smoothness/line-change
+ * signals (identical words as classifyFeedback) so downstream routing is honest.
+ */
+export function classifyFeedbackIntents(text: string): FeedbackIntents {
+  const t = (text || '').toLowerCase();
+  // Shared signals (must stay identical to the single-intent classifier below).
+  const hasAudioBleed = t.includes('audio') || t.includes('voice') || t.includes('sound') ||
+    t.includes('narration') || t.includes('bleed') || t.includes('mute') ||
+    t.includes('speaker') || t.includes('talking') || t.includes('speak');
+  const hasSmoothness = t.includes('choppy') || t.includes('judder') || t.includes('stutter') ||
+    t.includes('smooth') || t.includes('jitter') || t.includes('fps') ||
+    t.includes('frame rate') || t.includes('framerate') || t.includes('jerky') ||
+    t.includes('laggy') || t.includes('stuck') || t.includes('freeze');
+  // LINE_CHANGE wins only when there is NO audio/smoothness signal (a pure line
+  // edit means changing WORDS, not complaining about sound/motion).
+  const rawLineSignal = /line|reword|rewrite|say .* instead|replace .* with|change .* to say|edit the script|fix the script|fix .* line/.test(t);
+  return {
+    audio: hasAudioBleed,
+    smoothness: hasSmoothness,
+    lineChange: rawLineSignal && !hasAudioBleed && !hasSmoothness,
+    repetitive: classifyRepetitive(t),
+  };
+}
+
+/** Deterministic single-intent classification (cheap, no LLM in the hot path).
+ *  For a combined request the PRIMARY label follows priority
+ *  line_change → audio → repetitive → smoothness; the service routes on the rich
+ *  intents (classifyFeedbackIntents) so EVERY detected intent is satisfied. */
+export function classifyFeedback(text: string): FeedbackIntent {
+  const i = classifyFeedbackIntents(text);
+  if (i.lineChange) return 'line_change';
+  if (i.audio) return 'audio';
+  if (i.repetitive) return 'repetitive';
+  if (i.smoothness) return 'smoothness';
   return 'none';
 }
 
@@ -137,6 +171,106 @@ export function matchLineToScene(
   if (contains) return { sceneNumber: contains.sceneNumber, narration: contains.narration || '' };
 
   return null;
+}
+
+// ── REPETITIVE detection helpers (task 5c058d1f) ────────────────────────────
+// Pure, deterministic, no AI / no ffmpeg in the hot path. The service feeds these
+// hashes that are computed ONCE per scene component via sharp (still) or
+// ffmpeg+sharp (first video frame).
+
+/** Normalize narration text for duplicate comparison (punctuation/case/space-collapse). */
+export function normalizeNarration(text: string | null | undefined): string {
+  return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Hamming distance between two dHash hex strings (default 64-bit = 8 hex chars). */
+export function hammingDistance(h1: string, h2: string): number {
+  if (!h1 || !h2) return Number.MAX_SAFE_INTEGER;
+  let dist = 0;
+  const len = Math.min(h1.length, h2.length);
+  for (let i = 0; i < len; i++) {
+    const a = parseInt(h1[i], 16), b = parseInt(h2[i], 16);
+    let x = a ^ b;
+    while (x) { dist += x & 1; x >>= 1; }
+  }
+  // Any length mismatch counts as "different" beyond the shared prefix.
+  dist += Math.abs(h1.length - h2.length) * 8;
+  return dist;
+}
+
+/**
+ * Detect scenes that REPEAT an EARLIER kept scene (visual dHash OR near-exact
+ * narration). Deterministic, keep-first/drop-later, guardrail-safe.
+ *
+ * Gestalt: a later scene is a duplicate when it is CONFIDENTLY the same as an
+ * earlier kept scene by a strict dHash threshold (≤3/64 bits) OR its normalized
+ * narration is essentially equal (≤1 token different). Both signals are pure and
+ * cheap. Guardrails: NEVER drop the only scene; NEVER drop so fewer than 2 kept
+ * remain; only drop on a confident match (an unmatched scene is kept). A scene
+ * with neither a hash nor narration is never dropped.
+ *
+ * @returns the scenes to DROP (never the kept list) + a `kept` count.
+ */
+export function detectRepetitiveScenes(
+  scenes: Array<{ sceneNumber: number; narration?: string | null; dhash?: string | null }>,
+  opts?: { dhashThreshold?: number; narrationTolerance?: number },
+): { dropped: Array<{ sceneNumber: number; oldNarration?: string; matchSceneNumber: number; reason: 'visual' | 'narration' }>; kept: number } {
+  const thresh = opts?.dhashThreshold ?? 3;
+  const narrationTol = opts?.narrationTolerance ?? 1;
+  const kept: typeof scenes = [];
+  const dropped: Array<{ sceneNumber: number; oldNarration?: string; matchSceneNumber: number; reason: 'visual' | 'narration' }> = [];
+
+  for (const scene of scenes) {
+    // Duplicate signal takes priority over keep-first, but ONLY when confident.
+    let dup: { matchSceneNumber: number; reason: 'visual' | 'narration' } | null = null;
+    for (const keptScene of kept) {
+      // Visual: strict threshold. A missing hash is never a match (don't drop on nothing).
+      if (scene.dhash && keptScene.dhash && hammingDistance(scene.dhash, keptScene.dhash) <= thresh) {
+        dup = { matchSceneNumber: keptScene.sceneNumber, reason: 'visual' };
+        break;
+      }
+      // Narration: essentially-equal normalized text. EXACT after normalization
+      // (case/punct-collapse) drops regardless of length; a ≤ narrationTol
+      // token-difference FALLBACK applies only to longer narrations (≥5 tokens)
+      // where one word is not significant.
+      const a = normalizeNarration(scene.narration).split(' ');
+      const b = normalizeNarration(keptScene.narration).split(' ');
+      const minLen = Math.min(a.length, b.length);
+      let diffs = 0;
+      for (let i = 0; i < minLen; i++) if (a[i] !== b[i]) diffs++;
+      diffs += Math.abs(a.length - b.length);
+      const exact = a.length === b.length && diffs === 0;
+      const nearLong = a.length >= 5 && b.length >= 5 && diffs <= narrationTol;
+      if (a.length > 0 && b.length > 0 && (exact || nearLong)) {
+        dup = { matchSceneNumber: keptScene.sceneNumber, reason: 'narration' };
+        break;
+      }
+    }
+    if (dup) {
+      dropped.push({ sceneNumber: scene.sceneNumber, oldNarration: scene.narration || undefined, matchSceneNumber: dup.matchSceneNumber, reason: dup.reason });
+    } else {
+      kept.push(scene);
+    }
+  }
+
+  // Guardrails: never drop the only scene; never leave fewer than 2 kept.
+  if (scenes.length > 0 && dropped.length === scenes.length) {
+    // Everything got dropped — impossible for keep-first (first scene can't match an
+    // earlier kept scene at the start, so at least one stays). Defensive only.
+    const last = dropped.pop();
+    if (last) kept.push(scenes.find(s => s.sceneNumber === last.sceneNumber) || scenes[0]);
+  }
+  if (kept.length < 2 && dropped.length > 0) {
+    // Restore the earliest dropped scenes until ≥2 kept (safety net).
+    while (kept.length < 2 && dropped.length > 0) {
+      const d = dropped[0];
+      const orig = scenes.find(s => s.sceneNumber === d.sceneNumber);
+      if (orig) kept.push(orig);
+      dropped.shift();
+    }
+  }
+
+  return { dropped, kept: kept.length };
 }
 
 /**
