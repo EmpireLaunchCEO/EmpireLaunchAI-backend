@@ -5,10 +5,18 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import axios from 'axios';
+import sharp from 'sharp';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { r2Storage } from './r2StorageService.js';
 import { renderClip, concatClips, runRenderQC, generateSceneAudio } from './sceneVideoPipelineService.js';
-import { classifyFeedback, parseLineChange, matchLineToScene, r2KeyFromUrl, type FeedbackIntent } from './neuralFeedbackClassifier.js';
+import {
+  classifyFeedback, classifyFeedbackIntents, parseLineChange, matchLineToScene,
+  r2KeyFromUrl, detectRepetitiveScenes, hammingDistance, normalizeNarration,
+  type FeedbackIntent, type FeedbackIntents,
+} from './neuralFeedbackClassifier.js';
 
+const execFileP = promisify(execFile);
 const { approvals, videoScenes, videoProjects } = schema;
 
 /**
@@ -36,12 +44,14 @@ const { approvals, videoScenes, videoProjects } = schema;
  */
 
 export interface FeedbackAutoFixResult {
-  status: 'note_only' | 'auto_fixed' | 'line_changed' | 'line_not_found' | 'components_expired' | 'not_found' | 'forbidden' | 'error';
+  status: 'note_only' | 'auto_fixed' | 'line_changed' | 'line_not_found' | 'repetitive_fixed' | 'repetitive_not_found' | 'combined_fixed' | 'components_expired' | 'not_found' | 'forbidden' | 'error';
   intent: FeedbackIntent;
   newApprovalId?: string;
   reason?: string;
   qc?: Record<string, any>;
   lineChange?: { sceneNumber?: number; oldText?: string; newText?: string };
+  repetitive?: { dropped: Array<{ sceneNumber: number; oldNarration?: string; matchSceneNumber: number; reason: 'visual' | 'narration' }>; kept: number };
+  intents?: FeedbackIntents;
 }
 
 /**
@@ -90,6 +100,74 @@ interface SceneComponent {
   audioLocal?: string;
   duration: number;
   visualType: 'motion' | 'still';
+}
+
+/** Compute a dHash (8x8 → 64-bit hex) for an image buffer via sharp.
+ *  Deterministic, cheap, NO AI. Returns null when sharp can't decode. */
+export async function dhashFromBuffer(buffer: Buffer): Promise<string | null> {
+  try {
+    const { data, info } = await sharp(buffer)
+      .resize(9, 8, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (!data || info.width !== 9 || info.height !== 8) return null;
+    let hash = '';
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const left = data[y * info.width + x];
+        const right = data[y * info.width + x + 1];
+        hash += left > right ? '1' : '0';
+      }
+    }
+    // Convert the 64-bit binary string to 16 hex chars.
+    let hex = '';
+    for (let i = 0; i < 64; i += 4) {
+      hex += parseInt(hash.slice(i, i + 4), 2).toString(16);
+    }
+    return hex;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute the dHash for a stored scene component VISUAL (motion → first frame,
+ * still → the whole image). Uses the R2-key SDK path (same as downloadToTemp).
+ * Returns null on any failure (never throws) — the repetitive detector treats a
+ * missing hash as "not enough evidence" (keeps the scene) rather than guessing.
+ */
+export async function sceneVisualDhash(assetUrl: string, assetType: string | null): Promise<string | null> {
+  try {
+    const key = r2KeyFromUrl(assetUrl);
+    let buffer: Buffer | null = null;
+    if (key && r2Storage.isAvailable) {
+      buffer = await r2Storage.downloadBuffer(key);
+    }
+    if (!buffer) {
+      const resp = await axios.get(assetUrl, { responseType: 'arraybuffer', timeout: 60_000 });
+      buffer = Buffer.from(resp.data);
+    }
+    if (!buffer || buffer.length === 0) return null;
+    const isImage = assetType === 'image/png' || /\.(png|jpe?g|webp|gif)$/i.test(assetUrl);
+    if (isImage) {
+      return dhashFromBuffer(buffer);
+    }
+    // Motion: extract the FIRST frame. In prod ffmpeg exists (Dockerfile installs
+    // it). Locally (no ffmpeg binary) this returns null → the test harness uses
+    // the still/IMAGE path + pure detector fixtures (documented caveat).
+    try {
+      const tmp = path.join(os.tmpdir(), `firstframe-${uuidv4()}.png`);
+      await execFileP('ffmpeg', ['-y', '-i', assetUrl, '-frames:v', '1', tmp]);
+      const png = fs.readFileSync(tmp);
+      fs.rmSync(tmp, { force: true });
+      return await dhashFromBuffer(png);
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -276,6 +354,79 @@ async function remixLineChange(
 }
 
 /**
+ * REPETITIVE re-mix (task 5c058d1f): cut near-duplicate scenes, deterministically
+ * re-render the KEPT scenes VO-only (also cleans any audio bleed), land a NEW draft
+ * (reMixType:'repetitive') with the drop manifest. $0 — FFmpeg replay + R2
+ * downloads only; NO Sora, NO new AI audio, NO GPU. When the caller also detected
+ * the audio intent this SAME render satisfies BOTH (drop repeats + VO-only clean).
+ *
+ * Uses PER-SCENE first-frame/still dHash + normalized-narration duplicate signals
+ * (strict thresholds, keep-first/drop-later). Guardrails: never drop the only
+ * scene; never drop so fewer than 2 kept remain; only drop on a confident match.
+ * No confident duplicate → 'repetitive_not_found' (ask), zero spend.
+ */
+async function remixRepetitive(
+  projectId: string,
+  userId: string,
+): Promise<
+  { finalUrl: string; r2Key?: string; qc: Record<string, any>; dropped: Array<{ sceneNumber: number; oldNarration?: string; matchSceneNumber: number; reason: 'visual' | 'narration' }>; kept: number }
+  | { error: 'repetitive_not_found' | 'components_expired'; reason: string }
+> {
+  const scenes = await db.select()
+    .from(videoScenes)
+    .where(and(eq(videoScenes.projectId, projectId), eq(videoScenes.status, 'completed')))
+    .orderBy(videoScenes.sceneNumber);
+  if (scenes.length === 0) {
+    return { error: 'components_expired', reason: 'no stored scene components' };
+  }
+  if (scenes.length === 1) {
+    return { error: 'repetitive_not_found', reason: 'only one scene — nothing to deduplicate' };
+  }
+
+  // Compute per-scene visual hashes (motion → first frame, still → image).
+  const withHash: Array<{ sceneNumber: number; narration: string | null; dhash: string | null }> = [];
+  for (const s of scenes) {
+    const dhash = s.assetUrl ? await sceneVisualDhash(s.assetUrl, s.assetType) : null;
+    withHash.push({ sceneNumber: s.sceneNumber, narration: s.narration, dhash });
+  }
+
+  const det = detectRepetitiveScenes(withHash);
+  if (det.dropped.length === 0) {
+    return { error: 'repetitive_not_found', reason: 'no obvious repeats — which scenes feel repetitive?' };
+  }
+  const droppedNums = new Set(det.dropped.map(d => d.sceneNumber));
+  const keptScenes = scenes.filter((s: any) => !droppedNums.has(s.sceneNumber));
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-repetitive-'));
+  const clips: string[] = [];
+  let clipIdx = 0;
+  for (const s of keptScenes) {
+    if (!s.assetUrl) return { error: 'components_expired', reason: 'a kept scene asset expired in R2' };
+    const isImage = s.assetType === 'image/png' || /\.(png|jpe?g|webp|gif)$/i.test(s.assetUrl);
+    const local = await downloadToTemp(s.assetUrl, isImage ? 'png' : 'mp4');
+    if (!local) return { error: 'components_expired', reason: 'a kept scene component expired in R2' };
+    let audioLocal: string | undefined;
+    if (s.audioUrl) {
+      audioLocal = (await downloadToTemp(s.audioUrl, 'mp3')) ?? undefined;
+      if (!audioLocal) return { error: 'components_expired', reason: 'a kept scene VO expired in R2' };
+    }
+    const clip = path.join(dir, `clip-${clipIdx++}.mp4`);
+    await renderClip(local, clip, s.duration || 3, audioLocal, { kenburns: s.visualType === 'still' });
+    clips.push(clip);
+  }
+
+  const assembled = path.join(dir, 'final.mp4');
+  await concatClips(clips, assembled);
+  const qc = runRenderQC(assembled);
+
+  if (!r2Storage.isAvailable) {
+    return { error: 'components_expired', reason: 'R2 unavailable' };
+  }
+  const uploaded = await r2Storage.uploadLocalFile(assembled, userId, 'video-projects/remix', 'video/mp4');
+  return { finalUrl: uploaded.url, r2Key: uploaded.r2Key, qc, dropped: det.dropped, kept: keptScenes.length };
+}
+
+/**
  * Submit Neural Feedback on an Operations approval; when the intent is
  * auto-fixable, deterministically re-render from stored components and land a
  * NEW draft. NEVER spends Sora/AI on feedback.
@@ -295,11 +446,13 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
   if (approval.userId !== userId) return { status: 'forbidden', intent: 'none', reason: 'not your asset' };
 
   const intent = classifyFeedback(feedback);
+  const intents = classifyFeedbackIntents(feedback);
   const payload: any = approval.payload || {};
   const feedbackEntry = {
     id: uuidv4(),
     text: feedback,
     intent,
+    intents,
     createdAt: new Date().toISOString(),
     actor: 'user',
   };
@@ -323,6 +476,65 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
   }
   if (project.userId !== userId) {
     return { status: 'forbidden', intent, reason: 'not your asset' };
+  }
+
+  // ── REPETITIVE branch (task 5c058d1f) — runs BEFORE the audio branch so a
+  //    combined "fix the voiceover AND get rid of repetitive parts" request lands
+  //    in the dedup + VO-only render (ONE new draft satisfies BOTH intents).
+  //    Line-change requests are kept intact (never hijacked by a coincidental
+  //    repetitive word); if both are present, line_change wins and the result
+  //    exposes intents.repetitive so the skipped wish is never SILENT. ──
+  if (intents.repetitive && !intents.lineChange) {
+    const repResult = await remixRepetitive(projectId, userId);
+    if ('error' in repResult) {
+      if (repResult.error === 'components_expired') {
+        return { status: 'components_expired', intent, intents, reason: repResult.reason };
+      }
+      // repetitive_not_found — zero spend, ask (never guess, never silently re-render)
+      return { status: 'repetitive_not_found', intent, intents, reason: repResult.reason };
+    }
+
+    const repApprovalId = uuidv4();
+    const repPayload = {
+      ...payload,
+      assetId: uuidv4(),
+      videoUrl: repResult.finalUrl,
+      r2Key: repResult.r2Key,
+      title: `${payload.title || 'Video'} (repeats cut)`,
+      status: 'completed',
+      aspectRatio: payload.aspectRatio || '9:16',
+      ratioLabel: payload.ratioLabel || 'AI Video (9:16 · TikTok/Reels/Shorts)',
+      shape: payload.shape || 'vertical',
+      projectId,
+      mode: payload.mode || 'scene',
+      provider: 'ffmpeg',
+      saved: false,
+      reMixOf: approvalId,
+      reMixType: 'repetitive',
+      reMixFeedback: feedback,
+      repetitive: { dropped: repResult.dropped, kept: repResult.kept },
+      qc: repResult.qc,
+    };
+    await db.insert(approvals).values({
+      id: repApprovalId,
+      userId,
+      type: 'video',
+      status: 'completed',
+      payload: repPayload,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // Combined "voiceover + repeats" → one honest status so Operations surfaces
+    // the dedup AND the VO-only clean happened. Pure repetitive → 'repetitive_fixed'.
+    const status = intents.audio ? 'combined_fixed' : 'repetitive_fixed';
+    return {
+      status,
+      intent,
+      intents,
+      newApprovalId: repApprovalId,
+      qc: repResult.qc,
+      repetitive: { dropped: repResult.dropped, kept: repResult.kept },
+    };
   }
 
   // ── LINE_CHANGE branch (Phase 1: audio swap in the SAME voice, no lip sync/GPU) ──
@@ -377,6 +589,7 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
     return {
       status: 'line_changed',
       intent,
+      intents,
       newApprovalId: lcApprovalId,
       qc: lcResult.qc,
       lineChange: { sceneNumber: lcResult.sceneNumber, oldText: lcResult.oldText, newText: lcResult.newText },
@@ -385,7 +598,7 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
 
   const result = await remixFromStoredComponents(projectId, userId, approvalId, intent, feedback);
   if ('error' in result) {
-    return { status: 'components_expired', intent, reason: "can't auto-fix — components expired", qc: undefined };
+    return { status: 'components_expired', intent, intents, reason: "can't auto-fix — components expired", qc: undefined };
   }
 
   // Land as NEW draft in Operations (source untouched) — provider 'ffmpeg' re-mix.
@@ -419,5 +632,5 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
     updatedAt: new Date(),
   });
 
-  return { status: 'auto_fixed', intent, newApprovalId, qc: result.qc };
+  return { status: 'auto_fixed', intent, intents, newApprovalId, qc: result.qc };
 }
