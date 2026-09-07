@@ -11,6 +11,7 @@ import {
 } from '../services/voiceOptions.js';
 import { db, schema } from '../db/index.js';
 import { eq, sql, and, inArray } from 'drizzle-orm';
+import { refreshApprovalPayloadUrls } from '../services/approvalPayloadRefresh.js';
 import axios from 'axios';
 const { scheduledPosts, users, approvals, creations } = schema;
 
@@ -32,7 +33,13 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
       .orderBy(approvals.createdAt)
       .limit(50);
 
-    res.json({ status: 'success', approvals: pendingItems });
+    const refreshed = await Promise.all(
+      pendingItems.map(async (item: typeof approvals.$inferSelect) => ({
+        ...item,
+        payload: await refreshApprovalPayloadUrls(item.payload),
+      }))
+    );
+    res.json({ status: 'success', approvals: refreshed });
   } catch (error: any) {
     console.error('Error fetching pending approvals:', error);
     res.status(500).json({ status: 'error', error: error.message });
