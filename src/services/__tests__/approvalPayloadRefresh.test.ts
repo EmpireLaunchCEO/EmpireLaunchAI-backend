@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
-import { refreshR2Url, refreshApprovalPayloadUrls, PAYLOAD_URL_FIELDS } from '../approvalPayloadRefresh.js';
+import { refreshR2Url, refreshApprovalPayloadUrls, PAYLOAD_URL_FIELDS, mediaUrlsFromPayload } from '../approvalPayloadRefresh.js';
 import { r2Storage } from '../r2StorageService.js';
 
 const R2_URL = 'https://pub-abc123.r2.cloudflarestorage.com/empirelaunchai/brands/00000000-0000-0000-0000-000000000000/video-projects/abc123.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260801T000000Z&X-Amz-Expires=3600&X-Amz-Signature=deadbeef';
@@ -64,4 +64,23 @@ test('PAYLOAD_URL_FIELDS covers the media URL keys served to Operations', () => 
   assert.ok(PAYLOAD_URL_FIELDS.includes('thumbnailUrl'));
   assert.ok(PAYLOAD_URL_FIELDS.includes('audioUrl'));
   assert.ok(PAYLOAD_URL_FIELDS.includes('imageUrl'));
+});
+
+test('mediaUrlsFromPayload: collects the 4 R2 media fields to clean up on delete', () => {
+  const urls = mediaUrlsFromPayload({
+    videoUrl: R2_URL,
+    thumbnailUrl: R2_URL,
+    audioUrl: R2_URL,
+    imageUrl: R2_URL,
+    title: 'Untitled Project',
+    status: 'completed',
+    previewUrl: 'https://example.com/preview.png', // NOT part of delete cleanup
+  });
+  assert.deepEqual(urls, [R2_URL, R2_URL, R2_URL, R2_URL]);
+});
+test('mediaUrlsFromPayload: ignores non-string / missing media fields and non-object payloads', () => {
+  assert.deepEqual(mediaUrlsFromPayload({ videoUrl: 123, thumbnailUrl: null, title: 'x' }), []);
+  assert.deepEqual(mediaUrlsFromPayload(null), []);
+  assert.deepEqual(mediaUrlsFromPayload(undefined), []);
+  assert.deepEqual(mediaUrlsFromPayload('nope'), []);
 });
