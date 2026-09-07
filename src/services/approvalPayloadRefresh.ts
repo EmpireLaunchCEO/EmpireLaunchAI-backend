@@ -2,6 +2,28 @@ import { r2Storage } from './r2StorageService.js';
 import { r2KeyFromUrl } from './neuralFeedbackClassifier.js';
 
 /**
+ * The set of media-URL fields that a Services/Operations card may carry inside an
+ * approval payload. Read path re-signs them (refreshApprovalPayloadUrls); the
+ * delete path best-effort-removes the same set from R2 (mediaUrlsFromPayload).
+ */
+const MEDIA_URL_FIELDS = ['videoUrl', 'thumbnailUrl', 'audioUrl', 'imageUrl'] as const;
+
+/**
+ * Return the string media-URL values present in an approval payload that should
+ * be cleaned up from R2 when the row is deleted (video / thumbnail / audio /
+ * image — the exact fields the Operations card renders from). Non-object
+ * payloads yield an empty array. Never throws.
+ */
+export function mediaUrlsFromPayload(payload: any): string[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const urls: string[] = [];
+  for (const field of MEDIA_URL_FIELDS) {
+    if (typeof payload[field] === 'string') urls.push(payload[field]);
+  }
+  return urls;
+}
+
+/**
  * Re-sign a stored R2 presigned URL so it is fresh for immediate playback.
  * Mirrors `refreshR2Url` in src/routes/studioRoutes.ts — any non-R2 URL passes
  * through unchanged; any failure falls back to the stored URL. Key extraction

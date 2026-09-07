@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { aiRouter, RouterDecision } from '../services/aiRouter.js';
+import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
@@ -1051,11 +1052,16 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
       .from(schema.creations).where(eq(schema.creations.id, id)).limit(1))[0];
 
     // 2) Creation resolved through an approval (approval.payload.assetId == id, OR approval.id == id).
+    //    Keep the approval row itself too: an orphaned approval (one whose payload.assetId has no
+    //    linked creations row) is still a valid delete target — e.g. the Operations "Untitled
+    //    Project" card whose pipeline died before writing a creations row.
+    let approvalRow: any = undefined;
     if (!creation) {
       const [ap] = await db.select().from(schema.approvals)
         .where(sql`${schema.approvals.payload}->>'assetId' = ${id}`).limit(1);
       const approval = ap || (await db.select()
         .from(schema.approvals).where(eq(schema.approvals.id, id)).limit(1))[0];
+      approvalRow = approval;
       if (approval?.payload?.assetId) {
         creation = (await db.select()
           .from(schema.creations).where(eq(schema.creations.id, approval.payload.assetId)).limit(1))[0];
@@ -1073,7 +1079,25 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     }
 
     const projectId = creation?.metadata?.projectId || projectById?.id;
-    if (!creation && !projectId) return res.status(404).json({ error: 'Not found' });
+
+    // ── Delete ────────────────────────────────────────────────────────────────
+    // An orphaned approval (payload.assetId has no creations row and no video
+    // project) is still a valid target: best-effort delete its R2 media, then the
+    // approval row. 404 only when nothing — creation, project, nor approval — resolves.
+    if (!creation && !projectId && !approvalRow) return res.status(404).json({ error: 'Not found' });
+
+    if (approvalRow) {
+      // Best-effort R2 media cleanup from the approval payload — never fail the
+      // row delete on R2 errors (matches deleteR2's best-effort pattern above).
+      for (const url of mediaUrlsFromPayload(approvalRow.payload)) {
+        try { await deleteR2(url); } catch {}
+      }
+      try {
+        await db.delete(schema.approvals).where(eq(schema.approvals.id, approvalRow.id));
+      } catch (err: any) {
+        throw new Error('Failed to delete approval row: ' + (err?.message ?? err));
+      }
+    }
 
     // Delete in dependency order: project (+ scenes + R2) → creation (+ R2) → approvals.
     if (projectId) await deleteProject(projectId);
@@ -1084,7 +1108,7 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
       await deleteApprovalsFor(creation.id);
     }
 
-    res.json({ status: 'ok', deleted: id });
+    res.json({ status: 'ok', deleted: approvalRow?.id || id });
   } catch (err: any) {
     console.error('[StudioRoute] Delete failed:', err.message);
     return res.status(500).json({ error: err.message });
