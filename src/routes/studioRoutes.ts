@@ -35,7 +35,7 @@ interface StudioRequest {
   attachments?: string[];
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   duration?: number;                        // Customize Video: requested duration (seconds)
-  voice?: 'female' | 'male';                // Voiceover gender (shared control)
+  voice?: 'female' | 'male' | 'none';       // Voiceover gender (shared control) — 'none' = NO voiceover (silent video)
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';  // Voiceover tone
   sourceImages?: string[];                  // Screenshot/image uploads as source visuals
 }
@@ -520,8 +520,10 @@ router.post('/process', async (req: Request, res: Response) => {
 
         // Shared voiceover + duration + screenshot controls (Customize Video).
         // Persisted in metadata so the queue worker reads them from the job.
+        // voice:'none' = NO voiceover: it flows through (truthy) so the worker
+        // persists it and skips GPT-Audio — never silently dropped.
         const duration = Number.isFinite(Number(req.body.duration)) ? Number(req.body.duration) : undefined;
-        const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
+        const voice = (req.body.voice === 'female' || req.body.voice === 'male' || req.body.voice === 'none') ? req.body.voice : undefined;
         const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
 
         try {
@@ -1128,7 +1130,9 @@ router.post('/video-project', async (req: Request, res: Response) => {
       return res.status(400).json({ status: 'error', error: `duration must be between 1 and ${MAX_SCENE_DURATION} seconds (3 minutes)` });
     }
     // Shared voiceover controls (same options as Customize Video) + screenshot source images.
-    const voice = (req.body.voice === 'female' || req.body.voice === 'male') ? req.body.voice : undefined;
+    // voice:'none' = NO voiceover mode: persists as metadata.voice so processScene
+    // skips GPT-Audio narration → silent final MP4 (never silently dropped).
+    const voice = (req.body.voice === 'female' || req.body.voice === 'male' || req.body.voice === 'none') ? req.body.voice : undefined;
     const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
     // Owner-locked mood (now applies to Scene-Based, shared with Faceless/Twin set).
     // Accept lowercase/trimmed; 'auto'/empty -> undefined (no mood hint). Reject invalid.

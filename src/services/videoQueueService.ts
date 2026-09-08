@@ -231,12 +231,12 @@ export function startVideoQueueWorker(): void {
       const platforms = meta?.platforms || ['tiktok'];
       const duration = typeof meta?.duration === 'number' ? meta.duration : undefined;
       const voiceoverRaw = (meta?.voiceover || meta?.voiceoverConfig || {}) as {
-        voice?: 'female' | 'male';
-        gender?: 'female' | 'male';
+        voice?: 'female' | 'male' | 'none';
+        gender?: 'female' | 'male' | 'none';
         tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';
       } | undefined;
       const voiceover = voiceoverRaw && (voiceoverRaw.voice || voiceoverRaw.gender || voiceoverRaw.tone)
-        ? { gender: (voiceoverRaw.voice || voiceoverRaw.gender) as 'female' | 'male' | undefined, tone: voiceoverRaw.tone }
+        ? { gender: (voiceoverRaw.voice || voiceoverRaw.gender) as 'female' | 'male' | 'none' | undefined, tone: voiceoverRaw.tone }
         : undefined;
       const userId = job.userId;
 
@@ -313,8 +313,9 @@ export function startVideoQueueWorker(): void {
         // Voiceover (gpt-audio) — if the user selected a voice, generate narration
         // of the prompt and mux it onto the video so the delivered file has audio.
         // Uses the same verified chat/completions + mp3 path as scene narration.
+        // voice:'none' = NO-voiceover mode: skip GPT-Audio entirely (silent video).
         let voiceoverPath: string | undefined;
-        if (voiceover && (voiceover.gender || voiceover.tone)) {
+        if (voiceover && voiceover.gender !== 'none' && (voiceover.gender || voiceover.tone)) {
           try {
             const { resolveVoice } = await import('./voiceOptions.js');
             const { execFile } = await import('child_process');

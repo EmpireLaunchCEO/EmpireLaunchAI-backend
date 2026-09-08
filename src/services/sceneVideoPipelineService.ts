@@ -5,14 +5,21 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService, snapSoraSeconds, SORA_SCENE_SIZE } from './soraVideoService.js';
+import { soraVideoService, SORA_MOTION_SECONDS, SORA_SCENE_SIZE } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; }
+/** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
+ *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
+ *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
+ *  Pure decision helper so the pipeline rule is unit-testable without mocks. */
+export function shouldGenerateSceneNarration(narration?: string | null, voice?: string): boolean {
+  return Boolean(narration) && voice !== 'none';
+}
 /** Sora 2 intermittently reports status:failed ~55-90s into generation. Scene motion
  *  scenes retry up to 2 extra attempts with short backoff (mirrors the single-shot
  *  Customize Video worker in videoQueueService.ts). Worst case: 3 × ~90s + 25s backoff
@@ -73,7 +80,7 @@ function probeDuration(input: string): number {
  * The caller logs the report and can attach it to the draft payload so the GPT-5.2
  * exception-handler router (decision-only, no pixel/audio edits) can SELECT a fix.
  */
-export function runRenderQC(media: string): Record<string, any> {
+export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Record<string, any> {
   const report: Record<string, any> = { ok: true, flags: [] as string[] };
   try {
     const fmt = execFileSync('ffprobe', [
@@ -93,12 +100,17 @@ export function runRenderQC(media: string): Record<string, any> {
     report.duration = Math.round(dur * 100) / 100;
     const frames = Number(v.nb_frames) || 0;
     if (frames > 0 && dur > 0 && Math.abs(frames - dur * 30) > Math.max(4, dur * 30 * 0.03)) { report.ok = false; report.flags.push('frame_count_mismatch'); }
-    // exactly ONE audio stream
+    // audio-stream contract: EXACTLY ONE audio stream for a VOICED video. For a
+    // voice:'none' (no-voiceover) project a SILENT final MP4 (0 audio streams) is
+    // the designed output — never flagged broken (owner directive: no-voiceover
+    // mode must produce a clean silent video). Multi-audio is ALWAYS a defect
+    // (source/talent bleed) regardless of voice choice.
     const aList = execFileSync('ffprobe', [
       '-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0', media,
     ], { maxBuffer: 1024 * 1024 }).toString().trim().split('\n').filter(Boolean);
     report.audioStreams = aList.length;
-    if (aList.length !== 1) { report.ok = false; report.flags.push(aList.length === 0 ? 'no_audio' : 'multi_audio_streams'); }
+    const allowSilent = Boolean(opts?.allowSilent);
+    if (aList.length > 1 || (aList.length === 0 && !allowSilent)) { report.ok = false; report.flags.push(aList.length === 0 ? 'no_audio' : 'multi_audio_streams'); }
     // scene-detect hard cuts (frame-scene metric: xfade dissolves ~0.0x-0.1; >0.4 = hard cut)
     try {
       const scene = execFileSync('ffmpeg', [
@@ -601,7 +613,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
     // narration is voiced with the user's gender/tone instead of a hardcoded alloy.
     const [projectRow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
     const pmeta = ((projectRow?.metadata as any) || {});
-    const voice = pmeta.voice as 'female' | 'male' | undefined;
+    const voice = pmeta.voice as 'female' | 'male' | 'none' | undefined;
     const tone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
     const sourceImages: string[] = Array.isArray(pmeta.sourceImages)
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
@@ -686,7 +698,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       // (decision-only, no pixel/audio edits) to choose a deterministic fix from.
       let qc: Record<string, any> | undefined;
       try {
-        qc = runRenderQC(assembled);
+        qc = runRenderQC(assembled, { allowSilent: voice === 'none' });
         trace(`render_qc project=${projectId} ok=${qc.ok} flags=${(qc.flags || []).join('|') || 'none'}`);
         if (!qc.ok) trace(`render_qc_warn project=${projectId} flags=${(qc.flags || []).join('|')}`);
       } catch (qcErr: any) { trace(`render_qc_error project=${projectId} err=${qcErr?.message}`); }
@@ -796,7 +808,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       // Use the uploaded source image as the continuous subject. Where the provider
@@ -819,16 +831,18 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
           const isImportant = Boolean(scene.metadata?.importantSora);
           soraResult = await soraVideoService.generateVideo(subjectPrompt, {
             userId: undefined,
-            // ONE consolidated call for the important ~20s block. Length is set with
-            // the OFFICIAL Sora 2 `seconds` enum (the live API rejects `duration` and
-            // does not change length from prose). snapSoraSeconds picks the nearest
-            // enum ≤ the scene target; FFmpeg -stream_loop -1 + -t in renderClip is a
-            // safety net only (never the primary length mechanism). size is set
-            // EXPLICITLY to SORA_SCENE_SIZE so the 9:16 contract is deterministic.
-            seconds: isImportant ? snapSoraSeconds(sceneSeconds) : undefined,
+            // 20s MAX SINGLE-TAKE POLICY (owner directive, live): EVERY motion scene
+            // requests the Sora 2 `seconds` MAX ("20" — enum 4|8|12|16|20; the live
+            // API rejects `duration` and does not change length from prose). Never a
+            // shorter snapped value: scenes become continuous single takes, and
+            // renderClip trims with `-t` to the scene window, so a 20s shot into a
+            // shorter scene yields smooth continuous motion — NO loop-padding, no
+            // repeat, no transition judder. size is set EXPLICITLY to SORA_SCENE_SIZE
+            // so the 9:16 contract is deterministic.
+            seconds: SORA_MOTION_SECONDS,
             size: isImportant ? SORA_SCENE_SIZE : undefined,
             // secondary content-continuity steer only (cannot change clip length).
-            promptHint: isImportant ? `Render ONE continuous ~${sceneSeconds}-second take of this important content — no cuts, no scene changes, one fluid motion sequence.` : undefined,
+            promptHint: isImportant ? `Render ONE continuous 20-second single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
           });
           if (soraResult.success && soraResult.videoPath) break;
           trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
@@ -836,7 +850,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
         localPath = soraResult.videoPath;
       }
-      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(scene.narration) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
+      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
@@ -849,7 +863,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
    * (neuralFeedbackAutoFixService) can re-voice an edited line in place without a
    * full scene re-render. $0-ish: ONE gpt-audio call (~micro-cost per line).
    */
-  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
+  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
     return generateSceneAudio(text, userId, sceneId, voice, tone);
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
@@ -943,9 +957,13 @@ export async function generateSceneAudio(
   text: string,
   userId: string,
   sceneId: string,
-  voice?: 'female' | 'male',
+  voice?: 'female' | 'male' | 'none',
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto',
 ): Promise<{ url?: string; localPath: string }> {
+  // voice:'none' is the NO-voiceover sentinel. The caller never reaches here with
+  // it (processScene guards with shouldGenerateSceneNarration), but normalize so
+  // resolveVoice (typed 'female'|'male'|undefined) accepts the widened union.
+  const g = voice === 'none' ? undefined : voice;
   const key = process.env.OPENAI_API_KEY;
   const dir = path.join(process.cwd(), 'temp', 'scene-audio');
   fs.mkdirSync(dir, { recursive: true });
@@ -970,7 +988,7 @@ export async function generateSceneAudio(
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'gpt-audio', modalities: ['text', 'audio'],
-        audio: { voice: resolveVoice(voice, tone), format: 'mp3' },
+        audio: { voice: resolveVoice(g, tone), format: 'mp3' },
         messages: [{ role: 'user', content: text }],
       }),
       signal: AbortSignal.timeout(90000),
@@ -983,7 +1001,7 @@ export async function generateSceneAudio(
         if (buf.length > 0) {
           const lp = path.join(dir, `${sceneId}.mp3`);
           fs.writeFileSync(lp, buf);
-          trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(voice, tone)} sceneId=${sceneId}`);
+          trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(g, tone)} sceneId=${sceneId}`);
           const url = await uploadAudio(lp, 'audio/mpeg');
           return { url, localPath: lp };
         }
@@ -1004,7 +1022,7 @@ export async function generateSceneAudio(
     response = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, voice: resolveVoice(voice, tone), input: text, response_format: 'mp3' }),
+      body: JSON.stringify({ model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3' }),
       signal: AbortSignal.timeout(60000),
     });
     if (response.ok) break;
