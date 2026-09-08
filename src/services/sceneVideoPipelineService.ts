@@ -11,8 +11,9 @@ import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
+export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
  *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
@@ -552,7 +553,204 @@ function sceneCopyOrFallback(value: unknown, fallback: string, duration: number,
   if (text.split(/\s+/).length > maxWords) return fallback;
   return text;
 }
-
+// ─── Planning-layer guarantee (owner directives, Sep 8) ─────────────────────
+// A) every component the client relays in the conversation must appear in the
+//    Scene-Based video; B) the ENTIRE story (hook → about → CTA) must fit
+//    start-to-finish EXACTLY inside the chosen duration. These pure helpers
+//    build the COMPONENTS INVENTORY + HARD TIME BUDGET for the planner prompt,
+//    then QC the parsed plan deterministically (no paid renders) and drive ONE
+//    auto-correct re-plan pass when something is missing.
+export interface ComponentInventoryInput {
+  components?: string[];
+  cleanBrief: string;
+  conversation?: ConversationTurn[];
+}
+export interface ArcFlags { hook: boolean; about: boolean; cta: boolean }
+const INVENTORY_CAP = 14;               // bounded so the prompt stays focused
+const COMPONENT_MAX_CHARS = 160;        // longest inventory item we emit
+const COMPONENT_PREFER_MAX_CHARS = 100; // long chunks are cut at the last word ≤ this
+const PLATFORM_PATTERNS: Array<{ re: RegExp; name: string }> = [
+  { re: /\btiktok\b/i, name: 'TikTok' },
+  { re: /\binstagram\b/i, name: 'Instagram' },
+  { re: /\byoutube\b/i, name: 'YouTube' },
+  { re: /\bfacebook\b/i, name: 'Facebook' },
+  { re: /\bpinterest\b/i, name: 'Pinterest' },
+  { re: /\betsy\b/i, name: 'Etsy' },
+  { re: /\bshopify\b/i, name: 'Shopify' },
+  { re: /\bamazon\b/i, name: 'Amazon' },
+  { re: /\bthreads\b/i, name: 'Threads' },
+  { re: /\bsnapchat\b/i, name: 'Snapchat' },
+  { re: /\breels?/i, name: 'Reels' },
+  { re: /\bshorts\b/i, name: 'Shorts' },
+];
+const COLOR_WORDS = ['teal','magenta','pastel','neon','gold','silver','rose','navy','cream','beige','lavender','peach','coral','emerald','jade','burgundy','maroon','mustard','olive','charcoal','slate','ivory','blush','lilac','mint','sage','terracotta','cobalt','ruby','amber','turquoise','aqua','fuchsia','plum','indigo','violet','cyan','tangerine','apricot','sky blue','baby blue'];
+const CTA_PATTERNS: RegExp[] = [
+  /\bfollow\s+@?[a-z0-9_.]+/i,
+  /\blink in bio\b/i,
+  /\bsubscribe\b/i,
+  /\bsave this\b/i,
+  /\bshop now\b/i,
+  /\bget yours\b/i,
+  /\bact now\b/i,
+  /\bdm us\b/i,
+  /\bsend us a dm\b/i,
+  /\bsign up\b/i,
+  /\blearn more\b/i,
+  /\bcomment\b(?: below)?/i,
+];
+const PRICE_RE = /\$\s?\d+(?:[.,]\d+)?/g;
+const PCT_OFF_RE = /\b\d{1,3}\s?%\s?off\b/gi;
+/** Normalize an inventory candidate for dedupe + comparison (fold curly quotes). */
+function normalizeComponent(raw: string): string {
+  return String(raw || '').replace(/\u2019/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/\s+/g, ' ').trim();
+}
+/** Deterministically split free text into short, concrete component chunks. */
+function chunkText(text: string): string[] {
+  const out: string[] = [];
+  for (const sentence of String(text || '').split(/(?<=[.!?])\s+|\n+/)) {
+    const s = sentence.replace(/\s+/g, ' ').trim();
+    if (!s || s.length < 3) continue;
+    if (s.length <= COMPONENT_MAX_CHARS) { out.push(s); continue; }
+    // Long sentence → split on commas/semicolons into clauses; keep ≤ max.
+    for (const clause of s.split(/\s*[,;]\s*/)) {
+      const c = clause.trim();
+      if (!c || c.length < 3) continue;
+      if (c.length <= COMPONENT_MAX_CHARS) { out.push(c); continue; }
+      const cut = c.slice(0, COMPONENT_PREFER_MAX_CHARS);
+      const at = cut.lastIndexOf(' ');
+      out.push(at > 20 ? cut.slice(0, at).trim() : cut.trim());
+    }
+  }
+  return out;
+}
+/**
+ * Deterministic extraction of every concrete relayed component from (a) the
+ * client's explicit `components` list, (b) the clean creative brief, and (c) the
+ * USER turns of the consultant conversation (assistant/consultant framing is
+ * stripped). Recognizes platform names, colors, prices/offers and CTA wording as
+ * canonical tokens; everything else is carried as short sentence/clause chunks.
+ * Deduped case-insensitively, capped at INVENTORY_CAP, deterministic ordering.
+ */
+export function buildComponentInventory(input: ComponentInventoryInput): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const v = normalizeComponent(raw);
+    if (!v || v.length < 3 || v.length > COMPONENT_MAX_CHARS) return;
+    if (out.some(o => o.toLowerCase() === v.toLowerCase())) return;
+    out.push(v);
+  };
+  // (a) Explicit components — highest priority, keep client's order.
+  for (const c of input.components ?? []) push(c);
+  // (b)+user text → canonical tokens (platform / color / price / CTA).
+  const userText = (input.conversation ?? [])
+    .filter(m => m?.role === 'user' && typeof m?.content === 'string')
+    .map(m => m.content)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const combined = `${input.cleanBrief} ${userText}`;
+  for (const p of PLATFORM_PATTERNS) if (p.re.test(combined)) push(p.name);
+  for (const c of COLOR_WORDS) if (new RegExp(`\\b${c}\\b`, 'i').test(combined)) push(c);
+  for (const m of combined.match(PRICE_RE) ?? []) push(m);
+  for (const m of combined.match(PCT_OFF_RE) ?? []) push(m.charAt(0).toUpperCase() + m.slice(1).toLowerCase());
+  for (const re of CTA_PATTERNS) { const m = combined.match(re); if (m && m[0]) push(m[0].charAt(0).toUpperCase() + m[0].slice(1)); }
+  // (c) brief chunks, then user-turn chunks (carry the subject/concept itself).
+  for (const c of chunkText(input.cleanBrief)) push(c);
+  for (const c of chunkText(userText)) push(c);
+  return out.slice(0, INVENTORY_CAP);
+}
+/** Every component must appear (case-insensitive substring) in ≥1 scene's text. */
+export function verifyComponentsInScript(script: SceneScript[], components: string[]): { missing: string[] } {
+  const haystack = script.map(s => `${s.visualPrompt || ''} ${s.narration || ''}`).join(' ').toLowerCase();
+  const missing = (components ?? [])
+    .map(normalizeComponent)
+    .filter(c => c.length > 0 && !haystack.includes(c.toLowerCase()));
+  return { missing };
+}
+/** Structural story-arc check: hook in the first ~25% of scenes, 'what it's
+ *  about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
+export function verifyArcCoverage(script: SceneScript[]): ArcFlags {
+  if (!script.length) return { hook: false, about: false, cta: false };
+  const count = script.length;
+  const hookEnd = Math.max(1, Math.ceil(count * 0.25));
+  const midEnd = Math.max(hookEnd + 1, Math.ceil(count * 0.75));
+  const hookScenes = script.slice(0, hookEnd);
+  const middleScenes = script.slice(hookEnd, midEnd);
+  const last = script[count - 1];
+  const textOf = (s: SceneScript) => `${s.visualPrompt || ''} ${s.narration || ''}`.toLowerCase();
+  const mentions = (s: SceneScript, re: RegExp) => re.test(textOf(s));
+  const HOOK_RE = /hook|open|intro|introduc|establish|first look|\bmeet\b|attention|grab|start|begin/i;
+  const ABOUT_RE = /about|benefit|feature|essentials|\bkey\b|value|how it works|transformation|getting started|payoff|comes together|understand/i;
+  const CTA_RE = /call to action|\bcta\b|follow|subscribe|link in bio|comment|share|save this|shop now|order|buy now|visit|click|tap|sign up|join|check out|\bdm\b|learn more|get yours|act now/i;
+  const hook = hookScenes.some(s => mentions(s, HOOK_RE) && (s.visualPrompt || '').trim().length > 0);
+  const about = middleScenes.some(s => mentions(s, ABOUT_RE) && (s.visualPrompt || '').trim().length > 0);
+  const cta = !!last && mentions(last, CTA_RE) && ((last.visualPrompt || '').trim().length > 0 || (last.narration || '').trim().length > 0);
+  return { hook, about, cta };
+}
+/** Rescale GPT's scene durations so the WHOLE video sums to EXACTLY target (the
+ *  owner's hard time budget). Proportional + integer-round, then a deterministic
+ *  greedy pass distributes any residual so total === target — never short, never
+ *  over. Pure and unit-testable; handles GPT duration drift. */
+export function normalizePlanTimeBudget(script: SceneScript[], targetDuration: number): SceneScript[] {
+  if (!script.length) return [];
+  const target = Math.max(1, Math.round(targetDuration));
+  const sum = script.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
+  const scale = sum > 0 ? target / sum : 1;
+  const scaled = script.map(s => ({ ...s, duration: Math.max(0, Math.round((Number.isFinite(s.duration) ? s.duration : 0) * scale)) }));
+  // Greedy deterministic pass (last → first): add/remove 1s until total === target.
+  let diff = target - scaled.reduce((a, s) => a + s.duration, 0);
+  let guard = 0;
+  while (diff !== 0 && guard < 10000) {
+    guard++;
+    let moved = false;
+    for (let i = scaled.length - 1; i >= 0 && diff !== 0; i--) {
+      if (diff > 0) { scaled[i].duration += 1; diff -= 1; moved = true; }
+      else if (scaled[i].duration > 0) { scaled[i].duration -= 1; diff += 1; moved = true; }
+    }
+    if (!moved) break; // pathological only: target < scene count with every scene at 0
+  }
+  return scaled;
+}
+function runPlanQC(script: SceneScript[], inventory: string[]): { missingComponents: string[]; arcFlags: ArcFlags } {
+  return { missingComponents: verifyComponentsInScript(script, inventory).missing, arcFlags: verifyArcCoverage(script) };
+}
+/** COMPONENTS INVENTORY section injected into the planner prompt. */
+function buildPlannerComponentsSection(inventory: string[], voice?: 'female' | 'male' | 'none'): string {
+  if (!inventory.length) return '';
+  const list = inventory.map((c, i) => `${i + 1}. "${c}"`).join('\n');
+  const narrationRule = voice === 'none'
+    ? ' There is NO voiceover (silent video), so every component MUST appear in a scene\'s visualPrompt — the narration field will NOT be spoken.'
+    : ' Every component MUST appear in at least one scene — in its visualPrompt or its narration.';
+  return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. The full conversation was also read to build this list — do not drop any item.\n${list}\n`;
+}
+/** HARD TIME BUDGET section injected into the planner prompt. */
+function buildPlannerTimeBudgetSection(duration: number): string {
+  return `\n\nHARD TIME BUDGET (mandatory): the ENTIRE video must complete start-to-finish inside EXACTLY ${duration} seconds — hook in the first ~25%, what the video is about in the middle ~50%, and the CTA in the final ~25%. All scene durations YOU return MUST sum to EXACTLY ${duration}s — do not plan scenes whose total exceeds ${duration}s or falls short of it.`;
+}
+/** One-shot auto-correct feedback appended to the planner prompt when the first
+ *  plan missed components and/or story-arc stages (cheap GPT 5.2 decision-only). */
+function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFlags): string {
+  const parts: string[] = [];
+  if (missingComponents.length > 0) {
+    parts.push(`MISSING RELAYED COMPONENTS — each of these MUST appear (verbatim, or clearly referencing the same thing) in at least one scene's visualPrompt or narration: ${missingComponents.map(c => `"${c}"`).join(', ')}.`);
+  }
+  if (!arcFlags.hook) parts.push('MISSING ARC STAGE — HOOK: the first ~25% of scenes must open with the hook / attention-grabber (wording like "opening", "introducing", establishing shot of the subject).');
+  if (!arcFlags.about) parts.push('MISSING ARC STAGE — ABOUT: the middle ~50% must say what the video is about (the essentials / key benefit / how it works of the subject).');
+  if (!arcFlags.cta) parts.push('MISSING ARC STAGE — CTA: the FINAL scene must deliver the call-to-action (wording like "follow", "link in bio", "shop now", "call to action").');
+  if (!parts.length) return '';
+  return `\n\nYOUR PREVIOUS PLAN FAILED THE PLANNING-QUALITY CHECK. Return a COMPLETE, corrected JSON plan in the exact same shape. Fix ALL of the following while keeping every correct scene you already planned:\n${parts.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
+}
+/** Assemble the full planner request (brief + shape + arc + components + time
+ *  budget + uniqueness). Factored out so the ONE re-plan pass reuses the exact
+ *  same prompt with corrective feedback appended. */
+function buildPlannerRequest(params: {
+  cleanIdea: string; duration: number; sceneCount: number; perScene: number;
+  constrain: string; toneHint: string; moodHint: string; srcHint: string;
+  componentsSection: string; timeBudgetSection: string;
+}): string {
+  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection } = params;
+  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
+}
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
     trace(`project_create_start user=${input.userId}`);
@@ -560,6 +758,12 @@ export class SceneVideoPipelineService {
     // The consultant UI may send its transcript as `idea`; isolate the actual
     // creative brief before it reaches the planner or fallback arc.
     const cleanIdea = normalizeVideoIdea(input.idea);
+    // Planning-layer inventory (owner directives, Sep 8): every concrete component
+    // the client relayed — explicit `components`, the clean brief, and the USER
+    // turns of the consultant conversation — is extracted deterministically and
+    // fed to the planner as a COMPONENTS INVENTORY (never invent components).
+    const inventory = buildComponentInventory({ components: input.components, cleanBrief: cleanIdea, conversation: input.conversation });
+    const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
@@ -575,34 +779,64 @@ export class SceneVideoPipelineService {
         const perScene = Math.max(1, Math.round(duration / sceneCount));
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
         const maxNarrationWords = Math.max(14, Math.round(perScene * 2.75));
+        const importantBlock = Math.min(20, duration);
+        // Inject the single most-important relayed component into the ONE hybrid Sora
+        // (soraContent) prompt so the hero moment centers on what the client cares about.
+        const heroComponentHint = mode !== 'faceless' && inventory.length > 0
+          ? ` The soraContent prompt MUST center the single most-important relayed component — "${inventory[0]}" — as the hero moment / key benefit / payoff of this video.`
+          : '';
         // Hybrid Scene director (owner-locked): GPT 5.2 plans the WHOLE video up front —
         // which ~20s of content is the SINGLE most-important block (the ONE Sora call),
         // and the full scene list/order/timings. Everything else renders as gpt-image-2
         // stills animated with slow FFmpeg Ken Burns (mirroring Faceless). Sora is called
         // ONCE per ~20s of important content, NOT fragmented into many 5-6s clips.
-        const importantBlock = Math.min(20, duration);
-        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s }, and a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.
-
+        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s${heroComponentHint} }, and
+ a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.
 FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 3-scene video this is the required JSON:
-{"soraContent": {"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The important block — hero moment close-up", "narration": "This is the moment it comes together."}, {"sceneNumber": 3, "duration": 8, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
+{"soraContent": {"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The important block — hero moment close-up", "narration": "This is the moment i
+t comes together."}, {"sceneNumber": 3, "duration": 8, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
-        const legacyConstrain = input.mode === 'faceless'
+        const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
           : hybridDirective;
-        const decision = await aiRouter.route({ userId: input.userId, request: `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${legacyConstrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory): because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`, mode: 'generate' });
+        const componentsSection = buildPlannerComponentsSection(inventory, input.voice);
+        const timeBudgetSection = buildPlannerTimeBudgetSection(duration);
+        const request = buildPlannerRequest({ cleanIdea, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection });
+        const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
         generatedScript = decision.script || decision.parameters?.script;
+        // Planning-layer QC (deterministic, NO paid renders): every relayed component
+        // must appear somewhere in the plan and the arc must cover hook → about → CTA.
+        // If the first plan misses any of it, run ONE auto-correct re-plan pass that
+        // emphasizes exactly what failed (cheap GPT 5.2 decision-only call, not a
+        // media render, so this respects the paid-render QA policy).
+        const firstPlan = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
+        const firstQc = runPlanQC(firstPlan, inventory);
+        const needsReplan = firstQc.missingComponents.length > 0 || !firstQc.arcFlags.hook || !firstQc.arcFlags.about || !firstQc.arcFlags.cta;
+        if (needsReplan) {
+          trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)}`);
+          const replan = await aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags), mode: 'generate' });
+          generatedScript = replan.script || replan.parameters?.script;
+          trace(`gpt52_replan_end project=${projectId} replanned=${!!generatedScript}`);
+        }
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
-    const script = parseScenePlan(generatedScript || {}, cleanIdea, duration, input.mode === 'faceless' ? 'faceless' : 'scene');
+    const script = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
     // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
     // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
     // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
-    const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
     if (mode === 'faceless') { for (const s of script) { s.visualType = 'still'; } }
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:script.reduce((a,s)=>a+s.duration,0),sceneCount:script.length,script,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,plan:{scenes:script}}});
-    await db.insert(schema.videoScenes).values(script.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion'}})));
-    trace(`project_created id=${projectId} scenes=${script.length}`);
+    // HARD TIME BUDGET (owner directive): rescale scene durations so the ENTIRE video
+    // completes start-to-finish inside EXACTLY `duration` — hook → about → CTA is never
+    // cut short or overrun (deterministic; handles any GPT duration drift).
+    const planned = normalizePlanTimeBudget(script, duration);
+    // Final auditable QC of the plan we actually persist (components → componentsVerified
+    // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
+    // the owner can audit that every relayed component was planned in.
+    const qc = runPlanQC(planned, inventory);
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,plan:{scenes:planned},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,arcFlags:qc.arcFlags}});
+    await db.insert(schema.videoScenes).values(planned.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion'}})));
+    trace(`project_created id=${projectId} scenes=${planned.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
   }

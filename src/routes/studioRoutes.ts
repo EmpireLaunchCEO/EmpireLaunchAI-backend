@@ -34,6 +34,8 @@ interface StudioRequest {
   request: string;
   attachments?: string[];
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  conversation?: Array<{ role: 'user' | 'assistant'; content: string }>;  // full consultant transcript (planner reads USER turns for the components inventory)
+  components?: string[];                                                 // concrete relayed components the planner must include
   duration?: number;                        // Customize Video: requested duration (seconds)
   voice?: 'female' | 'male' | 'none';       // Voiceover gender (shared control) — 'none' = NO voiceover (silent video)
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';  // Voiceover tone
@@ -525,6 +527,15 @@ router.post('/process', async (req: Request, res: Response) => {
         const duration = Number.isFinite(Number(req.body.duration)) ? Number(req.body.duration) : undefined;
         const voice = (req.body.voice === 'female' || req.body.voice === 'male' || req.body.voice === 'none') ? req.body.voice : undefined;
         const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
+        // Planner-layer inputs (owner directive): the full consultant conversation +
+        // the concrete relayed components. Persisted into creation metadata so the
+        // queue worker (and any planner) can use them — never silently dropped.
+        const conversation = Array.isArray(req.body.conversation)
+          ? req.body.conversation.filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          : undefined;
+        const components = Array.isArray(req.body.components)
+          ? req.body.components.filter((c: any) => typeof c === 'string' && c.trim().length > 0)
+          : undefined;
 
         try {
           await db.insert(schema.creations).values({
@@ -538,6 +549,8 @@ router.post('/process', async (req: Request, res: Response) => {
               ...(duration ? { duration } : {}),
               ...(voice || tone ? { voiceover: { voice, tone } } : {}),
               ...(sourceImages.length ? { sourceImages } : {}),
+              ...(components?.length ? { components } : {}),
+              ...(conversation?.length ? { conversation } : {}),
             },
           });
         } catch (creationErr: any) {
@@ -1147,6 +1160,16 @@ router.post('/video-project', async (req: Request, res: Response) => {
     const sourceImages = Array.isArray(req.body.sourceImages)
       ? req.body.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : req.body.sourceImages;
+    // Planner-layer inputs (owner directive): the FULL consultant conversation and
+    // the concrete relayed components. The planner reads USER turns of the
+    // conversation to build the COMPONENTS INVENTORY; both are persisted into the
+    // project metadata for auditability. Never silently dropped.
+    const conversation = Array.isArray(req.body.conversation)
+      ? req.body.conversation.filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      : undefined;
+    const components = Array.isArray(req.body.components)
+      ? req.body.components.filter((c: any) => typeof c === 'string' && c.trim().length > 0)
+      : undefined;
     if (!idea || typeof idea !== 'string') return res.status(400).json({ status: 'error', error: 'idea is required' });
     const projectId = await sceneVideoPipelineService.createProject({
       userId: resolvedUserId,
@@ -1160,6 +1183,8 @@ router.post('/video-project', async (req: Request, res: Response) => {
       tone,
       mood,
       sourceImages,
+      conversation,
+      components,
     });
     return res.status(202).json({ status: 'processing', projectId });
   } catch (error: any) { process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`); return res.status(500).json({ status: 'error', error: error.message }); }
