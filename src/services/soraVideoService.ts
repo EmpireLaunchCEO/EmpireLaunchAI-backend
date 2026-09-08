@@ -14,6 +14,12 @@ export type SoraSeconds = '4' | '8' | '12' | '16' | '20';
  *  9:16 portrait) and "1280x720" (16:9). We set "720x1280" EXPLICITLY so the
  *  9:16 scene contract is deterministic rather than relying on the API default. */
 export const SORA_SCENE_SIZE = '720x1280' as const;
+/** 20s MAX SINGLE-TAKE POLICY (owner directive): EVERY Scene-Based motion scene
+ *  requests the Sora 2 max (seconds enum "20") regardless of scene target
+ *  duration. FFmpeg `-t` in renderClip trims to the scene window, so a 20s shot
+ *  into a shorter scene delivers continuous single-take motion — no loop-padding,
+ *  no repeat, no transition judder. NEVER snap to a shorter enum value here. */
+export const SORA_MOTION_SECONDS: SoraSeconds = '20';
 export type SoraSize = typeof SORA_SCENE_SIZE | '1280x720';
 
 const SORA_SECONDS_ENUM: SoraSeconds[] = ['4', '8', '12', '16', '20'];
@@ -51,8 +57,9 @@ export interface SoraGenerationOptions {
   userId?: string;        // For R2 upload
   /** Official Sora 2 clip-length (`seconds`, enum "4"|"8"|"12"|"16"|"20", default
    *  "4"). This is the ONLY length control — the live API rejects a free-form
-   *  `duration` and does NOT change length from prose. For the Scene hybrid's ONE
-   *  important block we send "20" (snapped to the nearest enum ≤ the block target). */
+   *  `duration` and does NOT change length from prose. Scene-Based motion scenes
+   *  ALWAYS send the max SORA_MOTION_SECONDS ("20") — a 20s single take trimmed by
+   *  FFmpeg `-t` to each scene's window (no loop-padding, no repetition). */
   seconds?: SoraSeconds;
   /** Official Sora 2 resolution. sora-2 supports "720x1280" (default, 9:16 portrait)
    *  and "1280x720". We set SORA_SCENE_SIZE ("720x1280") EXPLICITLY on scene motion

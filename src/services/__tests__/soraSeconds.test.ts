@@ -10,7 +10,18 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapSoraSeconds, buildSoraCreateBody, soraVideoService, SORA_SCENE_SIZE } from '../soraVideoService.js';
+import { snapSoraSeconds, buildSoraCreateBody, soraVideoService, SORA_SCENE_SIZE, SORA_MOTION_SECONDS } from '../soraVideoService.js';
+test('SORA_MOTION_SECONDS = the owner 20s max single-take policy', () => {
+  // Owner directive (live): EVERY Scene-Based motion (Sora) call requests the 20s
+  // MAX via the official `seconds` enum — never a snapped shorter value. renderClip
+  // trims with -t to the scene window, giving continuous single-take motion with
+  // no loop-padding / repetition. The pipeline sends this constant unconditionally.
+  assert.equal(SORA_MOTION_SECONDS, '20');
+  // It must remain a valid official enum value (4|8|12|16|20).
+  assert.ok(['4', '8', '12', '16', '20'].includes(SORA_MOTION_SECONDS));
+  // Even when a scene target would snap shorter, the policy is still the 20s max.
+  assert.equal(SORA_MOTION_SECONDS, snapSoraSeconds(20));
+});
 
 test('snapSoraSeconds maps targets onto the official enum', () => {
   assert.equal(snapSoraSeconds(20), '20');
