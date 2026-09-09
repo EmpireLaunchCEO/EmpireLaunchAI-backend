@@ -3,6 +3,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
+import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
 import { soraVideoService } from '../services/soraVideoService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
@@ -972,8 +973,7 @@ router.get('/assets', async (req: Request, res: Response) => {
 router.get('/download/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
-    // User-scope: only allow download of own creations
+    const idStr = String(id); // req.params ids are typed string | string[]; downloadFailureBody needs a plain string
     const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
     if (!uid) return res.status(401).json({ error: 'userId required' });
     const resolvedUserId = await resolveUserId(String(uid));
@@ -993,25 +993,36 @@ router.get('/download/:id', async (req: Request, res: Response) => {
       .where(and(eq(schema.videoProjects.id, id), eq(schema.videoProjects.userId, resolvedUserId)))
       .limit(1);
 
-    const mediaUrl = creation?.fileUrl || project?.finalVideoUrl;
-    if (!creation && !project) return res.status(404).json({ error: 'Not found' });
-    if (!mediaUrl) return res.status(404).json({ error: 'Not found' });
+    // Classify what the id resolves to, with a CLEAR failure for rows that exist
+    // but have nothing to download (e.g. project.status='failed' with no
+    // finalVideoUrl, or a creation with no fileUrl). Bare 404 stays reserved for
+    // genuinely unknown ids. The { failed: true } flag lets the frontend branch.
+    const download = classifyDownload(creation, project);
+    if (download.kind === 'not-found') return res.status(404).json({ error: 'Not found' });
+    if (download.kind === 'no-media') {
+      const { status, body } = downloadFailureBody(idStr, 'no-media');
+      return res.status(status).json(body);
+    }
 
     // Extract R2 key and download via S3 client (avoids signed URL expiry entirely).
     // Fall back to metadata.r2Key (stored since the URL-clobber fix) when the
     // fileUrl formatting can't be parsed — legacy rows may hold dead local paths.
-    const meta: any = (creation?.metadata as any) || (project?.metadata as any) || {};
-    const r2Key = extractR2Key(mediaUrl) || (typeof meta.r2Key === 'string' ? meta.r2Key : null);
+    const meta: any = download.meta || {};
+    const r2Key = extractR2Key(download.mediaUrl) || (typeof meta.r2Key === 'string' ? meta.r2Key : null);
     if (!r2Key) {
-      return res.status(502).json({ error: 'Could not parse R2 key from URL' });
+      const { status, body } = downloadFailureBody(idStr, 'bad-key');
+      return res.status(status).json(body);
     }
 
     const { r2Storage } = await import('../services/r2StorageService.js');
     const buffer = await r2Storage.downloadBuffer(r2Key);
-    if (!buffer) return res.status(502).json({ error: 'R2 download failed' });
+    if (!buffer) {
+      const { status, body } = downloadFailureBody(idStr, 'r2-missing');
+      return res.status(status).json(body);
+    }
 
     res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="empirelaunch-${id.slice(0, 8)}.mp4"`);
+    res.setHeader('Content-Disposition', `attachment; filename="empirelaunch-${idStr.slice(0, 8)}.mp4"`);
     res.setHeader('Content-Length', buffer.length.toString());
     res.send(buffer);
   } catch (err: any) {
