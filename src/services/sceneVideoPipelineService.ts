@@ -1291,7 +1291,16 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
-      if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
+      if (r2Storage.isAvailable) {
+        // HARDENING: never let a URL reach fs.copyFileSync (the owner's live ENOENT).
+        // ensureLocalFile is a no-op passthrough for real local paths (the normal
+        // case after the renderImage fix) and downloads any stray URL first.
+        const safeLocal = await ensureLocalFile(localPath, `scene ${scene.sceneNumber} visual`);
+        const copyPath = path.join(path.dirname(safeLocal), `${path.basename(safeLocal)}.r2-upload`);
+        fs.copyFileSync(safeLocal, copyPath);
+        const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime);
+        assetUrl = uploaded.url || safeLocal;
+      }
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
