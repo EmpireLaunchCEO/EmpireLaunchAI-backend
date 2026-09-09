@@ -12,7 +12,7 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
-export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (multi-Sora hybrid, owner directive Sep 8); undefined for still scenes. */ soraBlock?: number; }
+export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (multi-Sora hybrid, owner directive Sep 8); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test): ONE 20s Sora take shared by EVERY
  *  contiguous scene of a soraBlock. The single take is sliced contiguously —
  *  scene N renders the [cumulativeOffset, +duration) window — so 3×6s scenes show
@@ -486,6 +486,13 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
   return out;
 }
 
+function parseNarrationRole(s: any): 'avatar-dialogue' | 'narrator' | undefined {
+  const r = String(s?.narrationRole || s?.narration_role || '').toLowerCase();
+  if (r === 'avatar-dialogue' || r === 'avatar' || r === 'talking-avatar') return 'avatar-dialogue';
+  if (r === 'narrator' || r === 'voiceover') return 'narrator';
+  return undefined;
+}
+
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const count = targetSceneCount(durationTarget);
   const candidates = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
@@ -524,6 +531,7 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
         visualType: keepMotion ? 'motion' : 'still',
         ...(keepMotion ? { soraBlock: 0 } : {}),
         narration: sceneCopyOrFallback(s?.narration, a.narration, a.duration, true),
+        ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
         visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
       };
     });
@@ -605,6 +613,7 @@ export function parseScenePlan(raw: any, idea: string, durationTarget: number, m
         visualType: isMotion ? 'motion' : 'still',
         ...(isMotion ? { soraBlock: blockIdxAtScene } : {}),
         narration: s?.narration || '',
+        ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
         visualPrompt: isMotion && blockPrompt ? `${s.visualPrompt || ''} — ${blockPrompt}`.trim() : (s?.visualPrompt || s?.visual_prompt || ''),
       };
     });
@@ -997,6 +1006,172 @@ export function normalizePlanTimeBudget(script: SceneScript[], targetDuration: n
   }
   return scaled;
 }
+/**
+ * CONTENT DIRECTION — owner directives Sep 9 (folded into the same planner
+ * rewrite as the Sora span). BOTH are deterministic, pure, zero paid renders:
+ *
+ * (2) ACTIONS NOT THOUGHTS: the re-test video rendered the AI *thinking* about
+ *     the business (abstract conceptual pitch + talking head + words on screen).
+ *     Every scene must DEMONSTRATE DOING: show the product/app in use, the
+ *     process step being performed, or the before→after result/transformation.
+ *     visualPrompts get a concrete-action backstop; narration must narrate
+ *     concrete steps/results; abstract narration is audited and fed to replan.
+ *
+ * (3) AVATAR-VOICE RULE v3 (final owner wording — code to THIS): narration
+ *     voiceover is suppressed ONLY when the AI avatar has LIPS MOVING AND IS
+ *     TALKING (a talking avatar, visibly speaking on camera). If the avatar is
+ *     NOT talking (static photo, or avatar on screen but not speaking) the
+ *     voiceover narration IS allowed — do NOT suppress it. Per scene:
+ *     narrationRole:'avatar-dialogue' → that avatar's voice is the ONLY voice
+ *     (narration text authored as the avatar's direct first-person on-camera
+ *     dialogue); 'narrator' → voiceover narration plays. Never both in one
+ *     scene. A video may MIX roles across scenes but not within one. The SAME
+ *     avatar (consistent person/look) must appear in every avatar scene.
+ *     voice:'none' silent mode is untouched (shouldGenerateSceneNarration).
+ */
+/** Speech negation — 'not speaking' must NOT count as a talking avatar (owner v3). */
+const NEGATED_SPEECH_RE = /\b(?:not|no|isn'?t|never|without|hardly|barely)\s+(?:speaking|talking|saying|speaks|talks)\b/i;
+/** Scene whose visual shows an animated host VISIBLY SPEAKING (lips moving). */
+const TALKING_AVATAR_RE = /\b(?:talking|speaking|says|saying|speaks|addresses|animated host|lips moving|speaking to camera|talks|talking head|live host|host speaks|presenter speaks)\b/i;
+/** Scene whose visual merely shows a person/avatar WITHOUT speech (static). */
+const STATIC_AVATAR_RE = /\b(?:avatar|host|presenter|woman|man|person|influencer|vlogger|on-?camera|face|portrait)\b/i;
+/** First-person dialogue markers (the avatar speaking, not a third narrator). */
+const FIRST_PERSON_DIALOGUE_RE = /\b(?:i'?m|i'?ve|i'?ll|i'?d|\bi\b|my|mine|\bwe'?re|\bwe'?ve|\bwe'?ll|\bwe\b|our|ours|us|you'?re|you'?ll|your|yours)\b/i;
+/** Concrete-ACTION evidence tokens for the ACTIONS-NOT-THOUGHTS check. */
+const ACTION_VISUAL_TOKENS: string[] = [
+  'app','ui','interface','screen','dashboard','button','step','steps','tutorial','how to','demo','walkthrough',
+  'process','before','after','result','transformation','shows','showing','use','using','opens','click',
+  'tap','swipe','type','upload','saving','save','edit','editing','render','rendering','export','publish','post',
+  'order','checkout','cart','template','product','store','bundle','unboxing','review','testimonial','timeline',
+  'calendar','chart','graph','feed','profile','listing','shop','add','select','drag','drop','record','generate',
+  'caption','hashtag','schedule','analyze','growth','sales','revenue','mockup','screenshot','paste','copy','share',
+  'follow','sign up','create','build','launch','list','price','pricing','checkout','buy','purchase','download',
+];
+const ACTION_NARRATION_TOKENS: string[] = [
+  'step','first','next','then','after','before','result','click','tap','open','type','upload','save','post',
+  'publish','order','checkout','sign up','follow','watch',"here's how",'how to','in just','minutes','seconds',
+  "you'll",'you will','shop','bundle','save','%','$','percent','your','create','build','launch','list','add',
+  'drag','drop','select','paste','copy','share','download','export','edit','record','schedule','analyze','grow',
+  'earn','sell','profit','revenue','sales','customers','template','get started','now','today','try','free trial',
+];
+/** Resolve the per-scene narration role deterministically. Explicit GPT-provided
+ *  role wins; otherwise a TALKING avatar (lips moving / speaking) in the visual
+ *  → 'avatar-dialogue', everything else → 'narrator' (static avatar or no avatar
+ *  keeps voiceover — owner v3). Pure; never touches voice:'none'. */
+export function resolveNarrationRoles(script: SceneScript[]): SceneScript[] {
+  return script.map(s => {
+    const explicit = String((s as any).narrationRole || (s as any).narration_role || '').toLowerCase();
+    if (explicit === 'avatar-dialogue' || explicit === 'talking-avatar' || explicit === 'avatar') {
+      return { ...s, narrationRole: 'avatar-dialogue' as const };
+    }
+    if (explicit === 'narrator' || explicit === 'voiceover') {
+      return { ...s, narrationRole: 'narrator' as const };
+    }
+    const visual = `${s.visualPrompt || ''} ${s.narration || ''}`;
+    const talking = !NEGATED_SPEECH_RE.test(visual) && TALKING_AVATAR_RE.test(visual) && STATIC_AVATAR_RE.test(visual);
+    return { ...s, narrationRole: talking ? 'avatar-dialogue' as const : 'narrator' as const };
+  });
+}
+/** True when the narration text reads as the avatar's own first-person dialogue
+ *  (used for audit + replan feedback; the avatar's is the ONLY voice there). */
+export function looksLikeFirstPersonDialogue(text: string): boolean {
+  return FIRST_PERSON_DIALOGUE_RE.test(String(text || ''));
+}
+/** Extract the single shared avatar description from a raw director payload
+ *  (top-level `avatarLook` / `avatar_look`) — the SAME avatar in every avatar
+ *  scene. Empty when the plan has no talking avatar or GPT omitted it. */
+export function extractAvatarLook(raw: any): string {
+  const v = raw?.avatarLook || raw?.avatar_look || raw?.avatar || '';
+  return String(v || '').trim();
+}
+/** Avatar CONSISTENCY: every 'avatar-dialogue' scene must reference the SAME
+ *  avatar description. If `avatarLook` is empty, derive the shared description
+ *  from the FIRST avatar-dialogue scene's visualPrompt (deterministic). The
+ *  description is injected VERBATIM into every avatar-dialogue scene whose
+ *  visual text doesn't already contain it — an avatar that pops into existence
+ *  per scene would break the owner rule's intent. Returns the final avatarLook. */
+export function enforceAvatarConsistency(script: SceneScript[], avatarLook: string): { script: SceneScript[]; avatarLook: string } {
+  const next = script.map(s => ({ ...s }));
+  const avatarScenes = next.filter(s => s.narrationRole === 'avatar-dialogue');
+  if (!avatarScenes.length) return { script: next, avatarLook: '' };
+  let look = avatarLook;
+  if (!look) {
+    const seed = (avatarScenes[0]?.visualPrompt || '').trim();
+    look = seed.length > 160 ? `${seed.slice(0, 157).trimEnd()}...` : seed;
+  }
+  if (!look) return { script: next, avatarLook: '' };
+  const lookLower = look.toLowerCase();
+  for (const s of next) {
+    if (s.narrationRole !== 'avatar-dialogue') continue;
+    const v = `${s.visualPrompt || ''}`;
+    if (!v.toLowerCase().includes(lookLower)) {
+      s.visualPrompt = `${v}${v ? ' — ' : ''}SAME avatar as every other scene: ${look}`.trim();
+    }
+  }
+  return { script: next, avatarLook: look };
+}
+/** ACTIONS-NOT-THOUGHTS audit: scene numbers whose visualPrompt lacks concrete
+ *  action/evidence tokens, and separately whose narration lacks concrete
+ *  step/result tokens (the owner's "demonstrate doing, not thinking"). */
+export function verifyActionDirection(script: SceneScript[]): { visualAbstract: number[]; narrationAbstract: number[] } {
+  const visualAbstract: number[] = [];
+  const narrationAbstract: number[] = [];
+  for (const s of script) {
+    const v = String(s.visualPrompt || '').trim().toLowerCase();
+    if (v && !ACTION_VISUAL_TOKENS.some(t => v.includes(t))) visualAbstract.push(s.sceneNumber);
+    const n = String(s.narration || '').trim().toLowerCase();
+    if (n && n.split(/\s+/).length >= 5 && !ACTION_NARRATION_TOKENS.some(t => n.includes(t))) narrationAbstract.push(s.sceneNumber);
+  }
+  return { visualAbstract, narrationAbstract };
+}
+/** ACTIONS-NOT-THOUGHTS backstop: append a deterministic concrete-action
+ *  directive to any scene whose visualPrompt is abstract (no action tokens).
+ *  Pure + cheap; mirrors injectMissingComponents. Never touches narration. */
+export function applyActionBackstop(script: SceneScript[]): { script: SceneScript[]; injectedInto: number[] } {
+  const next = script.map(s => ({ ...s }));
+  const injectedInto: number[] = [];
+  const { visualAbstract } = verifyActionDirection(script);
+  const abstractSet = new Set(visualAbstract);
+  for (const s of next) {
+    if (!abstractSet.has(s.sceneNumber)) continue;
+    const v = String(s.visualPrompt || '').trim();
+    s.visualPrompt = `${v}${v ? ' — ' : ''}SHOW THIS BEING DONE: the actual screen/app/step/result in action, concrete evidence on camera — never an abstract concept or words-only card.`.trim();
+    injectedInto.push(s.sceneNumber);
+  }
+  return { script: next, injectedInto };
+}
+/** ACTIONS-NOT-THOUGHTS section injected into the planner prompt. */
+export function buildPlannerActionSection(): string {
+  return `\n\nACTIONS NOT THOUGHTS (mandatory): this video must DEMONSTRATE DOING, not thinking. A conceptual pitch, a person explaining the idea, or words-only cards are FAILURES. Every scene visualPrompt must show concrete ACTION or evidence: the product/app/screen in use, the process step being performed, or the before→after result/transformation. Every narration must narrate concrete steps or results ("tap here", "upload your design", "and here's the result") — never an abstract description of the product's purpose.`;
+}
+/** AVATAR-VOICE RULE section injected into the planner prompt (owner v3 — final). */
+export function buildPlannerAvatarSection(): string {
+  return `\n\nAVATAR-VOICE RULE (mandatory — final owner wording): narration voiceover is suppressed ONLY when the AI avatar has LIPS MOVING AND IS TALKING (a talking avatar visibly speaking on camera). Rules:
+- Per scene, set narrationRole exactly "avatar-dialogue" for any scene whose visual shows an animated/talking avatar SPEAKING to camera (lips moving); the narration text in that scene MUST be the avatar's own words spoken directly to the audience — first person ("I", "we", "my"), NEVER a third-person narrator describing the video or product.
+- Set narrationRole "narrator" for every other scene: static avatar (photo, not speaking) OR no avatar at all — narrator voiceover IS allowed there. Do NOT suppress it.
+- Never both roles in one scene; a video MAY mix roles across scenes, but if ANY scene is avatar-dialogue, all avatar scenes must show the SAME person (one consistent look — provide a single top-level "avatarLook" string describing that exact avatar and paste it into every avatar scene's visualPrompt).
+- If the video has no talking avatar at all, avatarLook may be omitted and everything is "narrator".`;
+}
+/** Extend the one-shot auto-correct feedback with the new content-direction
+ *  violations (enables the cheap replan pass to fix role/action misses). */
+export function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFlags, extras: { avatarRoleViolations: number[]; narrationAbstract: number[] } = { avatarRoleViolations: [], narrationAbstract: [] }): string {
+  const parts: string[] = [];
+  if (missingComponents.length > 0) {
+    parts.push(`MISSING RELAYED COMPONENTS — each of these MUST appear (verbatim, or clearly referencing the same thing) in at least one scene's visualPrompt or narration: ${missingComponents.map(c => `"${c}"`).join(', ')}.`);
+  }
+  if (!arcFlags.hook) parts.push('MISSING ARC STAGE — HOOK: the first ~25% of scenes must open with the hook / attention-grabber (wording like "opening", "introducing", establishing shot of the subject).');
+  if (!arcFlags.about) parts.push('MISSING ARC STAGE — ABOUT: the middle ~50% must say what the video is about (the essentials / key benefit / how it works of the subject).');
+  if (!arcFlags.cta) parts.push('MISSING ARC STAGE — CTA: the FINAL scene must deliver the call-to-action (wording like "follow", "link in bio", "shop now", "call to action").');
+  if (extras.avatarRoleViolations.length > 0) {
+    parts.push(`AVATAR-VOICE RULE VIOLATION — scene(s) ${extras.avatarRoleViolations.join(', ')} are avatar-dialogue but their narration reads as a third-person narrator. Rewrite them as the AVATAR'S OWN spoken words, first person, spoken directly to the audience. Do not add a narrator voice to a talking-avatar scene.`);
+  }
+  if (extras.narrationAbstract.length > 0) {
+    parts.push(`NARRATION TOO ABSTRACT — scene(s) ${extras.narrationAbstract.join(', ')} narrate an abstract idea rather than concrete steps/results. Renarrate with concrete action ("tap here", "upload your design", "and here's the result").`);
+  }
+  if (!parts.length) return '';
+  return `\n\nYOUR PREVIOUS PLAN FAILED THE PLANNING-QUALITY CHECK. Return a COMPLETE, corrected JSON plan in the exact same shape. Fix ALL of the following while keeping every correct scene you already planned:\n${parts.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
+}
+
 function runPlanQC(script: SceneScript[], inventory: string[]): { missingComponents: string[]; arcFlags: ArcFlags } {
   return { missingComponents: verifyComponentsInScript(script, inventory).missing, arcFlags: verifyArcCoverage(script) };
 }
@@ -1015,27 +1190,16 @@ function buildPlannerTimeBudgetSection(duration: number): string {
 }
 /** One-shot auto-correct feedback appended to the planner prompt when the first
  *  plan missed components and/or story-arc stages (cheap GPT 5.2 decision-only). */
-function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFlags): string {
-  const parts: string[] = [];
-  if (missingComponents.length > 0) {
-    parts.push(`MISSING RELAYED COMPONENTS — each of these MUST appear (verbatim, or clearly referencing the same thing) in at least one scene's visualPrompt or narration: ${missingComponents.map(c => `"${c}"`).join(', ')}.`);
-  }
-  if (!arcFlags.hook) parts.push('MISSING ARC STAGE — HOOK: the first ~25% of scenes must open with the hook / attention-grabber (wording like "opening", "introducing", establishing shot of the subject).');
-  if (!arcFlags.about) parts.push('MISSING ARC STAGE — ABOUT: the middle ~50% must say what the video is about (the essentials / key benefit / how it works of the subject).');
-  if (!arcFlags.cta) parts.push('MISSING ARC STAGE — CTA: the FINAL scene must deliver the call-to-action (wording like "follow", "link in bio", "shop now", "call to action").');
-  if (!parts.length) return '';
-  return `\n\nYOUR PREVIOUS PLAN FAILED THE PLANNING-QUALITY CHECK. Return a COMPLETE, corrected JSON plan in the exact same shape. Fix ALL of the following while keeping every correct scene you already planned:\n${parts.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
-}
 /** Assemble the full planner request (brief + shape + arc + components + time
  *  budget + uniqueness). Factored out so the ONE re-plan pass reuses the exact
  *  same prompt with corrective feedback appended. */
 function buildPlannerRequest(params: {
   cleanIdea: string; duration: number; sceneCount: number; perScene: number;
   constrain: string; toneHint: string; moodHint: string; srcHint: string;
-  componentsSection: string; timeBudgetSection: string;
+  componentsSection: string; timeBudgetSection: string; actionSection: string; avatarSection: string;
 }): string {
-  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection } = params;
-  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
+  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection } = params;
+  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
@@ -1081,17 +1245,19 @@ export class SceneVideoPipelineService {
         // Everything else renders as gpt-image-2 stills animated with slow FFmpeg Ken
         // Burns (mirroring Faceless). Sora is called per elected block, NEVER fragmented
         // into many 5-6s clips, and NEVER more than the `budget` calls.
-        const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
- a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
+        const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "avatarLook" string — the EXACT shared description of the avatar, included ONLY when any scene has a TALKING avatar (one consistent person/look, reused VERBATIM by every avatar scene); omit it entirely when there is no talking avatar —, a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
+ a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words), narrationRole: "avatar-dialogue" only for scenes whose visual shows a TALKING avatar SPEAKING to camera (lips moving) — narration written as that avatar's own first-person spoken words — else "narrator" (static avatar or no avatar keeps voiceover; never both in one scene) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
 FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 60-second video with a 2-call budget this is the required JSON:
-{"soraContent": [{"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 20, "prompt": "One continuous ~20s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The hero block — key benefit in action", "narration": "This is the moment it comes together."}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Medium shot continuing the benefit, same subject", "narration": "Watch how it keeps delivering."}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Wide shot of the transformation in progress", "narration": "The transformation is unmistakable."}, {"sceneNumber": 5, "duration": 8, "type": "sora", "visualPrompt": "The payoff block — final result, call to action", "narration": "This is the payoff you can get."}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
+{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 20, "prompt": "One continuous ~20s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Opening: watch how this saves your time.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 8, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
           : hybridDirective;
         const componentsSection = buildPlannerComponentsSection(inventory, input.voice);
         const timeBudgetSection = buildPlannerTimeBudgetSection(duration);
-        const request = buildPlannerRequest({ cleanIdea, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection });
+        const actionSection = buildPlannerActionSection();
+        const avatarSection = buildPlannerAvatarSection();
+        const request = buildPlannerRequest({ cleanIdea, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection });
         const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
         generatedScript = decision.script || decision.parameters?.script;
         // Planning-layer QC (deterministic, NO paid renders): every relayed component
@@ -1101,10 +1267,21 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         // media render, so this respects the paid-render QA policy).
         const firstPlan = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
         const firstQc = runPlanQC(firstPlan, inventory);
-        const needsReplan = firstQc.missingComponents.length > 0 || !firstQc.arcFlags.hook || !firstQc.arcFlags.about || !firstQc.arcFlags.cta;
+        // CONTENT DIRECTION QC (owner Sep 9): avatar-dialogue scenes whose narration
+        // reads as a third-person narrator violate the avatar-voice rule (v3 — only a
+        // TALKING avatar suppresses narration, and that scene's ONLY voice is the
+        // avatar's own first-person words); abstract narrations violate ACTIONS-NOT-
+        // THOUGHTS. Role violations TRIGGER the one replan; abstract-narration misses
+        // ride along in the feedback whenever a replan is already needed.
+        const firstRoles = resolveNarrationRoles(firstPlan);
+        const avatarRoleViolations = firstRoles
+          .filter(s => s.narrationRole === 'avatar-dialogue' && !looksLikeFirstPersonDialogue(s.narration))
+          .map(s => s.sceneNumber);
+        const firstNarrationAbstract = verifyActionDirection(firstRoles).narrationAbstract;
+        const needsReplan = firstQc.missingComponents.length > 0 || !firstQc.arcFlags.hook || !firstQc.arcFlags.about || !firstQc.arcFlags.cta || avatarRoleViolations.length > 0;
         if (needsReplan) {
-          trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)}`);
-          const replan = await aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags), mode: 'generate' });
+          trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)} avatarRoles=[${avatarRoleViolations.join(',')}]`);
+          const replan = await aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate' });
           generatedScript = replan.script || replan.parameters?.script;
           trace(`gpt52_replan_end project=${projectId} replanned=${!!generatedScript}`);
         }
@@ -1166,7 +1343,26 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         acc += planned.find(s => s.sceneNumber === sceneNumber)?.duration || 0;
       }
     }
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt})=>({soraBlock,sceneNumbers,totalSeconds,prompt})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags}});
+    // CONTENT DIRECTION (owner Sep 9 — folded into this planner rewrite): resolve
+    // the per-scene narration role deterministically (AVATAR-VOICE RULE v3: only a
+    // TALKING avatar w/ lips moving suppresses narration; that scene's ONLY voice
+    // is the avatar's own first-person dialogue; 'narrator' everywhere else — static
+    // avatar or no avatar keeps voiceover), enforce SAME-avatar consistency across
+    // all avatar scenes (one shared avatarLook description, never a per-scene avatar),
+    // and apply the ACTIONS-NOT-THOUGHTS backstop (abstract visualPrompts get a
+    // deterministic 'SHOW THIS BEING DONE' directive). Pure + cheap; narration text
+    // is never rewritten (voice:'none' untouched). Audited in metadata for the owner.
+    const withRoles = resolveNarrationRoles(planned);
+    const avatarPass = enforceAvatarConsistency(withRoles, extractAvatarLook(generatedScript || {}));
+    const actionPass = applyActionBackstop(avatarPass.script);
+    planned.splice(0, planned.length, ...actionPass.script);
+    const actionAudit = verifyActionDirection(actionPass.script);
+    const avatarRoleViolationsFinal = planned
+      .filter(s => s.narrationRole === 'avatar-dialogue' && !looksLikeFirstPersonDialogue(s.narration))
+      .map(s => s.sceneNumber);
+    const narrationRolesFinal = planned.map(s => s.narrationRole || 'narrator');
+    trace(`content_direction project=${projectId} roles=[${narrationRolesFinal.join(',')}] avatarLook=${avatarPass.avatarLook ? 'set' : 'none'} actionInjected=[${actionPass.injectedInto.join(',')}] abstractNarration=[${actionAudit.narrationAbstract.join(',')}]`);
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt})=>({soraBlock,sceneNumbers,totalSeconds,prompt})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const spanOffset = isMotion ? spanOffsetByScene.get(s.sceneNumber) : undefined;
@@ -1174,6 +1370,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         importantSora:isMotion,
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
         ...(spanOffset !== undefined ? { spanOffset } : {}),
+        ...(s.narrationRole !== undefined ? { narrationRole: s.narrationRole } : {}),
       }};
     }));
     trace(`project_created id=${projectId} scenes=${planned.length} spans=${spanPlans.length}`);
