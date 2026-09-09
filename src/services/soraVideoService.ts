@@ -20,6 +20,18 @@ export const SORA_SCENE_SIZE = '720x1280' as const;
  *  into a shorter scene delivers continuous single-take motion — no loop-padding,
  *  no repeat, no transition judder. NEVER snap to a shorter enum value here. */
 export const SORA_MOTION_SECONDS: SoraSeconds = '20';
+/** Duration-scaled Sora call budget (owner directive, live Sep 8): a Scene-Based /
+ *  Customize video may spend at most 1 Sora call (20s single take) for ≤30s videos,
+ *  2 calls for ~1 minute, 3 calls for 2–3 minutes — soraCallBudget(d) =
+ *  clamp(ceil(d/30), 1, 3): 15s→1, 30s→1, 60s→2, 120s→3, 180s→3. Sora is ONLY
+ *  used where GPT explicitly elects motion (it names which 20s blocks deserve it);
+ *  everything else renders as gpt-image-2 stills animated with FFmpeg Ken Burns.
+ *  At ~$0.40/call × max 3 calls × 3 Scene videos/wk this caps worst-case Sora spend
+ *  at ~$15/month/client — inside the $50 subscription (cost-viability RESOLVED). */
+export function soraCallBudget(duration: number): number {
+  const d = Number.isFinite(duration) ? Math.max(1, Math.round(duration)) : 30;
+  return Math.min(3, Math.max(1, Math.ceil(d / 30)));
+}
 export type SoraSize = typeof SORA_SCENE_SIZE | '1280x720';
 
 const SORA_SECONDS_ENUM: SoraSeconds[] = ['4', '8', '12', '16', '20'];

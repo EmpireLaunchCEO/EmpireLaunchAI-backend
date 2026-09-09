@@ -5,14 +5,14 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService, SORA_MOTION_SECONDS, SORA_SCENE_SIZE } from './soraVideoService.js';
+import { soraVideoService, SORA_MOTION_SECONDS, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
-export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; }
+export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (multi-Sora hybrid, owner directive Sep 8); undefined for still scenes. */ soraBlock?: number; }
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
@@ -445,6 +445,7 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
         sceneNumber: i + 1,
         duration: base + (i < rem ? 1 : 0),
         visualType: keepMotion ? 'motion' : 'still',
+        ...(keepMotion ? { soraBlock: 0 } : {}),
         narration: sceneCopyOrFallback(s?.narration, a.narration, a.duration, true),
         visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
       };
@@ -458,37 +459,69 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
  * - FACELESS: legacy scene-script shape (scenes[] of {sceneNumber,duration,visualType,
  *   narration,visualPrompt}) → parseScenes() → stills forced downstream.
  * - SCENE (hybrid, owner-locked): the director emits a FULL-VIDEO PLAN with
- *   `soraContent` (the ONE ~20s important block) + `scenes[]` where EXACTLY ONE scene
- *   is type "sora" (carries the important motion) and the rest are "gpt-image" stills
- *   that FFmpeg animates with Ken Burns (mirroring Faceless). We read the scene list
- *   with per-scene type→visualType mapping, and attach the ONE soraContent prompt to
- *   the sora scene's visualPrompt so processScene knows it's the consolidated call.
+ *   `soraContent` (MULTI-SORA HYBRID, owner directive Sep 8: an ARRAY of up to
+ *   `soraCallBudget(duration)` {duration:20, prompt} blocks — each a 20s max single
+ *   take; the legacy single-OBJECT form is tolerated and coerced to a 1-element
+ *   array so no previously-valid plan is rejected) + `scenes[]` where the director
+ *   types up to `budget` scenes "sora" (the motion-worthy beats: hero open, mid
+ *   transformation, payoff/CTA) and the rest "gpt-image" stills that FFmpeg animates
+ *   with Ken Burns (mirroring Faceless). We read the scene list with per-scene
+ *   type→visualType mapping, pair the soraContent block prompts to the sora scenes
+ *   IN ORDER (scene #i "sora" ↔ soraContent[i]), cap motion scenes to the budget
+ *   (any extra "sora" typed scenes are coerced to stills — Sora spend never exceeds
+ *   the owner's duration-scaled budget), and append each block's consolidated prompt
+ *   to its scene's visualPrompt so processScene knows it's the call to make.
  *
  * If the planner returns the legacy shape (or nothing), we fall back to parseScenes()
  * so Scene still renders (motion scenes stay Sora per scene — degraded but functional).
  */
-function parseScenePlan(raw: any, idea: string, durationTarget: number, mode: 'faceless' | 'scene'): SceneScript[] {
-  if (mode === 'faceless') return parseScenes(raw, idea, durationTarget);
+export function parseScenePlan(raw: any, idea: string, durationTarget: number, mode: 'faceless' | 'scene'): SceneScript[] {
+  if (mode === 'faceless') {
+    // FACELESS HARD-LOCK (owner decision Aug 30): Faceless NEVER consumes paid Sora
+    // motion — every scene renders as a gpt-image-2 still animated by FFmpeg Ken
+    // Burns. Force `still` at the parse layer (defense in depth: createProject also
+    // forces stills after parsing, so the guarantee holds for ANY caller of the
+    // parser, not just the Scene pipeline's own createProject path).
+    return parseScenes(raw, idea, durationTarget).map(s => ({ ...s, visualType: 'still' as const, soraBlock: undefined }));
+  }
   const scenesRaw = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
-  // Hybrid shape requires a soraContent block AND at least one scene typed "sora".
-  const soraContent = raw?.soraContent;
+  // Coerce the soraContent field (legacy object | new array) to a clean block list.
+  const soraRaw = raw?.soraContent;
+  const soraBlocks = Array.isArray(soraRaw)
+    ? soraRaw
+    : (soraRaw && typeof soraRaw === 'object' ? [soraRaw] : []);
+  const blocks = (soraBlocks as any[])
+    .filter((b: any) => b && typeof b === 'object' && String(b?.prompt || '').trim().length > 0)
+    .map((b: any) => String(b.prompt));
+  const budget = soraCallBudget(durationTarget);
+  const usableBlocks = blocks.slice(0, budget);
   const hasSoraTyped = scenesRaw.some((s: any) => String(s?.type || s?.sceneType || '').toLowerCase() === 'sora');
-  if (soraContent && scenesRaw.length >= 2 && hasSoraTyped) {
-    const soraPrompt = String(soraContent.prompt || '');
-    const soraDuration = Number.isFinite(Number(soraContent.duration)) ? Math.max(1, Math.round(Number(soraContent.duration))) : 0;
+  if (usableBlocks.length > 0 && scenesRaw.length >= 2 && hasSoraTyped) {
     const totalPlan = scenesRaw.reduce((a: number, s: any) => a + (Number.isFinite(Number(s?.duration)) ? Number(s.duration) : 0), 0);
     const scale = totalPlan > 0 ? durationTarget / totalPlan : 1;
     const base = Math.floor(durationTarget / Math.max(1, scenesRaw.length));
     const rem = durationTarget - base * scenesRaw.length;
+    // Which scene indices keep motion: the FIRST `budget` sora-typed scenes, in
+    // video order (deterministic — extra GPT "sora" scenes beyond the budget are
+    // coerced to gpt-image stills so Sora spend is always capped by duration).
+    const soraSceneIndices = scenesRaw
+      .map((s: any, i: number) => (String(s?.type || s?.sceneType || '').toLowerCase() === 'sora' ? i : -1))
+      .filter((i: number) => i >= 0);
+    const motionIndices = new Set(soraSceneIndices.slice(0, budget));
+    let blockIdx = 0;
     const scenes: SceneScript[] = scenesRaw.map((s: any, i: number): SceneScript => {
-      const isSora = String(s?.type || s?.sceneType || '').toLowerCase() === 'sora';
+      const isMotion = motionIndices.has(i);
       const dur = Math.round((Number.isFinite(Number(s?.duration)) ? Number(s.duration) : 0) * scale);
+      const blockIdxAtScene = blockIdx;
+      const blockPrompt = isMotion ? (usableBlocks[blockIdxAtScene] ?? '') : '';
+      if (isMotion && blockPrompt) blockIdx++;
       return {
         sceneNumber: i + 1,
         duration: dur > 0 ? dur : base + (i < rem ? 1 : 0),
-        visualType: isSora ? 'motion' : 'still',
+        visualType: isMotion ? 'motion' : 'still',
+        ...(isMotion ? { soraBlock: blockIdxAtScene } : {}),
         narration: s?.narration || '',
-        visualPrompt: isSora && soraPrompt ? `${s.visualPrompt || ''} — ${soraPrompt}`.trim() : (s?.visualPrompt || s?.visual_prompt || ''),
+        visualPrompt: isMotion && blockPrompt ? `${s.visualPrompt || ''} — ${blockPrompt}`.trim() : (s?.visualPrompt || s?.visual_prompt || ''),
       };
     });
     // Normalize the sum to exactly durationTarget (rounding drift).
@@ -767,6 +800,12 @@ export class SceneVideoPipelineService {
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
+    // Duration-scaled Sora call budget (owner directive, live Sep 8):
+    // soraCallBudget(duration) = clamp(ceil(duration/30), 1, 3) — 30s→1, ~1min→2,
+    // 2–3min→3. Sora is ONLY used where GPT explicitly elects motion (it names
+    // WHICH 20s blocks deserve it); everything else renders as gpt-image-2 stills
+    // animated with slow FFmpeg Ken Burns. Worst-case Sora spend ≈ $15/mo/client.
+    const budget = soraCallBudget(duration);
     let generatedScript = input.script;
     if (!generatedScript) {
       trace(`gpt52_script_start project=${projectId}`);
@@ -780,21 +819,19 @@ export class SceneVideoPipelineService {
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
         const maxNarrationWords = Math.max(14, Math.round(perScene * 2.75));
         const importantBlock = Math.min(20, duration);
-        // Inject the single most-important relayed component into the ONE hybrid Sora
-        // (soraContent) prompt so the hero moment centers on what the client cares about.
         const heroComponentHint = mode !== 'faceless' && inventory.length > 0
-          ? ` The soraContent prompt MUST center the single most-important relayed component — "${inventory[0]}" — as the hero moment / key benefit / payoff of this video.`
+          ? ` soraContent[0]'s prompt MUST center the single most-important relayed component — "${inventory[0]}" — as the hero moment / key benefit / payoff of this video.`
           : '';
         // Hybrid Scene director (owner-locked): GPT 5.2 plans the WHOLE video up front —
-        // which ~20s of content is the SINGLE most-important block (the ONE Sora call),
-        // and the full scene list/order/timings. Everything else renders as gpt-image-2
-        // stills animated with slow FFmpeg Ken Burns (mirroring Faceless). Sora is called
-        // ONCE per ~20s of important content, NOT fragmented into many 5-6s clips.
-        const hybridDirective = ` The final video is a HYBRID: ONE single Sora call carries ${importantBlock}s of the MOST-important content (the hero moment / key benefit / payoff you would spend motion on) — a continuous single take, no cuts. ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" object { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that important ${importantBlock}s${heroComponentHint} }, and
- a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (EXACTLY ONE type "sora"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat → payoff/CTA.
-FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 3-scene video this is the required JSON:
-{"soraContent": {"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The important block — hero moment close-up", "narration": "This is the moment i
-t comes together."}, {"sceneNumber": 3, "duration": 8, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
+        // which up-to-`budget` 20-second blocks genuinely need motion (each ONE Sora call,
+        // a continuous 20s max single take), and the full scene list/order/timings.
+        // Everything else renders as gpt-image-2 stills animated with slow FFmpeg Ken
+        // Burns (mirroring Faceless). Sora is called per elected block, NEVER fragmented
+        // into many 5-6s clips, and NEVER more than the `budget` calls.
+        const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
+ a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
+FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 60-second video with a 2-call budget this is the required JSON:
+{"soraContent": [{"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 20, "prompt": "One continuous ~20s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Cinematic establishing shot of the subject, hook intro", "narration": "Opening: meet the subject."}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "The hero block — key benefit in action", "narration": "This is the moment it comes together."}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Medium shot continuing the benefit, same subject", "narration": "Watch how it keeps delivering."}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Wide shot of the transformation in progress", "narration": "The transformation is unmistakable."}, {"sceneNumber": 5, "duration": 8, "type": "sora", "visualPrompt": "The payoff block — final result, call to action", "narration": "This is the payoff you can get."}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "Confident closing shot, call to action", "narration": "Ready to take the next step?"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
@@ -834,8 +871,8 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
     // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
     // the owner can audit that every relayed component was planned in.
     const qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,plan:{scenes:planned},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,arcFlags:qc.arcFlags}});
-    await db.insert(schema.videoScenes).values(planned.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion'}})));
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,arcFlags:qc.arcFlags}});
+    await db.insert(schema.videoScenes).values(planned.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion',...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {})}})));
     trace(`project_created id=${projectId} scenes=${planned.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
