@@ -13,6 +13,22 @@ import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExpor
 import { resolveVoice } from './voiceOptions.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (multi-Sora hybrid, owner directive Sep 8); undefined for still scenes. */ soraBlock?: number; }
+/** SORA SPAN (owner directive, live re-test): ONE 20s Sora take shared by EVERY
+ *  contiguous scene of a soraBlock. The single take is sliced contiguously —
+ *  scene N renders the [cumulativeOffset, +duration) window — so 3×6s scenes show
+ *  one continuous 20s shot (t[0..6] / t[6..12] / t[12..18]) instead of one ~6s
+ *  trimmed clip with ~14s of paid motion discarded. Persisted in project metadata
+ *  (`spans`) as the auditable plan + cost record. */
+export interface SoraSpan {
+  /** 0-based index of the shared soraContent block this span maps to (ONE Sora call). */
+  soraBlock: number;
+  /** Contiguous scene numbers (plan order == final timeline order). */
+  sceneNumbers: number[];
+  /** Σ of the span scenes' durations — never exceeds one 20s take (SPAN_TAKE_SECONDS). */
+  totalSeconds: number;
+  /** Consolidated continuous-take prompt: all span beats IN ORDER + the block prompt. */
+  prompt: string;
+}
 export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
@@ -268,6 +284,30 @@ export function renderClip(input: string, output: string, duration: number, audi
     inputs.push('-y',output);
     execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
       if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      else resolve();
+    });
+  });
+}
+/** SLICE a shared Sora take for ONE span scene: extract the CONTIGUOUS window
+ *  [offsetSec, offsetSec + durationSec) out of the SAME 20s take (owner directive,
+ *  live re-test). `-ss` is placed AFTER `-i` (output-seek) so every slice is
+ *  FRAME-ACCURATE — slice N starts on the exact frame slice N-1 ended on, so the
+ *  re-assembled scenes are ONE continuous shot (t[0..6], t[6..12], t[12..18]).
+ *  Never re-trims from 0, never disjoint, never loop-pads. Source audio is dropped
+ *  (-an) — the AUDIO BLEED policy maps ONLY the narration track in renderClip. */
+export function sliceSoraTake(input: string, output: string, offsetSec: number, durationSec: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const offset = Math.max(0, Number(offsetSec) || 0);
+    const duration = Math.max(0.1, Number(durationSec) || 3);
+    execFile('ffmpeg', [
+      '-y', '-i', input,
+      '-ss', String(offset), '-t', String(duration),
+      '-map', '0:v:0', '-an',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      output,
+    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      if (err) reject(new Error('ffmpeg slice exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
       else resolve();
     });
   });
@@ -578,18 +618,20 @@ export function parseScenePlan(raw: any, idea: string, durationTarget: number, m
 /** Midsize words never used for the motion-floor keyword scoring (keep the score
  *  deterministic and meaningful — matching on "the/with/into" is noise). */
 const FLOOR_STOPWORDS = new Set(['about','after','also','and','are','before','between','can','each','for','from','has','into','its','just','more','not','only','other','over','same','show','some','than','that','their','them','then','the','this','through','very','was','when','where','which','while','who','will','with','you','your']);
-/**
- * SCENE MOTION FLOOR (owner directive — Scene-Based must NEVER render Sora-less):
- * the owner observed her test video "doesn't seem to be doing a 20s Sora call"
- * because the plan elected ZERO sora scenes (all visualType 'still', budget 1).
- * When a parsed SCENE plan has NO motion at all, deterministically promote the
- * most-important beat to ONE Sora 20s take (soraBlock=0) so every ≤30s Scene
- * video carries its budgeted Sora call (longer videos keep their scaled budget).
- * The promoted scene is the one whose text best overlaps soraContent[0]'s prompt
- * (keyword scoring, deterministic), falling back to the MIDDLE scene (the
- * transformation beat). The over-budget CAP is preserved — this only ever ADDS
- * motion when there is none and never exceeds `budget`. Faceless (zero-Sora
- * hard-lock) and Neural Twin never call this.
+const SPAN_TAKE_SECONDS = 20;
+/** SCENE MOTION FLOOR → SPAN (owner directive, live re-test): Scene-Based must NEVER
+ *  render Sora-less, AND a paid 20s take must cover MORE than one short scene (the
+ *  old floor promoted ONE scene, then renderClip trimmed the 20s take to that scene's
+ *  ~6s window — discarding ~14s of paid motion). When a parsed SCENE plan has NO motion
+ *  at all, deterministically promote the most-important beat (best keyword overlap with
+ *  soraContent[0], else the MIDDLE/transformation scene) to a CONTIGUOUS SPAN of short
+ *  scenes sharing ONE 20s take (soraBlock=0): K = the max forward run whose durations
+ *  sum ≤ SPAN_TAKE_SECONDS — her 5×6s=30s plan → scenes 3,4,5 (3×6s=18s≤20) all covered
+ *  by one continuous shot. If the hero is the LAST scene (no forward room), extend
+ *  BACKWARD for the nearest contiguous best fit (K ≥ 2 whenever short scenes exist).
+ *  The over-budget CAP is preserved (this only ever ADDS motion when there is none and
+ *  never exceeds `budget`); budget 0 and plans that already carry motion are no-ops.
+ *  Faceless (zero-Sora hard-lock) and Neural Twin never call this.
  */
 export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[], budget: number): SceneScript[] {
   if (budget < 1 || !script.length) return script;
@@ -612,15 +654,95 @@ export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[
   // No usable block prompt (or no overlap) → the middle scene (the transformation
   // beat) is the deterministic "hero" fallback.
   if (best < 0 || bestHits === 0) best = Math.floor(next.length / 2);
-  const target = next[best];
-  target.visualType = 'motion';
-  target.soraBlock = 0;
-  if (block && !`${target.visualPrompt || ''}`.toLowerCase().includes(blockPrompt.slice(0, 32))) {
-    target.visualPrompt = `${target.visualPrompt || ''} — ${block}`.trim();
+  // SPAN: start AT the hero beat and extend FORWARD while the run still fits inside
+  // ONE 20s take (K = the max contiguous run ≤ SPAN_TAKE_SECONDS).
+  let lo = best;
+  let hi = best;
+  let sum = next[best].duration || 0;
+  while (hi + 1 < next.length && sum + (next[hi + 1].duration || 0) <= SPAN_TAKE_SECONDS) {
+    hi += 1;
+    sum += next[hi].duration || 0;
   }
+  // Nearest contiguous best fit: hero at the END of the plan (no forward room) →
+  // extend BACKWARD so the run still captures K ≥ 2 short scenes when possible.
+  if (hi === best && best > 0) {
+    let sumB = next[best].duration || 0;
+    let loB = best;
+    while (loB - 1 >= 0 && sumB + (next[loB - 1].duration || 0) <= SPAN_TAKE_SECONDS) {
+      loB -= 1;
+      sumB += next[loB].duration || 0;
+    }
+    lo = loB;
+  }
+  const spanSceneNumbers: string[] = [];
+  for (let i = lo; i <= hi; i++) {
+    next[i].visualType = 'motion';
+    next[i].soraBlock = 0;
+    spanSceneNumbers.push(`${next[i].sceneNumber}`);
+  }
+  if (block) {
+    // The span-LEAD scene carries the consolidated block prompt so buildSpanPrompt
+    // flows the block's continuous-take instruction into the ONE Sora call that now
+    // covers ALL K scenes — the take visually runs the whole spanned arc.
+    const lead = next[lo];
+    if (!`${lead.visualPrompt || ''}`.toLowerCase().includes(blockPrompt.slice(0, 32))) {
+      lead.visualPrompt = `${lead.visualPrompt || ''} — ${block}`.trim();
+    }
+  }
+  trace(`scene_motion_floor_span budget=${budget} scenes=[${spanSceneNumbers.join(',')}] sum=${sum}s`);
   return next;
 }
-/** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
+/** Build the single consolidated prompt for ONE shared 20s Sora take that flows
+ *  through the ENTIRE span (owner directive): every scene beat in plan order plus the
+ *  soraContent block prompt, so the take runs hook → transformation → … as ONE fluid
+ *  unbroken movement (never a single scene's trimmed fragment). */
+export function buildSpanPrompt(run: SceneScript[], blockPrompt?: string): string {
+  const total = run.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
+  const takeSeconds = Math.min(SPAN_TAKE_SECONDS, Math.max(1, Math.round(total)));
+  const beats = run.map(s => String(s.visualPrompt || '').trim()).filter(Boolean);
+  const flow = beats.length > 0
+    ? `Render ONE continuous ${takeSeconds}-second single take that flows seamlessly through these beats IN ORDER as one fluid unbroken camera move — no cuts, no scene changes, no transitions, same subject throughout: ${beats.join(' THEN ')}.`
+    : `Render ONE continuous ${takeSeconds}-second single take — no cuts, no scene changes, one fluid unbroken camera move.`;
+  return blockPrompt ? `${flow} ${blockPrompt}` : flow;
+}
+/** Deterministically group every contiguous run of scenes that share a soraBlock into
+ *  ONE SoraSpan. On-disk the span maps to EXACTLY ONE 20s Sora call; each span scene
+ *  later slices its own [cumulativeOffset, +duration) window out of that same take
+ *  (t[0..6] → scene 3, t[6..12] → scene 4, t[12..18] → scene 5 for her 30s plan).
+ *  Duration sums are capped at SPAN_TAKE_SECONDS; trailing same-block scenes beyond the
+ *  cap are left OUT of the span (processScene's legacy per-scene take is their fallback
+ *  — the floor guarantees this cannot occur for budget-1 plans). Parser multi-Sora plans
+ *  (budget 2–3) keep ONE span per block: each 20s call may span its own run of short
+ *  scenes, never merged across blocks. */
+export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []): SoraSpan[] {
+  const spans: SoraSpan[] = [];
+  let i = 0;
+  while (i < script.length) {
+    const blk = script[i].soraBlock;
+    if (blk === undefined) { i += 1; continue; }
+    let sum = 0;
+    let j = i;
+    while (j < script.length && script[j].soraBlock === blk) {
+      const d = Number.isFinite(script[j].duration) ? script[j].duration : 0;
+      if (sum + d > SPAN_TAKE_SECONDS) break;
+      sum += d;
+      j += 1;
+    }
+    const run = script.slice(i, j);
+    if (run.length > 0) {
+      spans.push({
+        soraBlock: blk,
+        sceneNumbers: run.map(s => s.sceneNumber),
+        totalSeconds: sum,
+        prompt: buildSpanPrompt(run, soraBlocks[blk]),
+      });
+    }
+    // Skip any trailing same-block scenes the 20s cap truncated out of this span.
+    while (j < script.length && script[j].soraBlock === blk) j += 1;
+    i = j;
+  }
+  return spans;
+}/** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
 function isVideoUrl(url: string): boolean {
   const clean = (url.split('?')[0] || '').toLowerCase();
   return /\.(mp4|mov|webm|m4v|mkv|avi)$/.test(clean);
@@ -989,23 +1111,25 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
-    const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
+const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
     // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
     // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
     // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
     if (mode === 'faceless') { for (const s of scriptBeforeFloor) { s.visualType = 'still'; } }
-    // SCENE MOTION FLOOR (owner directive — blocked her live test): a Scene plan
-    // that elected ZERO sora scenes renders Sora-less. Deterministically promote
-    // the most-important beat to ONE 20s Sora take (soraBlock=0) so every ≤30s
-    // Scene video carries its budgeted call. Never exceeds the budget; Faceless
-    // (zero-Sora hard-lock) skips this by mode.
+    // HARD TIME BUDGET runs FIRST so the motion-floor SPAN election below sees the
+    // EXACT durations the assembly will render (rounding drift can't push a span over
+    // the 20s single-take cap after the fact; durations still sum EXACTLY to `duration`).
+    const timeExact = normalizePlanTimeBudget(scriptBeforeFloor, duration);
+    // SCENE MOTION FLOOR → SPAN (owner directive, live re-test): a Scene plan that
+    // elected ZERO sora scenes renders Sora-less. Deterministically promote the
+    // most-important beat to a CONTIGUOUS SPAN of short scenes sharing ONE 20s Sora
+    // take (soraBlock=0 — K = the max forward run whose durations sum ≤ 20s: her 5
+    // scene ~6s-each 30s video gets 3 of 5 scenes covered by one continuous shot).
+    // Never exceeds the budget; Faceless (zero-Sora hard-lock) skips this by mode.
     const script = mode === 'scene'
-      ? applySceneMotionFloor(scriptBeforeFloor, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
-      : scriptBeforeFloor;
-    // HARD TIME BUDGET (owner directive): rescale scene durations so the ENTIRE video
-    // completes start-to-finish inside EXACTLY `duration` — hook → about → CTA is never
-    // cut short or overrun (deterministic; handles any GPT duration drift).
-    const planned = normalizePlanTimeBudget(script, duration);
+      ? applySceneMotionFloor(timeExact, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
+      : timeExact;
+    const planned = script;
     // Final auditable QC of the plan we actually persist (components → componentsVerified
     // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
     // the owner can audit that every relayed component was planned in.
@@ -1026,12 +1150,37 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       // Durations are untouched by injection (text only) — the exact time budget holds.
       planned.splice(0, planned.length, ...afterInjection);
     }
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags}});
-    await db.insert(schema.videoScenes).values(planned.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion',...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {})}})));
-    trace(`project_created id=${projectId} scenes=${planned.length}`);
+    // SORA SPAN PLANNING (owner directive, live re-test): every motion scene pairs
+    // with ONE shared 20s take per soraBlock. Contiguous scenes of a block slice their
+    // windows [cumulativeOffset, +duration) out of the SAME take (one paid call, the
+    // full 20s flowing across the scene cuts) instead of each re-trimming its own clip
+    // from 0. Pure + deterministic; persisted for audit + the worker's take pre-pass.
+    const spanPlans = mode === 'scene'
+      ? planSoraSpans(planned, extractSoraBlockPrompts(generatedScript || {}, budget))
+      : [];
+    const spanOffsetByScene = new Map<number, number>();
+    for (const span of spanPlans) {
+      let acc = 0;
+      for (const sceneNumber of span.sceneNumbers) {
+        spanOffsetByScene.set(sceneNumber, acc);
+        acc += planned.find(s => s.sceneNumber === sceneNumber)?.duration || 0;
+      }
+    }
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt})=>({soraBlock,sceneNumbers,totalSeconds,prompt})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags}});
+    await db.insert(schema.videoScenes).values(planned.map(s => {
+      const isMotion = s.visualType === 'motion';
+      const spanOffset = isMotion ? spanOffsetByScene.get(s.sceneNumber) : undefined;
+      return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{
+        importantSora:isMotion,
+        ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
+        ...(spanOffset !== undefined ? { spanOffset } : {}),
+      }};
+    }));
+    trace(`project_created id=${projectId} scenes=${planned.length} spans=${spanPlans.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
   }
+
   async processProject(projectId:string,userId:string,skipGeneration=false):Promise<void> {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
@@ -1045,7 +1194,45 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
     const heroSource = sourceImages[0];
-    if (!skipGeneration) {
+if (!skipGeneration) {
+      // SORA SPAN PRE-PASS (owner directive, live re-test): generate EXACTLY ONE 20s
+      // take per soraBlock BEFORE the scene loop, then let every contiguous scene of
+      // the block slice its own window out of that same take. This is what makes 3×6s
+      // scenes show ONE continuous 20s shot (t[0..6] → scene 3, t[6..12] → scene 4,
+      // t[12..18] → scene 5) instead of one ~6s trimmed clip with ~14s of paid motion
+      // discarded. Legacy projects (no persisted `spans` metadata) skip this entirely
+      // and keep the old per-scene take path. Serialized (≤ `budget` spans) so Sora
+      // spend is exactly budget × 1 call; each span retries with the same backoff the
+      // legacy path used. A span take failure fails its scenes FAST (predictable spend
+      // — never a second Sora call for the same block).
+      const spanPlans: SoraSpan[] = Array.isArray(pmeta.spans) ? pmeta.spans : [];
+      const takeRegistry = new Map<number, string>();
+      const failedSpanSceneIds = new Set<string>();
+      for (const span of spanPlans) {
+        try {
+          const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
+          const takePath = await withDeadline(
+            this.generateSoraTake(spanPrompt, span),
+            SCENE_DEADLINE_MS,
+            `Sora span ${span.soraBlock}`,
+          );
+          takeRegistry.set(span.soraBlock, takePath);
+          trace(`span_take_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] total=${span.totalSeconds}s`);
+        } catch (spanError: any) {
+          trace(`span_take_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
+          const ids = span.sceneNumbers
+            .map(n => scenes.find(s => s.sceneNumber === n)?.id)
+            .filter((id): id is string => Boolean(id));
+          for (const id of ids) failedSpanSceneIds.add(id);
+          if (ids.length) {
+            await db.update(schema.videoScenes).set({
+              status: 'failed',
+              metadata: { error: `Sora span take ${span.soraBlock} failed: ${spanError?.message}` },
+              updatedAt: new Date(),
+            }).where(inArray(schema.videoScenes.id, ids));
+          }
+        }
+      }
       // Never let a provider call leave a scene in `generating` forever. Railway can
       // keep an outbound request alive longer than the handler; enforce a deadline at
       // the worker boundary (7 min per scene — image gen up to 3 min + gpt-audio +
@@ -1056,8 +1243,10 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       // all-settled semantics (fulfilled/rejected per scene) so rejection handling below
       // is unchanged.
       const outcomes = await mapLimit(scenes, SCENE_CONCURRENCY, async (scene: any) => {
+        if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // block take failed → already marked failed
         try {
-          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          const takePath = takeRegistry.get(Number((scene.metadata as any)?.soraBlock ?? -1));
+          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource, takePath), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
           return { status: 'rejected' as const, reason };
@@ -1234,7 +1423,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       // Use the uploaded source image as the continuous subject. Where the provider
@@ -1255,39 +1444,62 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
         mime='image/png';
       }
-      else {
-        // Motion scenes: Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
-        let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
-        let retriesUsed = 0;
-        for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
-          if (attempt > 1) {
-            retriesUsed = attempt - 1;
-            const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
-            trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
-            await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+else {
+        // ── MOTION: shared SPAN take when this scene belongs to a planned span ──
+        const spanBlock = Number((scene.metadata as any)?.soraBlock ?? NaN);
+        const spanOffset = Number((scene.metadata as any)?.spanOffset ?? NaN);
+        if (spanTakePath && fs.existsSync(spanTakePath)) {
+          // One 20s take per soraBlock, sliced CONTIGUOUSLY across every scene of the
+          // span (owner directive, live re-test): this scene renders the
+          // [spanOffset, spanOffset + duration) window of the SAME take as its
+          // siblings — t[0..6], t[6..12], t[12..18] — so the full paid 20s flows
+          // across the scene cuts as ONE continuous shot (never re-trimmed from 0,
+          // never disjoint, never loop-padded). Output-seek = frame-accurate.
+          const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
+          fs.mkdirSync(sliceDir, { recursive: true });
+          const slicePath = path.join(sliceDir, `sora-block-${spanBlock}-scene-${scene.sceneNumber}.mp4`);
+          await sliceSoraTake(spanTakePath, slicePath, spanOffset, scene.duration || 3);
+          localPath = slicePath;
+          trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s dur=${scene.duration || 3}s`);
+        } else if ((scene.metadata as any)?.soraBlock !== undefined && Number.isFinite(spanOffset)) {
+          // New-plan span scene whose shared take failed to generate: fail FAST and
+          // predictably — never silently re-fire a second Sora call for the same block.
+          throw new Error(`Sora span take ${spanBlock} missing (span generation failed) — regenerate in Studio`);
+        } else {
+          // LEGACY path (in-flight pre-span projects / single-scene regeneration):
+          // Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
+          let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
+          let retriesUsed = 0;
+          for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
+            if (attempt > 1) {
+              retriesUsed = attempt - 1;
+              const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
+              trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+              await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+            }
+            const sceneSeconds = Math.min(20, scene.duration || 20);
+            const isImportant = Boolean(scene.metadata?.importantSora);
+            soraResult = await soraVideoService.generateVideo(subjectPrompt, {
+              userId: undefined,
+              // 20s MAX SINGLE-TAKE POLICY (owner directive, live): EVERY motion scene
+              // requests the Sora 2 `seconds` MAX ("20" — enum 4|8|12|16|20; the live
+              // API rejects `duration` and does not change length from prose). Never a
+              // shorter snapped value: scenes become continuous single takes, and
+              // renderClip trims with `-t` to the scene window, so a 20s shot into a
+              // shorter scene yields smooth continuous motion — NO loop-padding, no
+              // repeat, no transition judder. size is set EXPLICITLY to SORA_SCENE_SIZE
+              // so the 9:16 contract is deterministic.
+              seconds: SORA_MOTION_SECONDS,
+              size: isImportant ? SORA_SCENE_SIZE : undefined,
+              // secondary content-continuity steer only (cannot change clip length).
+              promptHint: isImportant ? `Render ONE continuous 20-second single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
+            });
+            if (soraResult.success && soraResult.videoPath) break;
+            trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
           }
-          const sceneSeconds = Math.min(20, scene.duration || 20);
-          const isImportant = Boolean(scene.metadata?.importantSora);
-          soraResult = await soraVideoService.generateVideo(subjectPrompt, {
-            userId: undefined,
-            // 20s MAX SINGLE-TAKE POLICY (owner directive, live): EVERY motion scene
-            // requests the Sora 2 `seconds` MAX ("20" — enum 4|8|12|16|20; the live
-            // API rejects `duration` and does not change length from prose). Never a
-            // shorter snapped value: scenes become continuous single takes, and
-            // renderClip trims with `-t` to the scene window, so a 20s shot into a
-            // shorter scene yields smooth continuous motion — NO loop-padding, no
-            // repeat, no transition judder. size is set EXPLICITLY to SORA_SCENE_SIZE
-            // so the 9:16 contract is deterministic.
-            seconds: SORA_MOTION_SECONDS,
-            size: isImportant ? SORA_SCENE_SIZE : undefined,
-            // secondary content-continuity steer only (cannot change clip length).
-            promptHint: isImportant ? `Render ONE continuous 20-second single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
-          });
-          if (soraResult.success && soraResult.videoPath) break;
-          trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
+          if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
+          localPath = soraResult.videoPath;
         }
-        if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
-        localPath = soraResult.videoPath;
       }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
@@ -1311,6 +1523,30 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
    * (neuralFeedbackAutoFixService) can re-voice an edited line in place without a
    * full scene re-render. $0-ish: ONE gpt-audio call (~micro-cost per line).
    */
+/** Generate ONE 20s Sora take for a whole span (soraBlock) with the same retry /
+   *  backoff policy the legacy per-scene path used — the span makes budget calls
+   *  EXACTLY: 1 take per block, every contiguous block scene slices from it. */
+  private async generateSoraTake(spanPrompt: string, span: SoraSpan): Promise<string> {
+    for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
+        trace(`span_sora_retry_${attempt - 1} block=${span.soraBlock} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+        await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+      }
+      const soraResult = await soraVideoService.generateVideo(spanPrompt, {
+        userId: undefined,
+        // 20s MAX SINGLE-TAKE POLICY: EVERY Sora call requests the official `seconds`
+        // max ("20") — one continuous take; FFmpeg slices it contiguously across the
+        // span's scene windows (never snapped, never disjoint, never loop-padded).
+        seconds: SORA_MOTION_SECONDS,
+        size: SORA_SCENE_SIZE,
+        promptHint: `Render ONE continuous 20-second single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${span.totalSeconds}s of scene windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
+      });
+      if (soraResult.success && soraResult.videoPath) return soraResult.videoPath;
+      trace(`span_sora_attempt_failed block=${span.soraBlock} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
+    }
+    throw new Error(`Sora span take ${span.soraBlock} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
+  }
   private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
     return generateSceneAudio(text, userId, sceneId, voice, tone);
   }

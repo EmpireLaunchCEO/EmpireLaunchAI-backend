@@ -83,18 +83,23 @@ test('ensureLocalFile: a failed download throws a clear error (never a silent EN
   );
 });
 
-// ─── (b) SCENE MOTION FLOOR ─────────────────────────────────────────────────
-test('applySceneMotionFloor: zero-sora plan gets exactly ONE motion + soraBlock=0', () => {
-  const plan = SIX_STILLS();
+// ─── (b) SCENE MOTION FLOOR → SPAN ────────────────────────────────────────────
+test('applySceneMotionFloor: zero-sora plan promotes a CONTIGUOUS SPAN of short scenes sharing soraBlock=0', () => {
+  const plan = SIX_STILLS(); // 6 × 6s
   const out = applySceneMotionFloor(plan, ['One continuous 20s cinematic take of the hero key-benefit moment, no cuts'], 1);
   const motions = out.filter(s => s.visualType === 'motion');
-  assert.equal(motions.length, 1, 'exactly one motion scene added');
-  assert.equal(motions[0].soraBlock, 0, 'soraBlock is 0 (the one budgeted call)');
-  assert.ok(motions[0].visualPrompt.toLowerCase().includes('hero'), 'promotes the hero-overlap scene');
+  // hero-overlap = scene 1 (keyword tie), forward run 1,2,3 = 18s ≤ 20 → K=3
+  assert.equal(motions.length, 3, 'promotes a SPAN of short scenes, not a lone scene');
+  assert.deepEqual(motions.map(s => s.sceneNumber), [1, 2, 3], 'contiguous run starting at the hero beat');
+  assert.ok(motions.every(s => s.soraBlock === 0), 'every span scene shares soraBlock 0 (ONE Sora call)');
+  assert.equal(motions.reduce((a, s) => a + s.duration, 0), 18, 'span sum ≤ one 20s take');
+  assert.ok(motions[0].visualPrompt.toLowerCase().includes('hero'), 'lead scene carries the block prompt');
+  // one take covers the run: every span scene pairs with the SAME soraBlock
+  assert.equal(new Set(motions.map(s => s.soraBlock)).size, 1);
   // durations untouched (time budget preserved)
   assert.deepEqual(out.map(s => s.duration), plan.map(s => s.duration));
   // everything else stays still
-  assert.equal(out.filter(s => s.visualType === 'still').length, plan.length - 1);
+  assert.equal(out.filter(s => s.visualType === 'still').length, plan.length - 3);
 });
 
 test('applySceneMotionFloor: respects the budget cap and leaves existing motion untouched', () => {
@@ -111,13 +116,14 @@ test('applySceneMotionFloor: budget 0 / empty plan are no-ops (Faceless-style ze
   assert.equal(applySceneMotionFloor([], ['any'], 1).length, 0);
 });
 
-test('applySceneMotionFloor: no soraContent block → deterministic MIDDLE scene promoted', () => {
+test('applySceneMotionFloor: no soraContent block → deterministic MIDDLE scene starts the span', () => {
   const plan = SIX_STILLS();
   const out = applySceneMotionFloor(plan, [], 1);
   const motions = out.filter(s => s.visualType === 'motion');
-  assert.equal(motions.length, 1);
   assert.equal(motions[0].sceneNumber, Math.floor(6 / 2) + 1, 'middle scene is the hero fallback');
-  assert.equal(motions[0].soraBlock, 0);
+  assert.deepEqual(motions.map(s => s.sceneNumber), [4, 5, 6], 'contiguous forward span from the middle beat');
+  assert.equal(motions.length, 3);
+  assert.ok(motions.every(s => s.soraBlock === 0));
 });
 
 test('applySceneMotionFloor: promoted scene pairs with soraContent[0] (block prompt appended)', () => {
@@ -174,8 +180,10 @@ test('injectMissingComponents + motion floor work together (owner path: parse �
   const inventory = ['red', 'TikTok', '50% off', 'Comment'];
   const { script: plan, stillMissing } = injectMissingComponents(floored, inventory);
   assert.equal(stillMissing.length, 0, 'all relayed components present after injection');
-  assert.equal(plan.filter(s => s.visualType === 'motion').length, 1, 'motion floor holds');
-  assert.equal(plan.find(s => s.visualType === 'motion')!.soraBlock, 0);
+  assert.equal(plan.filter(s => s.visualType === 'motion').length, 3, 'motion floor holds (3×6s span)');
+  const motions = plan.filter(s => s.visualType === 'motion');
+  assert.deepEqual(motions.map(s => s.sceneNumber), [3, 4, 5], 'middle-hero spans forward scenes 3,4,5');
+  assert.ok(motions.every(s => s.soraBlock === 0), 'one shared Sora take for the whole span');
   assert.ok(plan.some(s => s.visualPrompt.includes('Comment')), 'CTA wording on screen');
   assert.equal(plan.reduce((a, s) => a + s.duration, 0), 30, 'exact time budget preserved');
 });
