@@ -67,6 +67,43 @@ function probeDuration(input: string): number {
     return 0;
   }
 }
+/** True when a string is an http(s) URL (vs a real local filesystem path). */
+export function isRemoteUrl(value: string): boolean {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+/**
+ * Resolve a possibly-REMOTE (R2 presigned URL) asset reference to a REAL local
+ * file on disk, so downstream consumers that need a file (fs.copyFileSync re-upload
+ * branch, FFmpeg Ken Burns/zoompan renderClip, assembly) can never copy an https
+ * URL. gpt-image-2 stills come back as an R2 presigned URL when R2 is live
+ * (renderingEngine.renderImage uploads when passed a userId) — the owner's live
+ * Scene test FAILED every still scene with `ENOENT: copyfile '<r2-url>' ->
+ * '<r2-url>.r2-upload'` exactly because processScene set localPath to that URL.
+ * Local paths pass through untouched (the common case after the renderImage call
+ * below is switched to return a local path); URLs are downloaded to
+ * temp/scene-assets. Pure + injectable fetch for unit tests (NO paid renders).
+ */
+export async function ensureLocalFile(
+  pathOrUrl: string,
+  label = 'asset',
+  fetchImpl: (url: string, init?: any) => Promise<{ ok: boolean; status?: number; arrayBuffer(): Promise<ArrayBuffer> }> = fetch as any,
+): Promise<string> {
+  const value = String(pathOrUrl || '').trim();
+  if (!value) throw new Error(`${label}: empty path/URL`);
+  if (!isRemoteUrl(value)) return value; // already a real local file
+  try { if (fs.existsSync(value)) return value; } catch { /* not a local path */ }
+  const res = await fetchImpl(value, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`${label}: download failed (HTTP ${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error(`${label}: download returned an empty body`);
+  let ext = '.png';
+  try { ext = path.extname(new URL(value).pathname) || '.png'; } catch { /* keep .png */ }
+  const dir = path.join(process.cwd(), 'temp', 'scene-assets');
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, `${uuidv4()}${ext}`);
+  fs.writeFileSync(dest, buf);
+  return dest;
+}
 
 /**
  * Deterministic post-render smoothness QC (cheap ffprobe, NO AI / NO paid renders).
@@ -454,6 +491,21 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
   return arc;
 }
 /**
+ * Pull the soraContent block prompts out of a raw planner payload: tolerates the
+ * legacy single-OBJECT form (coerced to a 1-element array so no previously-valid
+ * plan is rejected), filters empty prompts, and slices to the owner's duration-
+ * scaled budget. Shared by parseScenePlan (prompt pairing) and the Scene MOTION
+ * FLOOR so both see the identical, budget-capped block list.
+ */
+export function extractSoraBlockPrompts(raw: any, budget: number): string[] {
+  const soraRaw = raw?.soraContent;
+  const soraBlocks = Array.isArray(soraRaw) ? soraRaw : (soraRaw && typeof soraRaw === 'object' ? [soraRaw] : []);
+  return (soraBlocks as any[])
+    .filter((b: any) => b && typeof b === 'object' && String(b?.prompt || '').trim().length > 0)
+    .map((b: any) => String(b.prompt))
+    .slice(0, Math.max(0, budget));
+}
+/**
  * Parse the GPT 5.2 DIRECTOR output into the executable scene list.
  *
  * - FACELESS: legacy scene-script shape (scenes[] of {sceneNumber,duration,visualType,
@@ -485,16 +537,8 @@ export function parseScenePlan(raw: any, idea: string, durationTarget: number, m
     return parseScenes(raw, idea, durationTarget).map(s => ({ ...s, visualType: 'still' as const, soraBlock: undefined }));
   }
   const scenesRaw = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
-  // Coerce the soraContent field (legacy object | new array) to a clean block list.
-  const soraRaw = raw?.soraContent;
-  const soraBlocks = Array.isArray(soraRaw)
-    ? soraRaw
-    : (soraRaw && typeof soraRaw === 'object' ? [soraRaw] : []);
-  const blocks = (soraBlocks as any[])
-    .filter((b: any) => b && typeof b === 'object' && String(b?.prompt || '').trim().length > 0)
-    .map((b: any) => String(b.prompt));
   const budget = soraCallBudget(durationTarget);
-  const usableBlocks = blocks.slice(0, budget);
+  const usableBlocks = extractSoraBlockPrompts(raw, budget);
   const hasSoraTyped = scenesRaw.some((s: any) => String(s?.type || s?.sceneType || '').toLowerCase() === 'sora');
   if (usableBlocks.length > 0 && scenesRaw.length >= 2 && hasSoraTyped) {
     const totalPlan = scenesRaw.reduce((a: number, s: any) => a + (Number.isFinite(Number(s?.duration)) ? Number(s.duration) : 0), 0);
@@ -530,6 +574,51 @@ export function parseScenePlan(raw: any, idea: string, durationTarget: number, m
     return scenes;
   }
   return parseScenes(raw, idea, durationTarget);
+}
+/** Midsize words never used for the motion-floor keyword scoring (keep the score
+ *  deterministic and meaningful — matching on "the/with/into" is noise). */
+const FLOOR_STOPWORDS = new Set(['about','after','also','and','are','before','between','can','each','for','from','has','into','its','just','more','not','only','other','over','same','show','some','than','that','their','them','then','the','this','through','very','was','when','where','which','while','who','will','with','you','your']);
+/**
+ * SCENE MOTION FLOOR (owner directive — Scene-Based must NEVER render Sora-less):
+ * the owner observed her test video "doesn't seem to be doing a 20s Sora call"
+ * because the plan elected ZERO sora scenes (all visualType 'still', budget 1).
+ * When a parsed SCENE plan has NO motion at all, deterministically promote the
+ * most-important beat to ONE Sora 20s take (soraBlock=0) so every ≤30s Scene
+ * video carries its budgeted Sora call (longer videos keep their scaled budget).
+ * The promoted scene is the one whose text best overlaps soraContent[0]'s prompt
+ * (keyword scoring, deterministic), falling back to the MIDDLE scene (the
+ * transformation beat). The over-budget CAP is preserved — this only ever ADDS
+ * motion when there is none and never exceeds `budget`. Faceless (zero-Sora
+ * hard-lock) and Neural Twin never call this.
+ */
+export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[], budget: number): SceneScript[] {
+  if (budget < 1 || !script.length) return script;
+  if (script.some(s => s.visualType === 'motion')) return script;
+  const next = script.map(s => ({ ...s }));
+  const block = String(soraBlocks?.[0] || '');
+  const blockPrompt = block.toLowerCase();
+  const words = blockPrompt.split(/\s+/)
+    .map(w => w.replace(/[^a-z0-9]/g, ''))
+    .filter(w => w.length > 4 && !FLOOR_STOPWORDS.has(w));
+  let best = -1;
+  let bestHits = 0;
+  if (words.length) {
+    for (let i = 0; i < next.length; i++) {
+      const hay = `${next[i].visualPrompt || ''} ${next[i].narration || ''}`.toLowerCase();
+      const hits = words.reduce((a, w) => a + (hay.includes(w) ? 1 : 0), 0);
+      if (hits > bestHits) { bestHits = hits; best = i; }
+    }
+  }
+  // No usable block prompt (or no overlap) → the middle scene (the transformation
+  // beat) is the deterministic "hero" fallback.
+  if (best < 0 || bestHits === 0) best = Math.floor(next.length / 2);
+  const target = next[best];
+  target.visualType = 'motion';
+  target.soraBlock = 0;
+  if (block && !`${target.visualPrompt || ''}`.toLowerCase().includes(blockPrompt.slice(0, 32))) {
+    target.visualPrompt = `${target.visualPrompt || ''} — ${block}`.trim();
+  }
+  return next;
 }
 /** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
 function isVideoUrl(url: string): boolean {
@@ -578,12 +667,20 @@ const CONSULTANT_META_PATTERN = /let(?:\u2019|')s\s+design\s+your\s+video|what\s
 
 function sceneCopyOrFallback(value: unknown, fallback: string, duration: number, narration: boolean): string {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
+  // Empty or pure consultant/ui framing → the story-arc fallback (never narrate
+  // internal planning dialogue). Everything else is REAL scene copy and MUST
+  // survive into the delivered plan (owner: every relayed component must appear
+  // in the video). A six-second scene can only carry a short complete line, so
+  // OVER-LENGTH text is TRUNCATED at the word cap — NOT replaced by the generic
+  // arc fallback. The old discard-on-length behavior silently dropped GPT's
+  // component-bearing narration/prompts (the owner's live test stored pure
+  // generic arc copy while metadata.componentsMissing listed every relayed
+  // component: red, lavender, TikTok, 50% off, Comment, ...).
   if (!text || CONSULTANT_META_PATTERN.test(text)) return fallback;
-  // A six-second scene can only carry a short complete line. Returning the
-  // arc fallback is safer than sending long text to TTS, which gets cut off by
-  // the scene's fixed duration and sounds like a clipped sentence.
   const maxWords = narration ? Math.max(14, Math.round(duration * 2.75)) : 90;
-  if (text.split(/\s+/).length > maxWords) return fallback;
+  if (text.split(/\s+/).length > maxWords) {
+    return text.split(/\s+/).slice(0, maxWords).join(' ');
+  }
   return text;
 }
 // ─── Planning-layer guarantee (owner directives, Sep 8) ─────────────────────
@@ -699,6 +796,40 @@ export function verifyComponentsInScript(script: SceneScript[], components: stri
     .map(normalizeComponent)
     .filter(c => c.length > 0 && !haystack.includes(c.toLowerCase()));
   return { missing };
+}
+/** Deterministic COMPONENT INJECTION backstop (owner: EVERY relayed component must
+ *  appear in the video — never rely on GPT/replan compliance alone, and never let
+ *  a wholesale parse-layer replacement strip it again). After parse + (at most one)
+ *  replan, any STILL-missing inventory item is appended VERBATIM to a scene's
+ *  visualPrompt so it renders on-screen: CTA wording → the FINAL scene, colors /
+ *  platforms / offers → the MIDDLE (transformation) scene, subject chunks → the
+ *  hook (scene 1). Pure + cheap (no GPT, no paid render); returns the injected
+ *  list for audit + the re-verified missing list (empty on a successful pass). */
+export function injectMissingComponents(script: SceneScript[], inventory: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[] } {
+  const next = script.map(s => ({ ...s }));
+  if (!inventory.length || !next.length) return { script: next, injected: [], stillMissing: verifyComponentsInScript(next, inventory).missing };
+  const missing = verifyComponentsInScript(next, inventory).missing;
+  if (!missing.length) return { script: next, injected: [], stillMissing: [] };
+  const injected: string[] = [];
+  const last = next.length - 1;
+  const mid = Math.floor(next.length / 2);
+  const isCtaish = (c: string) => {
+    const t = normalizeComponent(c).toLowerCase();
+    return CTA_PATTERNS.some(re => re.test(c)) || /follow|comment|subscribe|link in bio|shop now|order now|buy now|\bcta\b|call to action|check out|\bdm\b|sign up|join us|visit|tap|click|share|save this|learn more|get yours|act now|\bbeta\b/i.test(t);
+  };
+  const isColorish = (c: string) => COLOR_WORDS.includes(normalizeComponent(c).toLowerCase());
+  const isPlatformish = (c: string) => PLATFORM_PATTERNS.some(p => p.name.toLowerCase() === normalizeComponent(c).toLowerCase());
+  const isOfferish = (c: string) => /%\s*off|\$\s?\d/i.test(c);
+  for (const c of missing) {
+    let target: number;
+    if (isCtaish(c)) target = last;
+    else if (isColorish(c) || isPlatformish(c) || isOfferish(c)) target = mid === last ? Math.max(0, mid - 1) : mid;
+    else target = 0;
+    const s = next[target];
+    s.visualPrompt = `${s.visualPrompt || ''}${s.visualPrompt ? ' — ' : ''}${c}`.trim();
+    injected.push(c);
+  }
+  return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory).missing };
 }
 /** Structural story-arc check: hook in the first ~25% of scenes, 'what it's
  *  about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
@@ -858,11 +989,19 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
       } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
     }
-    const script = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
+    const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
     // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
     // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
     // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
-    if (mode === 'faceless') { for (const s of script) { s.visualType = 'still'; } }
+    if (mode === 'faceless') { for (const s of scriptBeforeFloor) { s.visualType = 'still'; } }
+    // SCENE MOTION FLOOR (owner directive — blocked her live test): a Scene plan
+    // that elected ZERO sora scenes renders Sora-less. Deterministically promote
+    // the most-important beat to ONE 20s Sora take (soraBlock=0) so every ≤30s
+    // Scene video carries its budgeted call. Never exceeds the budget; Faceless
+    // (zero-Sora hard-lock) skips this by mode.
+    const script = mode === 'scene'
+      ? applySceneMotionFloor(scriptBeforeFloor, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
+      : scriptBeforeFloor;
     // HARD TIME BUDGET (owner directive): rescale scene durations so the ENTIRE video
     // completes start-to-finish inside EXACTLY `duration` — hook → about → CTA is never
     // cut short or overrun (deterministic; handles any GPT duration drift).
@@ -870,8 +1009,24 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
     // Final auditable QC of the plan we actually persist (components → componentsVerified
     // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
     // the owner can audit that every relayed component was planned in.
-    const qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,arcFlags:qc.arcFlags}});
+    let qc = runPlanQC(planned, inventory);
+    // COMPONENT INJECTION BACKSTOP (owner: every relayed component MUST actually flow
+    // into the delivered plan — GPT (and even the one auto-correct replan) is not
+    // guaranteed to comply, and the old parse layer could strip long component-bearing
+    // copy). When components are still missing after parse + replan, append them
+    // VERBATIM to scene visualPrompts (CTA→final, colors/platforms/offers→middle,
+    // subject chunks→hook). Deterministic, zero paid renders.
+    const injected: string[] = [];
+    if (qc.missingComponents.length > 0) {
+      const inj = injectMissingComponents(planned, inventory);
+      const afterInjection = inj.script;
+      injected.push(...inj.injected);
+      qc = runPlanQC(afterInjection, inventory);
+      trace(`components_injected project=${projectId} count=${inj.injected.length} stillMissing=[${inj.stillMissing.join(' | ')}]`);
+      // Durations are untouched by injection (text only) — the exact time budget holds.
+      planned.splice(0, planned.length, ...afterInjection);
+    }
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags}});
     await db.insert(schema.videoScenes).values(planned.map(s=>({id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{importantSora:s.visualType==='motion',...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {})}})));
     trace(`project_created id=${projectId} scenes=${planned.length}`);
     void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
@@ -1086,7 +1241,20 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
       const subjectPrompt = withSourceSubject(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
-      if(scene.visualType==='still'){const result=await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined); if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed'); localPath=result.imageUrl; mime='image/png';}
+      if(scene.visualType==='still'){
+        // ENOENT BLOCKER FIX (owner's live test f3773f0a — all 5 scenes failed):
+        // renderImage with NO userId returns a LOCAL path (no premature R2 upload)
+        // so the r2-upload copy branch below and FFmpeg Ken Burns/zoompan assembly
+        // receive a REAL on-disk file. The old call passed userId, which made
+        // renderImage upload to R2 and return a PRESIGNED URL as `localPath` →
+        // `fs.copyFileSync('<url>', '<url>.r2-upload')` threw ENOENT. The scene
+        // upload branch uploads exactly once (provider 'gpt-image-2'). ensureLocalFile
+        // is a defense-in-depth guard for any caller path that still lands a URL.
+        const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
+        if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
+        localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
+        mime='image/png';
+      }
       else {
         // Motion scenes: Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
         let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
@@ -1123,7 +1291,16 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
       }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
-      if (r2Storage.isAvailable) { const copyPath = path.join(path.dirname(localPath), `${path.basename(localPath)}.r2-upload`); fs.copyFileSync(localPath, copyPath); const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime); assetUrl = uploaded.url || localPath; }
+      if (r2Storage.isAvailable) {
+        // HARDENING: never let a URL reach fs.copyFileSync (the owner's live ENOENT).
+        // ensureLocalFile is a no-op passthrough for real local paths (the normal
+        // case after the renderImage fix) and downloads any stray URL first.
+        const safeLocal = await ensureLocalFile(localPath, `scene ${scene.sceneNumber} visual`);
+        const copyPath = path.join(path.dirname(safeLocal), `${path.basename(safeLocal)}.r2-upload`);
+        fs.copyFileSync(safeLocal, copyPath);
+        const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime);
+        assetUrl = uploaded.url || safeLocal;
+      }
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }

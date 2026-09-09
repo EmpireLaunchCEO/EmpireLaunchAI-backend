@@ -45,8 +45,20 @@ export interface RouterRequest {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Durable locked facts from prior sessions (see memoryService.ts). */
   lockedFacts?: Record<string, any>;
+  /** Studio-launch action hint: the exact UI action the user should tap to start
+   *  generation (e.g. "press Launch Project to generate your video" in the
+   *  suppressWand Launch Project flow). Falls back to the classic wand copy. */
+  actionHint?: string;
 }
 
+/** Closing line the consultant replies with when the user says "generate" /
+ *  "let's go" / "I'm ready". Defaults to the classic wand copy; Studio Launch
+ *  Project flows pass an actionHint so the reply names the REAL button the user
+ *  should press (frontend sends it in suppressWand mode). Pure + unit-tested. */
+export function consultGenerateReply(actionHint?: string): string {
+  const hint = String(actionHint || '').trim();
+  return hint.length > 0 ? hint : 'Great, tap the wand to generate!';
+}
 // ─── AI Router Service ───────────────────────────────────────────────────────
 
 export class AiRouterService {
@@ -57,7 +69,7 @@ export class AiRouterService {
    * and returns a structured routing decision. Never generates final media.
    */
   async route(request: RouterRequest): Promise<RouterDecision> {
-    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode, request.lockedFacts);
+    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode, request.lockedFacts, request.actionHint);
     const userMessage = this.buildUserMessage(request);
 
     try {
@@ -108,7 +120,7 @@ export class AiRouterService {
     };
   }
 
-  private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode'], lockedFacts?: Record<string, any>): string {
+  private buildSystemPrompt(brandContext?: RouterRequest['brandContext'], mode?: RouterRequest['mode'], lockedFacts?: Record<string, any>, actionHint?: string): string {
     const memoryBlock = lockedFacts && Object.keys(lockedFacts).length
       ? `\nSETTLED DECISIONS (do not re-ask — treat as already confirmed by the user):\n${Object.entries(lockedFacts)
           .filter(([,v]) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0))
@@ -119,7 +131,7 @@ export class AiRouterService {
       : '';
 
     const consultInstructions = mode === 'consult'
-      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- NEVER ask a clarifying question about anything already answered in the conversation history OR listed in SETTLED DECISIONS below. Those are locked facts.\n- Never ask about UI-set controls (duration, voice, tone, platform, aspect ratio). If the user or SETTLED DECISIONS already states a duration, voice, or tone, treat it as final — do NOT ask "how long?", "what voice?", etc. again.\n- Ask at most ONE genuinely new clarifying question per reply, and only when the info is truly missing and not decided.\n- OFFER A CONCRETE SUGGESTED DEFAULT OPTION ON EVERY clarifying question you ask (vibe, colors, font, background, effects) — a ready-made pick the user can accept in one tap, with a 1-clause reason. Examples: "vibe: I'd suggest energetic & bold for this", "colors: I'd suggest warm amber + creams", "font: I'd suggest a bold rounded sans (Poppins)", "background: I'd suggest a cozy home-studio scene". NEVER ask an open question with no offered option.\n- ONLY SKIP a question (and instead rely on what's already stated) when the user OR the client has SPECIFICALLY already given that answer — e.g. they already named the vibe, font style, colors, or background. Otherwise you ALWAYS offer the suggested option.\n- Be proactive: make confident suggestions. "I think warm amber + a clean sans-serif would trend well — want me to apply that?"\n- Cover vibe/colors, fonts, CTA/text, effects — one area per message, and only if still undecided.\n- NEVER offer: voice-over, music, sound effects, audio, narration, specific actors. Videos are silent — visuals only.\n- When the user says "generate", "let's go", "I'm ready", or "yes that's good": reply "Great, tap the wand to generate!" and set needsRefinement=false.\n- Always classify as "ai_assistant" and fill the "response" field. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
+      ? `\nCONSULT MODE: You are chatting with the user to refine their idea before generation. CRITICAL RULES:\n- NEVER ask a clarifying question about anything already answered in the conversation history OR listed in SETTLED DECISIONS below. Those are locked facts.\n- Never ask about UI-set controls (duration, voice, tone, platform, aspect ratio). If the user or SETTLED DECISIONS already states a duration, voice, or tone, treat it as final — do NOT ask "how long?", "what voice?", etc. again.\n- Ask at most ONE genuinely new clarifying question per reply, and only when the info is truly missing and not decided.\n- OFFER A CONCRETE SUGGESTED DEFAULT OPTION ON EVERY clarifying question you ask (vibe, colors, font, background, effects) — a ready-made pick the user can accept in one tap, with a 1-clause reason. Examples: "vibe: I'd suggest energetic & bold for this", "colors: I'd suggest warm amber + creams", "font: I'd suggest a bold rounded sans (Poppins)", "background: I'd suggest a cozy home-studio scene". NEVER ask an open question with no offered option.\n- ONLY SKIP a question (and instead rely on what's already stated) when the user OR the client has SPECIFICALLY already given that answer — e.g. they already named the vibe, font style, colors, or background. Otherwise you ALWAYS offer the suggested option.\n- Be proactive: make confident suggestions. "I think warm amber + a clean sans-serif would trend well — want me to apply that?"\n- Cover vibe/colors, fonts, CTA/text, effects — one area per message, and only if still undecided.\n- NEVER offer: voice-over, music, sound effects, audio, narration, specific actors. Videos are silent — visuals only.\n- When the user says "generate", "let's go", "I'm ready", or "yes that's good": reply "${consultGenerateReply(actionHint)}" and set needsRefinement=false.\n- Always classify as "ai_assistant" and fill the "response" field. NEVER classify as video_creation, image_creation, video_editing, image_editing, or final_rendering.`
       : '';
 
     return `You are the EmpireLaunch AI Router — a smart dispatcher that classifies user creative requests and routes them to the correct AI pipeline.

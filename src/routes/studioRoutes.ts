@@ -40,6 +40,7 @@ interface StudioRequest {
   voice?: 'female' | 'male' | 'none';       // Voiceover gender (shared control) — 'none' = NO voiceover (silent video)
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';  // Voiceover tone
   sourceImages?: string[];                  // Screenshot/image uploads as source visuals
+  actionHint?: string;                      // Studio-launch closing hint (suppressWand mode names the Launch Project button)
 }
 
 interface StudioResponse {
@@ -305,7 +306,7 @@ async function executeVideoPipeline(payload: VideoPipelinePayload): Promise<void
 
 router.post('/process', async (req: Request, res: Response) => {
   try {
-    const { userId, brandId, request, attachments, conversationHistory } = req.body as StudioRequest;
+    const { userId, brandId, request, attachments, conversationHistory, actionHint } = req.body as StudioRequest;
     const { voice, tone, duration } = req.body as StudioRequest;
     const mode: 'consult' | 'generate' = (req.body as StudioRequest).mode || 'generate';
 
@@ -350,6 +351,7 @@ router.post('/process', async (req: Request, res: Response) => {
       brandContext,
       conversationHistory,
       lockedFacts,
+      actionHint,
     });
 
     console.log(`[StudioRoute] Routed: ${decision.classification} ${decision.needsRefinement ? '(needs refinement)' : ''}`);
