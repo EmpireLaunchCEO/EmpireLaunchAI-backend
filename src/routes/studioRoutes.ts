@@ -1000,7 +1000,9 @@ router.get('/download/:id', async (req: Request, res: Response) => {
     const download = classifyDownload(creation, project);
     if (download.kind === 'not-found') return res.status(404).json({ error: 'Not found' });
     if (download.kind === 'no-media') {
-      const { status, body } = downloadFailureBody(idStr, 'no-media');
+      const { status, body } = downloadFailureBody(idStr, 'no-media', {
+        projectStatus: project?.status ?? null,
+      });
       return res.status(status).json(body);
     }
 
