@@ -5,7 +5,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
-import { soraVideoService } from './soraVideoService.js';
+import { soraVideoService, type SoraGenerationOptions } from './soraVideoService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
@@ -100,15 +100,21 @@ export class CinemaEngineService {
       const facialDna = await this.extractFacialDna(userId, inputPath);
 
       // Step 2: Try Sora 2 for direct video generation.
-      // NOTE: We intentionally do NOT pass a `duration` to Sora — the configured Sora
-      // endpoint rejects an arbitrary duration param (400 unknown parameter: duration).
-      // Target length (when requested) is honored in the fallback frame pipeline via
-      // frame pacing instead.
+      // NOTE: We do NOT pass a raw `duration` to Sora — the configured Sora endpoint
+      // rejects an arbitrary duration param (400 unknown parameter: duration). Instead
+      // we pass `needSeconds` so the owner 16|20 GATE resolves the tier: a 15s twin
+      // requests seconds:'16' (bills $1.60, not the $2.00 '20' default); a 30s twin
+      // stays on the '20' budget tier. Fallback frame pacing still honors the target
+      // length when Sora is unavailable, exactly as before.
       try {
         const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle, mood);
         console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
+        const soraOptions: SoraGenerationOptions = {};
+        if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+          soraOptions.needSeconds = Math.round(duration); // 15 -> gate '16' ($1.60); 30+ -> '20'
+        }
 
-        const soraResult = await soraVideoService.generateVideo(soraPrompt);
+        const soraResult = await soraVideoService.generateVideo(soraPrompt, soraOptions);
 
         if (soraResult.success && soraResult.videoPath) {
           // Copy Sora output to the expected cinema path

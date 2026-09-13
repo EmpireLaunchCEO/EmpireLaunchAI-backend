@@ -1662,7 +1662,7 @@ if (!skipGeneration) {
   async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
-      let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
+      let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraJob?.id ?? (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
       // Use the uploaded source image as the continuous subject. Where the provider
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
@@ -1715,7 +1715,7 @@ else {
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
             const sceneSeconds = Math.min(20, Math.round(scene.duration || 20));
-            sceneSoraVideoId = (scene.metadata as any)?.soraVideoId || sceneSoraVideoId;
+            sceneSoraVideoId = (scene.metadata as any)?.soraJob?.id ?? ((scene.metadata as any)?.soraVideoId || sceneSoraVideoId);
             const isImportant = Boolean(scene.metadata?.importantSora);
             soraResult = await soraVideoService.generateVideo(subjectPrompt, {
               userId: undefined,
@@ -1753,7 +1753,7 @@ else {
         const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime);
         assetUrl = uploaded.url || safeLocal;
       }
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraVideoId:sceneSoraVideoId}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
@@ -1767,7 +1767,8 @@ else {
    *  retry / backoff policy the legacy per-scene path used — the span makes budget
    *  calls EXACTLY: 1 take per block, every contiguous block scene slices from it.
    *  EXACTLY-ONCE (owner spec): the take's Sora video id is persisted in project
-   *  metadata (soraTakes[block]) the moment the API returns it, and a retry (even
+   *  metadata (soraJobs[block], shape {id, status, createdAt}) the moment the API
+   *  returns it, and a retry (even
    *  after a process restart) RESUMES that id via existingVideoId — never re-POST. */
   private async generateSoraTake(spanPrompt: string, span: SoraSpan, projectId: string): Promise<string> {
     const needSeconds = span.totalSeconds > 0 ? Math.round(span.totalSeconds) : 20;
@@ -1795,44 +1796,67 @@ else {
         },
       });
       if (soraResult.videoId) persistedVideoId = soraResult.videoId;
-      if (soraResult.success && soraResult.videoPath) return soraResult.videoPath;
+      if (soraResult.success && soraResult.videoPath) {
+        void this.markSoraJobStatus(projectId, span.soraBlock, 'completed');
+        return soraResult.videoPath;
+      }
       trace(`span_sora_attempt_failed block=${span.soraBlock} attempt=${attempt} error=${soraResult.error || 'no video path'} videoId=${persistedVideoId || 'none'}`);
     }
     throw new Error(`Sora span take ${span.soraBlock} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
   }
-  /** Persist a span take's Sora video id in project metadata (durable, exactly-once
-   *  resume across process restarts / retries). Best-effort: never fails the take. */
+  /** Persist a span take's Sora video id in project metadata under the plan-contract
+   *  key `soraJobs[block]` with the ratified shape {id, status, createdAt?} (durable,
+   *  exactly-once resume across process restarts / retries). Best-effort: never fails
+   *  the take. */
   private async persistSoraTakeVideoId(projectId: string, block: number, videoId: string): Promise<void> {
     try {
       const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
       if (!row) return;
       const meta = ((row.metadata as any) || {});
-      const soraTakes = { ...(((meta as any).soraTakes as Record<string, { videoId?: string }>) || {}) };
-      soraTakes[String(block)] = { videoId };
-      await db.update(schema.videoProjects).set({ metadata: { ...meta, soraTakes }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      const soraJobs = { ...(((meta as any).soraJobs as Record<string, { id?: string; status?: string; createdAt?: string }>) || {}) };
+      soraJobs[String(block)] = { id: videoId, status: 'in_progress', createdAt: new Date().toISOString() };
+      await db.update(schema.videoProjects).set({ metadata: { ...meta, soraJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
       trace(`span_sora_video_id_persisted project=${projectId} block=${block} id=${videoId}`);
     } catch (err: any) {
       trace(`span_sora_video_id_persist_failed project=${projectId} block=${block} error=${err?.message}`);
     }
   }
-  /** Load a persisted span take's Sora video id (exactly-once resume). */
+  /** Mark a span take's soraJob status (e.g. 'completed' after the take downloads).
+   *  Best-effort: never fails the take. */
+  private async markSoraJobStatus(projectId: string, block: number, status: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      const soraJobs = { ...(((meta as any).soraJobs as Record<string, { id?: string; status?: string; createdAt?: string }>) || {}) };
+      const job = soraJobs[String(block)];
+      if (!job?.id) return;
+      soraJobs[String(block)] = { ...job, status };
+      await db.update(schema.videoProjects).set({ metadata: { ...meta, soraJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+    } catch { /* best-effort */ }
+  }
+  /** Load a persisted span take's Sora video id (exactly-once resume). Reads the
+   *  plan-contract `soraJobs[block].id`, with a legacy fallback to the short-lived
+   *  `soraTakes[block].videoId` shape from the same day's earlier renders. */
   private async loadSoraTakeVideoId(projectId: string, block: number): Promise<string | undefined> {
     try {
       const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
-      const takes = ((row?.metadata as any)?.soraTakes) || {};
-      return takes[String(block)]?.videoId;
+      const meta = ((row?.metadata as any) || {});
+      const key = String(block);
+      return meta?.soraJobs?.[key]?.id ?? meta?.soraTakes?.[key]?.videoId;
     } catch {
       return undefined;
     }
   }
-  /** Persist a legacy-motion scene's Sora video id in the scene row metadata
+  /** Persist a legacy-motion scene's Sora video id in the scene row metadata under
+   *  the same shape as soraJobs — single scene job `soraJob: {id, status, createdAt?}`
    *  (exactly-once resume across retries / regenerateScene). Best-effort. */
   private async persistSceneSoraVideoId(sceneId: string, videoId: string): Promise<void> {
     try {
       const [row] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, sceneId)).limit(1);
       if (!row) return;
       const meta = ((row.metadata as any) || {});
-      await db.update(schema.videoScenes).set({ metadata: { ...meta, soraVideoId: videoId }, updatedAt: new Date() }).where(eq(schema.videoScenes.id, sceneId));
+      await db.update(schema.videoScenes).set({ metadata: { ...meta, soraJob: { id: videoId, status: 'in_progress', createdAt: new Date().toISOString() } }, updatedAt: new Date() }).where(eq(schema.videoScenes.id, sceneId));
       trace(`scene_sora_video_id_persisted scene=${sceneId} id=${videoId}`);
     } catch (err: any) {
       trace(`scene_sora_video_id_persist_failed scene=${sceneId} error=${err?.message}`);
