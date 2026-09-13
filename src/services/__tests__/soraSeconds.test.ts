@@ -30,14 +30,14 @@ test('snapSoraSeconds maps targets onto the official enum', () => {
   assert.equal(snapSoraSeconds(20), '20');
   assert.equal(snapSoraSeconds(21), '20'); // never exceeds 20s
   assert.equal(snapSoraSeconds(100), '20');
-  assert.equal(snapSoraSeconds(18), '16'); // nearest
+  assert.equal(snapSoraSeconds(18), '20'); // 18s needs >16s -> the 20s tier (gate)
   assert.equal(snapSoraSeconds(15), '16'); // nearest (round-half-up)
-  assert.equal(snapSoraSeconds(10), '8');  // tie 8|12 -> shorter (cost-honest)
-  assert.equal(snapSoraSeconds(6), '4');  // tie 4|8 -> shorter (cost-honest)
-  assert.equal(snapSoraSeconds(7), '8');  // nearest
-  assert.equal(snapSoraSeconds(3), '4');   // clamp
-  assert.equal(snapSoraSeconds(0), '4');   // clamp
-  assert.equal(snapSoraSeconds(NaN), '4'); // degenerate
+  assert.equal(snapSoraSeconds(6), '16');  // 6 -> 16 (gate: nearest of {16,20})
+  assert.equal(snapSoraSeconds(10), '16'); // 10 -> 16 (gate: 4/8/12 unreachable)
+  assert.equal(snapSoraSeconds(7), '16');  // 7 -> 16 (gate: nearest of {16,20})
+  assert.equal(snapSoraSeconds(3), '16');   // 3 -> 16 (gate clamps to the 16s tier)
+  assert.equal(snapSoraSeconds(0), '16');   // 0 -> 16 (clamp)
+  assert.equal(snapSoraSeconds(NaN), '20'); // degenerate -> '20' (gate default)
 });
 
 test('buildSoraCreateBody includes seconds and never duration', () => {
@@ -51,12 +51,18 @@ test('buildSoraCreateBody includes seconds and never duration', () => {
   assert.equal(bodyWithSize.size, '720x1280');
   assert.equal('duration' in bodyWithSize, false);
 
-  // No seconds option -> no seconds key; size is STILL explicit (owner: explicit
-  // size always — no call ever relies on the API default "4"/"720x1280").
+  // No seconds option -> gate DEFAULTS '20' (owner 2026-09-13: absent must
+  // never reach the API default "4" — that would silently bill a shorter length).
   const body2 = buildSoraCreateBody('sora-2', 'x', {});
-  assert.equal('seconds' in body2, false);
+  assert.equal(body2.seconds, '20', 'absent seconds -> gate default "20"');
   assert.equal('duration' in body2, false);
   assert.equal(body2.size, '720x1280', 'size is ALWAYS explicit even with no options');
+  // Short tiers THROW (fail-fast — a caller bug is loud, never a quiet 4s bill).
+  for (const bad of ['4', '8', '12'] as const) {
+    assert.throws(() => buildSoraCreateBody('sora-2', 'x', { seconds: bad }), /locked-out short tier/, `seconds:"${bad}" must throw`);
+  }
+  assert.equal(buildSoraCreateBody('sora-2', 'x', { seconds: '16' }).seconds, '16');
+  assert.equal(buildSoraCreateBody('sora-2', 'x', { seconds: '20' }).seconds, '20');
 });
 test('16|20 HARD GATE: seconds is "16" when block needs ≤16s, else "20" — NEVER 4/8/12', () => {
   // Owner-ratified Sora 2 spec: the short enum tiers are hard-locked out.

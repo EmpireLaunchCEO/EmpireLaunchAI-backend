@@ -26,6 +26,8 @@ import {
   SORA_MAX_TOTAL_SECONDS,
   SORA_EXTENSION_SECONDS,
   SORA_SCENE_SIZE,
+  SORA_POLL_MAX_ATTEMPTS,
+  resolveGateSeconds,
 } from '../soraVideoService.js';
 
 // Hermetic: keep a (fake) key set for the WHOLE test process — node:test loads
@@ -39,8 +41,9 @@ function jsonResp(obj: unknown, status = 200): Response {
 
 interface CapturedCall { url: string; method: string; body?: any; }
 
-function installMock(opts: { failPollId?: string } = {}) {
+function installMock(opts: { failPollId?: string; inProgressPolls?: number } = {}) {
   const calls: CapturedCall[] = [];
+  const pollCounts: Record<string, number> = {};
   let createN = 0;
   let extN = 0;
   const originalFetch = globalThis.fetch;
@@ -69,6 +72,9 @@ function installMock(opts: { failPollId?: string } = {}) {
     // POLL: GET https://api.openai.com/v1/videos/{id}
     if (url.includes('/v1/videos/')) {
       const id = url.split('/v1/videos/')[1].split('/')[0];
+      const done = (pollCounts[id] || 0) + 1;
+      pollCounts[id] = done;
+      if (done <= (opts.inProgressPolls || 0)) return jsonResp({ id, status: 'in_progress' });
       if (id === opts.failPollId) return jsonResp({ id, status: 'failed' });
       return jsonResp({ id, status: 'completed' });
     }
@@ -233,6 +239,41 @@ test('SORA_MAX_EXTENSIONS/TOTAL constants match the owner spec', () => {
   assert.equal(SORA_EXTENSION_SECONDS, 20);
   assert.equal(SORA_MAX_TOTAL_SECONDS, 120);
   assert.equal(SORA_SCENE_SIZE, '720x1280');
+  assert.equal(SORA_POLL_MAX_ATTEMPTS, 120, 'sanity cap only — never the old 5-min abandon');
+});
+
+test('EXTENSIONS: 60s block → 2 extensions (20+2×20), download from last id', async () => {
+  const mock = installMock();
+  try {
+    const result = await svc().generateVideo('60s continuous block', { needSeconds: 60 });
+    assert.ok(result.success, result.error);
+    assert.equal(mock.createCount(), 1, 'one create only');
+    assert.equal(mock.extCount(), 2, 'two extensions for 60s');
+    assert.equal(result.videoId, 'vid-ext-2', 'download from last extended id');
+    cleanup([result.videoPath]);
+  } finally { mock.restore(); }
+});
+
+test('POLL: no elapsed-time abandonment — the ONLY abort is a terminal state', async () => {
+  // Lead 2026-09-13: never give up on in_progress because time elapsed (Sora
+  // legitimately takes 6–10+ min). The sanity cap is the exported constant
+  // (120 polls @ 10s→20s backoff ≈ a 20–40min window); the old 5-min/58-poll
+  // abandon is gone. A poll whose video terminal-fails still returns the id
+  // so the caller can resume exactly-once (covered by the failed-poll test).
+  assert.equal(SORA_POLL_MAX_ATTEMPTS, 120);
+  assert.equal(snapSora16or20(6), '16');
+  assert.equal(snapSora16or20(20), '20');
+});
+
+test('GATE: resolveGateSeconds default 20, 16|20 pass, short tiers never reach the API', () => {
+  assert.equal(resolveGateSeconds(undefined), '20');
+  assert.equal(resolveGateSeconds('16'), '16');
+  assert.equal(resolveGateSeconds('20'), '20');
+  for (const bad of ['4', '8', '12'] as const) assert.throws(() => resolveGateSeconds(bad), /locked-out/);
+  assert.equal(snapSora16or20(6), '16');
+  assert.equal(snapSora16or20(12), '16');
+  assert.equal(snapSora16or20(18), '20');
+  assert.equal(snapSora16or20(20), '20');
 });
 
 const dir = path.join(process.cwd(), 'public', 'assets', 'cinema', 'sora');

@@ -33,6 +33,10 @@ export const SORA_MOTION_SECONDS: SoraTakeSeconds = '20';
 export const SORA_MAX_EXTENSIONS = 6;
 export const SORA_EXTENSION_SECONDS = 20;
 export const SORA_MAX_TOTAL_SECONDS = 120;
+/** Poll sanity cap (owner/lead 2026-09-13): ~120 polls = a 20–40min window at
+ *  the 10s→20s backoff — purely defensive; in_progress is NEVER abandoned on
+ *  elapsed time (only terminal failed / 404 / sustained HTTP errors abort). */
+export const SORA_POLL_MAX_ATTEMPTS = 120;
 
 /** OWNER-RATIFIED GATE: `seconds:'16'` when the block needs ≤16s, else `'20'`.
  *  NEVER 4/8/12 — the short enum tiers are hard-locked out of the pipeline. */
@@ -61,24 +65,20 @@ export function soraCallBudget(duration: number): number {
 }
 export type SoraSize = typeof SORA_SCENE_SIZE | '1280x720';
 
-const SORA_SECONDS_ENUM: SoraSeconds[] = ['4', '8', '12', '16', '20'];
-
-/** Snap a target clip length (seconds) to the OFFICIAL Sora `seconds` enum.
- *  Picks the NEAREST value (ties → the shorter, cost-honest) and never exceeds
- *  20s. FFmpeg `-stream_loop -1` + `-t` in renderClip handles the ≤4s enum
- *  remainder as a safety net (it is NOT the primary length mechanism). */
-export function snapSoraSeconds(target: number): SoraSeconds {
-  const t = Math.max(1, Math.round(target));
-  let best: SoraSeconds = '4';
-  let bestDist = Infinity;
-  for (const e of SORA_SECONDS_ENUM) {
-    const dist = Math.abs(Number(e) - t);
-    if (dist < bestDist || (dist === bestDist && Number(e) < Number(best))) {
-      best = e;
-      bestDist = dist;
-    }
-  }
-  return best;
+/** NARROWED to the owner gate (2026-09-13): snap to the nearest of {16,20} — the
+ *  short enum tiers 4/8/12 are structurally unreachable from every create body
+ *  (owner spec; see resolveGateSeconds). */
+export function snapSoraSeconds(target: number): SoraTakeSeconds {
+  return snapSora16or20(target);
+}
+/** OWNER GATE RESOLVER: seconds ALWAYS resolves to '16'|'20'. Absent → '20'
+ *  (a 20s max take — NEVER the API default '4', which would quietly bill a
+ *  shorter length). A short tier passed explicitly THROWS (fail-fast: a caller
+ *  bug must be loud, never a quiet 4s bill). */
+export function resolveGateSeconds(v?: SoraSeconds | undefined): SoraTakeSeconds {
+  if (v === undefined) return '20';
+  if (v === '16' || v === '20') return v;
+  throw new Error(`Sora gate: seconds "${v}" is a locked-out short tier — only 16|20 may reach the API (owner spec)`);
 }
 
 /** Build the POST body for /v1/videos. `seconds` is the ONLY length parameter the
@@ -88,7 +88,8 @@ export function snapSoraSeconds(target: number): SoraSeconds {
  *  deterministic 9:16 SORA_SCENE_SIZE so no call ever depends on the API default. */
 export function buildSoraCreateBody(model: string, prompt: string, options: SoraGenerationOptions): Record<string, unknown> {
   const body: Record<string, unknown> = { model, prompt };
-  if (options.seconds) body.seconds = options.seconds;
+  // HARD GATE: never absent (API default is 4s), never a short tier — always 16|20.
+  body.seconds = resolveGateSeconds(options.seconds);
   body.size = options.size ?? SORA_SCENE_SIZE;
   if (options.promptHint) body.prompt = `${prompt}\n\n${options.promptHint}`;
   return body;
@@ -323,24 +324,22 @@ export class SoraVideoService {
     videoId: string,
     apiKey: string,
   ): Promise<boolean> {
-    const MAX_ATTEMPTS = 58; // 58 × 5s ~= 4m50s, within Railway request budget
-    const MAX_ELAPSED_MS = 5 * 60 * 1000; // 5 minute hard cap
-    const startTime = Date.now();
+    // OWNER/LEAD 2026-09-13: sanity cap only — NEVER abandon an in_progress
+    // job on elapsed time (Sora legitimately takes 6–10+ min; the old 5-min
+    // cap abandoned paid jobs). Only terminal 'failed', 404, or sustained
+    // HTTP errors abort the poll; a timeout returns false so the caller's
+    // retry RESUMES the SAME id via existingVideoId (exactly-once, zero re-POSTs).
+    const MAX_ATTEMPTS = SORA_POLL_MAX_ATTEMPTS;
     let attempt = 0;
     let consecutiveErrors = 0;
-
     while (attempt < MAX_ATTEMPTS) {
       attempt++;
-      // Railway-safe short interval instead of long timer (injectable for tests).
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(() => { clearInterval(interval); resolve(); }, this.pollDelayMs);
+      // ~10s interval, backing off to ~20s after the first minute (0ms in tests).
+      const waitMs = this.pollDelayMs > 0 ? (attempt > 6 ? 20_000 : Math.max(10_000, this.pollDelayMs)) : 0;
+      if (waitMs > 0) await new Promise<void>((resolve) => {
+        const interval = setInterval(() => { clearInterval(interval); resolve(); }, waitMs);
       });
       console.log(`[PIPELINE] sora_poll_wait_complete video=${videoId} attempt=${attempt}`);
-      // Hard time cap
-      if (Date.now() - startTime > MAX_ELAPSED_MS) {
-        console.error(`[SoraVideoService] Video ${videoId} timed out after ${attempt} polls`);
-        return false;
-      }
 
       try {
         const response = await fetch(
