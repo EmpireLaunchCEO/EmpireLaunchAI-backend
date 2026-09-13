@@ -10,7 +10,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapSoraSeconds, buildSoraCreateBody, soraVideoService, SORA_SCENE_SIZE, SORA_MOTION_SECONDS } from '../soraVideoService.js';
+import { snapSoraSeconds, snapSora16or20, buildSoraCreateBody, soraVideoService, SORA_SCENE_SIZE, SORA_MOTION_SECONDS } from '../soraVideoService.js';
+// Hermetic: the service returns early without OPENAI_API_KEY; the mocked-fetch
+// test below needs a (fake) key present so the flow reaches the fetch mock.
+if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = 'test-key-for-unit-tests';
 test('SORA_MOTION_SECONDS = the owner 20s max single-take policy', () => {
   // Owner directive (live): EVERY Scene-Based motion (Sora) call requests the 20s
   // MAX via the official `seconds` enum — never a snapped shorter value. renderClip
@@ -27,14 +30,14 @@ test('snapSoraSeconds maps targets onto the official enum', () => {
   assert.equal(snapSoraSeconds(20), '20');
   assert.equal(snapSoraSeconds(21), '20'); // never exceeds 20s
   assert.equal(snapSoraSeconds(100), '20');
-  assert.equal(snapSoraSeconds(18), '16'); // nearest
+  assert.equal(snapSoraSeconds(18), '20'); // 18s needs >16s -> the 20s tier (gate)
   assert.equal(snapSoraSeconds(15), '16'); // nearest (round-half-up)
-  assert.equal(snapSoraSeconds(10), '8');  // tie 8|12 -> shorter (cost-honest)
-  assert.equal(snapSoraSeconds(6), '4');  // tie 4|8 -> shorter (cost-honest)
-  assert.equal(snapSoraSeconds(7), '8');  // nearest
-  assert.equal(snapSoraSeconds(3), '4');   // clamp
-  assert.equal(snapSoraSeconds(0), '4');   // clamp
-  assert.equal(snapSoraSeconds(NaN), '4'); // degenerate
+  assert.equal(snapSoraSeconds(6), '16');  // 6 -> 16 (gate: nearest of {16,20})
+  assert.equal(snapSoraSeconds(10), '16'); // 10 -> 16 (gate: 4/8/12 unreachable)
+  assert.equal(snapSoraSeconds(7), '16');  // 7 -> 16 (gate: nearest of {16,20})
+  assert.equal(snapSoraSeconds(3), '16');   // 3 -> 16 (gate clamps to the 16s tier)
+  assert.equal(snapSoraSeconds(0), '16');   // 0 -> 16 (clamp)
+  assert.equal(snapSoraSeconds(NaN), '20'); // degenerate -> '20' (gate default)
 });
 
 test('buildSoraCreateBody includes seconds and never duration', () => {
@@ -48,10 +51,27 @@ test('buildSoraCreateBody includes seconds and never duration', () => {
   assert.equal(bodyWithSize.size, '720x1280');
   assert.equal('duration' in bodyWithSize, false);
 
-  // No seconds option -> no seconds key (API default "4" applies).
+  // No seconds option -> gate DEFAULTS '20' (owner 2026-09-13: absent must
+  // never reach the API default "4" — that would silently bill a shorter length).
   const body2 = buildSoraCreateBody('sora-2', 'x', {});
-  assert.equal('seconds' in body2, false);
+  assert.equal(body2.seconds, '20', 'absent seconds -> gate default "20"');
   assert.equal('duration' in body2, false);
+  assert.equal(body2.size, '720x1280', 'size is ALWAYS explicit even with no options');
+  // Short tiers THROW (fail-fast — a caller bug is loud, never a quiet 4s bill).
+  for (const bad of ['4', '8', '12'] as const) {
+    assert.throws(() => buildSoraCreateBody('sora-2', 'x', { seconds: bad }), /locked-out short tier/, `seconds:"${bad}" must throw`);
+  }
+  assert.equal(buildSoraCreateBody('sora-2', 'x', { seconds: '16' }).seconds, '16');
+  assert.equal(buildSoraCreateBody('sora-2', 'x', { seconds: '20' }).seconds, '20');
+});
+test('16|20 HARD GATE: seconds is "16" when block needs ≤16s, else "20" — NEVER 4/8/12', () => {
+  // Owner-ratified Sora 2 spec: the short enum tiers are hard-locked out.
+  for (const need of [1, 6, 8, 12, 15, 16]) assert.equal(snapSora16or20(need), '16', `need=${need} -> 16`);
+  for (const need of [17, 18, 20, 21, 30, 60, 120, 1000]) assert.equal(snapSora16or20(need), '20', `need=${need} -> 20`);
+  assert.equal(snapSora16or20(NaN), '20', 'degenerate input defaults to a 20s take');
+  assert.equal(snapSora16or20(-5), '16', 'clamped to ≥1s -> 16');
+  const out = ['16', '20'];
+  assert.ok(!out.includes('4') && !out.includes('8') && !out.includes('12'), 'short tiers are unreachable');
 });
 
 test('generateVideo POSTs seconds:"20" for the important block (mocked fetch)', async () => {
