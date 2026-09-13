@@ -170,7 +170,9 @@ test('EXTENSIONS: 30s block → 1 create (20s) + exactly 1 extension, download f
     assert.equal(mock.extCount(), 1, 'one extension to reach 30s');
     const ext = mock.calls.find(c => c.method === 'POST' && c.url.includes('/extensions'));
     assert.ok(ext, 'extension POST captured');
-    assert.ok(String(ext.url).includes('/vid-create-1/extensions'), 'extension chains off the initial id');
+    assert.ok(String(ext.url).endsWith('/v1/videos/extensions'), 'POST /v1/videos/extensions — NOT /v1/videos/{id}/extensions');
+    assert.equal(ext.body.video, 'vid-create-1', 'source video id goes in the BODY');
+    assert.equal(ext.body.seconds, '20', 'extension requests the +20s gate-allowed tier');
     assert.ok(ext.body?.prompt && String(ext.body.prompt).length > 20, 'extension carries a continuity prompt');
     assert.equal(result.videoId, 'vid-ext-1', 'final id owns the extended content');
     const content = mock.calls.find(c => c.url.endsWith('/content'));
@@ -224,11 +226,12 @@ test('onVideoCreated fires in order with ids BEFORE polling (initial + each exte
   } finally { mock.restore(); }
 });
 
-test('buildSoraExtensionBody ships only a continuity prompt (no invented params)', () => {
-  const body = buildSoraExtensionBody('keep the same camera move');
+test('buildSoraExtensionBody ships the SDK shape { prompt, seconds, video } for POST /v1/videos/extensions', () => {
+  const body = buildSoraExtensionBody('keep the same camera move', 'vid-src-1');
   assert.ok(String(body.prompt).includes('Seamlessly continue'));
   assert.ok(String(body.prompt).includes('keep the same camera move'));
-  assert.equal('seconds' in body, false, 'extension length is fixed at +20s by the endpoint');
+  assert.equal(body.seconds, '20', 'extension always requests the +20s gate-allowed tier');
+  assert.equal(body.video, 'vid-src-1', 'source video id in the body (VideoExtendParams contract)');
   assert.equal('size' in body, false);
   assert.equal('duration' in body, false);
 });

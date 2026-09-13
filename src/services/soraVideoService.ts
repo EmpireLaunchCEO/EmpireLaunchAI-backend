@@ -28,7 +28,8 @@ export const SORA_SCENE_SIZE = '720x1280' as const;
 export const SORA_MOTION_SECONDS: SoraTakeSeconds = '20';
 
 /** Extensions API (owner-ratified Sora 2 spec): an initial take can be extended
- *  with POST /v1/videos/{id}/extensions — up to SORA_MAX_EXTENSIONS calls, each
+ *  with POST /v1/videos/extensions (video id in the BODY — OpenAI SDK
+ *  VideoExtendParams {prompt, seconds, video}) — up to SORA_MAX_EXTENSIONS calls, each
  *  adding SORA_EXTENSION_SECONDS, hard-capped at SORA_MAX_TOTAL_SECONDS total. */
 export const SORA_MAX_EXTENSIONS = 6;
 export const SORA_EXTENSION_SECONDS = 20;
@@ -95,17 +96,22 @@ export function buildSoraCreateBody(model: string, prompt: string, options: Sora
   return body;
 }
 
-/** Build the POST body for /v1/videos/{id}/extensions (owner-ratified Sora 2
- *  spec). Each extension call adds SORA_EXTENSION_SECONDS (20s) of CONTINUOUS
- *  take — we send ONLY the continuity prompt (the docs example payload); length
- *  is fixed at +20s per call by the endpoint, so no length/size params are sent
- *  (avoids inventing parameters the live API may reject). */
-export function buildSoraExtensionBody(continuityHint?: string): Record<string, unknown> {
+/** Build the POST body for POST /v1/videos/extensions (owner-ratified Sora 2
+ *  spec, verified against openai-node VideoExtendParams 2026-09-13):
+ *  { prompt, seconds, video } — the SOURCE video id goes in the BODY, not the
+ *  URL (POST /v1/videos/extensions (id in BODY) does not exist and would 400/404 live).
+ *  Each call extends by SORA_EXTENSION_SECONDS (20s) of CONTINUOUS take; we
+ *  always request the gate-allowed '20' tier (max continuity per call, fewer
+ *  calls under the 6-call / 120s budget — per-extension billing is a FLAGGED
+ *  cost delta: each call bills like a generation up to its own length). */
+export function buildSoraExtensionBody(continuityHint: string | undefined, videoId: string): SoraExtensionBody {
   const prompt = continuityHint && continuityHint.trim().length > 0
     ? `Seamlessly continue the video from its final frame — extend the same camera work, lighting, and subject without cuts. ${continuityHint.trim()}`
     : 'Seamlessly continue the video from its final frame — extend the same camera work, lighting, and subject without cuts.';
-  return { prompt };
+  const seconds: SoraTakeSeconds = SORA_EXTENSION_SECONDS >= 20 ? '20' : snapSora16or20(SORA_EXTENSION_SECONDS);
+  return { prompt, seconds, video: videoId };
 }
+export interface SoraExtensionBody { prompt: string; seconds: SoraTakeSeconds; video: string; }
 
 export interface SoraGenerationOptions {
   userId?: string;        // For R2 upload
@@ -182,7 +188,7 @@ export class SoraVideoService {
    *      timeout/failure NEVER re-POSTs the same block). `onVideoCreated` fires
    *      with each new id the moment the API returns it (durable persistence);
    *      the failure result also carries `videoId` so callers can persist late.
-   *  (3) EXTENSIONS — when `needSeconds` > 20, POST /v1/videos/{id}/extensions
+   *  (3) EXTENSIONS — when `needSeconds` > 20, POST /v1/videos/extensions (id in BODY)
    *      (+SORA_EXTENSION_SECONDS per call, ≤ SORA_MAX_EXTENSIONS, hard cap
    *      SORA_MAX_TOTAL_SECONDS) for one CONTINUOUS take longer than a clip; the
    *      final content is downloaded from the last successful extension id.
@@ -260,7 +266,7 @@ export class SoraVideoService {
         extensionIndex < SORA_MAX_EXTENSIONS &&
         producedSeconds + SORA_EXTENSION_SECONDS <= SORA_MAX_TOTAL_SECONDS
       ) {
-        const extUrl = `https://api.openai.com/v1/videos/${currentVideoId}/extensions`;
+        const extUrl = 'https://api.openai.com/v1/videos/extensions';
         console.log(`[PIPELINE] sora_extension_start id=${currentVideoId} ext=${extensionIndex + 1} produced=${producedSeconds}s need=${needSeconds}s`);
         const extResponse = await fetch(extUrl, {
           method: 'POST',
@@ -268,7 +274,7 @@ export class SoraVideoService {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,
           },
-          body: JSON.stringify(buildSoraExtensionBody(options.promptHint)),
+          body: JSON.stringify(buildSoraExtensionBody(options.promptHint, currentVideoId)),
           signal: AbortSignal.timeout(60000),
         });
         if (!extResponse.ok) {
@@ -317,7 +323,9 @@ export class SoraVideoService {
 
   /**
    * Poll GET /v1/videos/{id} until status is "completed" or "failed".
-   * No artificial attempt cap — relies on 5-min failsafe in studioRoutes.ts.
+   * Never abandons in_progress on elapsed time (lead 2026-09-13) — only
+   * terminal 'failed', 404, or sustained HTTP errors abort; the long-running
+   * id survives restarts via the caller's persisted videoId (exactly-once).
    * Returns true on completion, false on failure.
    */
   private async pollVideo(
