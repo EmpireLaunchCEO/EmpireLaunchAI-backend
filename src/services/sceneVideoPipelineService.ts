@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { soraVideoService, SORA_MOTION_SECONDS, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
+import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -44,6 +44,22 @@ export function shouldGenerateSceneNarration(narration?: string | null, voice?: 
 const SCENE_SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
 const SCENE_SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempts 1/2/3
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
+/**
+ * Variant-export loud-failure policy (owner run b5f88145: variant pass silently
+ * produced count=0 because the local master was unlinked by uploadLocalFile()).
+ * Variants are a product feature — a 0-variant result while the source exists
+ * and R2 is up is a DEFECT and must surface in trace + project metadata, never
+ * a silent skip. Pure + deterministic (unit-tested, media-free).
+ */
+export function variantExportIssue(
+  resultsLength: number,
+  r2Available: boolean,
+  sourcePresent: boolean,
+): string | undefined {
+  if (!r2Available) return undefined; // R2 off → variant stage legitimately no-ops (service traces it)
+  if (!sourcePresent) return 'variant source missing before export'; // impossible after the reorder
+  return resultsLength > 0 ? undefined : `0/${VIDEO_EXPORT_VARIANTS.length} variants exported`;
+}
 /** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -1409,7 +1425,7 @@ if (!skipGeneration) {
         try {
           const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
           const takePath = await withDeadline(
-            this.generateSoraTake(spanPrompt, span),
+            this.generateSoraTake(spanPrompt, span, projectId),
             SCENE_DEADLINE_MS,
             `Sora span ${span.soraBlock}`,
           );
@@ -1514,13 +1530,41 @@ if (!skipGeneration) {
         trace(`render_qc project=${projectId} ok=${qc.ok} flags=${(qc.flags || []).join('|') || 'none'}`);
         if (!qc.ok) trace(`render_qc_warn project=${projectId} flags=${(qc.flags || []).join('|')}`);
       } catch (qcErr: any) { trace(`render_qc_error project=${projectId} err=${qcErr?.message}`); }
+      // ── EXPORT VARIANTS FIRST — BEFORE the master R2 upload ──────────────
+      // uploadLocalFile() fs.unlinkSync()s the local source after a successful
+      // upload, so any variant pass that runs after the master upload is
+      // GUARANTEED to find no source → silent count=0 (owner run b5f88145,
+      // "[EXPORT_VARIANTS] source missing"). Generate the 16:9/1:1/2:3 refits
+      // from the still-present local master first; each variant is uploaded to
+      // R2 by the export service itself.
+      let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
+      const variantSourcePresent = fs.existsSync(assembled);
+      try {
+        variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
+      } catch (varErr: any) {
+        trace(`export_variants_failed project=${projectId} err=${varErr?.message}`);
+      }
+      const variantIssue = variantExportIssue(variantResults.length, r2Storage.isAvailable, variantSourcePresent);
+      if (variantIssue) {
+        // NEVER silent: variants are a product feature — 0 variants while the
+        // source exists and R2 is up is a defect, surfaced in trace + metadata.
+        trace(`export_variants_EMPTY project=${projectId} error=${variantIssue}`);
+      } else if (variantResults.length > 0) {
+        trace(`export_variants_ok project=${projectId} count=${variantResults.length}`);
+      }
       let finalUrl=assembled;
       let primaryR2Key: string | undefined;
       if(r2Storage.isAvailable) {
         try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; primaryR2Key=uploaded.r2Key; }
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
-      await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+      const completeMeta: Record<string, any> = {
+        sceneCount: complete.length,
+        totalDuration: complete.reduce((a,s)=>a+(s.duration||0),0),
+        variantExportCount: variantResults.length,
+      };
+      if (variantIssue) completeMeta.variantExportError = variantIssue;
+      await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:completeMeta}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
       // ── Deliver to Operations page AS DRAFTS (owner auto-save change) ────
       //    Videos + variants do NOT auto-go to the Library. They land in Operations
       //    as draft approval rows; the client previews/downloads there and taps
@@ -1577,13 +1621,8 @@ if (!skipGeneration) {
         // ── Export variants (16:9, 1:1, 2:3): pure FFmpeg contain/pad refits from the
         //    assembled master — no AI calls, no crop. Each becomes its own draft
         //    approval row (NOT a creation/Library row) with a distinct ratio label.
-        let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
-        try {
-          variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
-          trace(`export_variants_ok project=${projectId} count=${variantResults.length}`);
-        } catch (varErr: any) {
-          trace(`export_variants_failed project=${projectId} err=${varErr?.message}`);
-        }
+        // Variants were generated + uploaded above (BEFORE the master upload
+        // unlinked the local source) — persist their draft rows here.
         for (const vr of variantResults) {
           try {
             await db.insert(schema.approvals).values({
@@ -1623,6 +1662,7 @@ if (!skipGeneration) {
   async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
+      let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
       // Use the uploaded source image as the continuous subject. Where the provider
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
@@ -1674,22 +1714,25 @@ else {
               trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
-            const sceneSeconds = Math.min(20, scene.duration || 20);
+            const sceneSeconds = Math.min(20, Math.round(scene.duration || 20));
+            sceneSoraVideoId = (scene.metadata as any)?.soraVideoId || sceneSoraVideoId;
             const isImportant = Boolean(scene.metadata?.importantSora);
             soraResult = await soraVideoService.generateVideo(subjectPrompt, {
               userId: undefined,
-              // 20s MAX SINGLE-TAKE POLICY (owner directive, live): EVERY motion scene
-              // requests the Sora 2 `seconds` MAX ("20" — enum 4|8|12|16|20; the live
-              // API rejects `duration` and does not change length from prose). Never a
-              // shorter snapped value: scenes become continuous single takes, and
-              // renderClip trims with `-t` to the scene window, so a 20s shot into a
-              // shorter scene yields smooth continuous motion — NO loop-padding, no
-              // repeat, no transition judder. size is set EXPLICITLY to SORA_SCENE_SIZE
-              // so the 9:16 contract is deterministic.
-              seconds: SORA_MOTION_SECONDS,
-              size: isImportant ? SORA_SCENE_SIZE : undefined,
+              // 16|20 GATE (owner Sora 2 spec, supersedes the old always-20 policy):
+              // a scene that needs ≤16s requests seconds:'16', else '20' — a single
+              // take FFmpeg trims with `-t` to the scene window (continuous motion,
+              // no loop-padding, no repeat). NEVER 4/8/12. Explicit size ALWAYS.
+              seconds: snapSora16or20(sceneSeconds),
+              needSeconds: sceneSeconds,
+              existingVideoId: sceneSoraVideoId, // exactly-once: never re-POST a known id
+              size: SORA_SCENE_SIZE,
               // secondary content-continuity steer only (cannot change clip length).
-              promptHint: isImportant ? `Render ONE continuous 20-second single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
+              promptHint: isImportant ? `Render ONE continuous single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
+              onVideoCreated: (id) => {
+                sceneSoraVideoId = id;
+                void this.persistSceneSoraVideoId(scene.id, id);
+              },
             });
             if (soraResult.success && soraResult.videoPath) break;
             trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
@@ -1710,7 +1753,7 @@ else {
         const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime);
         assetUrl = uploaded.url || safeLocal;
       }
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraVideoId:sceneSoraVideoId}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
@@ -1720,10 +1763,16 @@ else {
    * (neuralFeedbackAutoFixService) can re-voice an edited line in place without a
    * full scene re-render. $0-ish: ONE gpt-audio call (~micro-cost per line).
    */
-/** Generate ONE 20s Sora take for a whole span (soraBlock) with the same retry /
-   *  backoff policy the legacy per-scene path used — the span makes budget calls
-   *  EXACTLY: 1 take per block, every contiguous block scene slices from it. */
-  private async generateSoraTake(spanPrompt: string, span: SoraSpan): Promise<string> {
+/** Generate ONE Sora take (16|20 GATE) for a whole span (soraBlock) with the same
+   *  retry / backoff policy the legacy per-scene path used — the span makes budget
+   *  calls EXACTLY: 1 take per block, every contiguous block scene slices from it.
+   *  EXACTLY-ONCE (owner spec): the take's Sora video id is persisted in project
+   *  metadata (soraTakes[block]) the moment the API returns it, and a retry (even
+   *  after a process restart) RESUMES that id via existingVideoId — never re-POST. */
+  private async generateSoraTake(spanPrompt: string, span: SoraSpan, projectId: string): Promise<string> {
+    const needSeconds = span.totalSeconds > 0 ? Math.round(span.totalSeconds) : 20;
+    const seconds = snapSora16or20(needSeconds); // 16|20 HARD GATE — never 4/8/12
+    let persistedVideoId: string | undefined = await this.loadSoraTakeVideoId(projectId, span.soraBlock);
     for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
         const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
@@ -1732,17 +1781,62 @@ else {
       }
       const soraResult = await soraVideoService.generateVideo(spanPrompt, {
         userId: undefined,
-        // 20s MAX SINGLE-TAKE POLICY: EVERY Sora call requests the official `seconds`
-        // max ("20") — one continuous take; FFmpeg slices it contiguously across the
+        // 16|20 GATE (owner Sora 2 spec): a block that needs ≤16s requests seconds:'16',
+        // else '20' — one continuous take; FFmpeg slices it contiguously across the
         // span's scene windows (never snapped, never disjoint, never loop-padded).
-        seconds: SORA_MOTION_SECONDS,
-        size: SORA_SCENE_SIZE,
-        promptHint: `Render ONE continuous 20-second single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${span.totalSeconds}s of scene windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
+        seconds,
+        needSeconds,
+        existingVideoId: persistedVideoId, // exactly-once: never re-POST a known id
+        size: SORA_SCENE_SIZE,             // explicit size ALWAYS (owner)
+        promptHint: `Render ONE continuous single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${needSeconds}s of scene windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
+        onVideoCreated: (id) => {
+          persistedVideoId = id;
+          void this.persistSoraTakeVideoId(projectId, span.soraBlock, id);
+        },
       });
+      if (soraResult.videoId) persistedVideoId = soraResult.videoId;
       if (soraResult.success && soraResult.videoPath) return soraResult.videoPath;
-      trace(`span_sora_attempt_failed block=${span.soraBlock} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
+      trace(`span_sora_attempt_failed block=${span.soraBlock} attempt=${attempt} error=${soraResult.error || 'no video path'} videoId=${persistedVideoId || 'none'}`);
     }
     throw new Error(`Sora span take ${span.soraBlock} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
+  }
+  /** Persist a span take's Sora video id in project metadata (durable, exactly-once
+   *  resume across process restarts / retries). Best-effort: never fails the take. */
+  private async persistSoraTakeVideoId(projectId: string, block: number, videoId: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      const soraTakes = { ...(((meta as any).soraTakes as Record<string, { videoId?: string }>) || {}) };
+      soraTakes[String(block)] = { videoId };
+      await db.update(schema.videoProjects).set({ metadata: { ...meta, soraTakes }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      trace(`span_sora_video_id_persisted project=${projectId} block=${block} id=${videoId}`);
+    } catch (err: any) {
+      trace(`span_sora_video_id_persist_failed project=${projectId} block=${block} error=${err?.message}`);
+    }
+  }
+  /** Load a persisted span take's Sora video id (exactly-once resume). */
+  private async loadSoraTakeVideoId(projectId: string, block: number): Promise<string | undefined> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      const takes = ((row?.metadata as any)?.soraTakes) || {};
+      return takes[String(block)]?.videoId;
+    } catch {
+      return undefined;
+    }
+  }
+  /** Persist a legacy-motion scene's Sora video id in the scene row metadata
+   *  (exactly-once resume across retries / regenerateScene). Best-effort. */
+  private async persistSceneSoraVideoId(sceneId: string, videoId: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, sceneId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      await db.update(schema.videoScenes).set({ metadata: { ...meta, soraVideoId: videoId }, updatedAt: new Date() }).where(eq(schema.videoScenes.id, sceneId));
+      trace(`scene_sora_video_id_persisted scene=${sceneId} id=${videoId}`);
+    } catch (err: any) {
+      trace(`scene_sora_video_id_persist_failed scene=${sceneId} error=${err?.message}`);
+    }
   }
   private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
     return generateSceneAudio(text, userId, sceneId, voice, tone);
