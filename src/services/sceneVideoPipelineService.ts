@@ -44,6 +44,22 @@ export function shouldGenerateSceneNarration(narration?: string | null, voice?: 
 const SCENE_SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
 const SCENE_SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempts 1/2/3
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
+/**
+ * Variant-export loud-failure policy (owner run b5f88145: variant pass silently
+ * produced count=0 because the local master was unlinked by uploadLocalFile()).
+ * Variants are a product feature — a 0-variant result while the source exists
+ * and R2 is up is a DEFECT and must surface in trace + project metadata, never
+ * a silent skip. Pure + deterministic (unit-tested, media-free).
+ */
+export function variantExportIssue(
+  resultsLength: number,
+  r2Available: boolean,
+  sourcePresent: boolean,
+): string | undefined {
+  if (!r2Available) return undefined; // R2 off → variant stage legitimately no-ops (service traces it)
+  if (!sourcePresent) return 'variant source missing before export'; // impossible after the reorder
+  return resultsLength > 0 ? undefined : `0/${VIDEO_EXPORT_VARIANTS.length} variants exported`;
+}
 /** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -1514,13 +1530,41 @@ if (!skipGeneration) {
         trace(`render_qc project=${projectId} ok=${qc.ok} flags=${(qc.flags || []).join('|') || 'none'}`);
         if (!qc.ok) trace(`render_qc_warn project=${projectId} flags=${(qc.flags || []).join('|')}`);
       } catch (qcErr: any) { trace(`render_qc_error project=${projectId} err=${qcErr?.message}`); }
+      // ── EXPORT VARIANTS FIRST — BEFORE the master R2 upload ──────────────
+      // uploadLocalFile() fs.unlinkSync()s the local source after a successful
+      // upload, so any variant pass that runs after the master upload is
+      // GUARANTEED to find no source → silent count=0 (owner run b5f88145,
+      // "[EXPORT_VARIANTS] source missing"). Generate the 16:9/1:1/2:3 refits
+      // from the still-present local master first; each variant is uploaded to
+      // R2 by the export service itself.
+      let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
+      const variantSourcePresent = fs.existsSync(assembled);
+      try {
+        variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
+      } catch (varErr: any) {
+        trace(`export_variants_failed project=${projectId} err=${varErr?.message}`);
+      }
+      const variantIssue = variantExportIssue(variantResults.length, r2Storage.isAvailable, variantSourcePresent);
+      if (variantIssue) {
+        // NEVER silent: variants are a product feature — 0 variants while the
+        // source exists and R2 is up is a defect, surfaced in trace + metadata.
+        trace(`export_variants_EMPTY project=${projectId} error=${variantIssue}`);
+      } else if (variantResults.length > 0) {
+        trace(`export_variants_ok project=${projectId} count=${variantResults.length}`);
+      }
       let finalUrl=assembled;
       let primaryR2Key: string | undefined;
       if(r2Storage.isAvailable) {
         try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; primaryR2Key=uploaded.r2Key; }
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
-      await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:{sceneCount:complete.length,totalDuration:complete.reduce((a,s)=>a+(s.duration||0),0)}}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+      const completeMeta: Record<string, any> = {
+        sceneCount: complete.length,
+        totalDuration: complete.reduce((a,s)=>a+(s.duration||0),0),
+        variantExportCount: variantResults.length,
+      };
+      if (variantIssue) completeMeta.variantExportError = variantIssue;
+      await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:completeMeta}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
       // ── Deliver to Operations page AS DRAFTS (owner auto-save change) ────
       //    Videos + variants do NOT auto-go to the Library. They land in Operations
       //    as draft approval rows; the client previews/downloads there and taps
@@ -1577,13 +1621,8 @@ if (!skipGeneration) {
         // ── Export variants (16:9, 1:1, 2:3): pure FFmpeg contain/pad refits from the
         //    assembled master — no AI calls, no crop. Each becomes its own draft
         //    approval row (NOT a creation/Library row) with a distinct ratio label.
-        let variantResults: { variant: typeof VIDEO_EXPORT_VARIANTS[number]; fileUrl: string; r2Key?: string }[] = [];
-        try {
-          variantResults = await generateVideoExportVariants(assembled, userId, 'video-projects');
-          trace(`export_variants_ok project=${projectId} count=${variantResults.length}`);
-        } catch (varErr: any) {
-          trace(`export_variants_failed project=${projectId} err=${varErr?.message}`);
-        }
+        // Variants were generated + uploaded above (BEFORE the master upload
+        // unlinked the local source) — persist their draft rows here.
         for (const vr of variantResults) {
           try {
             await db.insert(schema.approvals).values({

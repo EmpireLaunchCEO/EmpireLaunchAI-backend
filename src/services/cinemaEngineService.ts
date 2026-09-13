@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
 import { soraVideoService } from './soraVideoService.js';
-import { generateVideoExportVariants, type ExportVariantResult } from './videoExportVariants.js';
+import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
@@ -85,6 +85,9 @@ export class CinemaEngineService {
       } catch (e: any) {
         console.warn(`[CinemaEngine] Twin export variants failed: ${e?.message}`);
       }
+      if (r2Storage.isAvailable && exportVariants.length === 0) {
+        console.warn(`[CinemaEngine] Twin export variants produced 0/${VIDEO_EXPORT_VARIANTS.length} — source=${fs.existsSync(outputPath)} — see [EXPORT_VARIANTS] traces`);
+      }
     };
 
     try {
@@ -112,12 +115,12 @@ export class CinemaEngineService {
           fs.copyFileSync(soraResult.videoPath, outputPath);
           try { fs.unlinkSync(soraResult.videoPath); } catch {}
 
+          await generateTwinVariants();
           // Upload to R2 if available
           const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
 
           await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'sora-2' });
 
-          await generateTwinVariants();
           return {
             id: assetId,
             videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
@@ -146,6 +149,7 @@ export class CinemaEngineService {
       );
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
 
+      await generateTwinVariants();
       // Upload to R2 if available
       const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
 
@@ -155,7 +159,6 @@ export class CinemaEngineService {
         try { fs.unlinkSync(fp); } catch {}
       }
 
-      await generateTwinVariants();
       return {
         id: assetId,
         videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
