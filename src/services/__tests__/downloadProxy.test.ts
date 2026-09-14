@@ -85,6 +85,77 @@ test('classifyDownload: no-media carries projectStatus (failed / generating)', (
   if (generating.kind === 'no-media') assert.equal(generating.projectStatus, 'generating');
 });
 
+// ─── Non-R2 local-path URLs (owner's "r2 fetch failed" bug) ────────────────
+const creationLocalPath: DownloadCreationLike = {
+  fileUrl: '/app/public/assets/cinema/sora/sora_1d41038b-95d2-425d-9edf-200172e94c6a.mp4',
+  metadata: { r2Key: null },
+};
+const projectLocalPath: DownloadProjectLike = {
+  finalVideoUrl: '/app/public/assets/cinema/sora/sora_x.mp4',
+  metadata: { r2Key: null },
+  status: 'failed',
+};
+const creationLocalPathWithKeyRescue: DownloadCreationLike = {
+  fileUrl: '/app/public/assets/cinema/sora/sora_y.mp4',
+  metadata: { r2Key: 'brands/u/video.mp4' },
+};
+const creationLocalPathWithBareKey: DownloadCreationLike = {
+  fileUrl: '/app/public/assets/cinema/sora/sora_z.mp4',
+  metadata: { r2Key: '/app/public/assets/cinema/sora/sora_z.mp4' },
+};
+const creationR2Signed: DownloadCreationLike = {
+  fileUrl: 'https://2ac5a2e3cb490826386d96fe89d58ab4.r2.cloudflarestorage.com/empirelaunchai/brands/u/video.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc&X-Amz-Expires=3600',
+};
+const creationGenericHttp: DownloadCreationLike = { fileUrl: 'https://cdn.example.com/video.mp4' };
+
+test('classifyDownload: creation with NO fileUrl falls back to project.finalVideoUrl (route ordering preserved)', () => {
+  const d = classifyDownload({ fileUrl: null, metadata: {} }, projectWithVideo);
+  assert.equal(d.kind, 'ok');
+  if (d.kind === 'ok') assert.equal(d.mediaUrl, projectWithVideo.finalVideoUrl);
+});
+
+test('classifyDownload: bare LOCAL-PATH fileUrl (no r2Key rescue) → no-media (owner stuck case)', () => {
+  const d = classifyDownload(creationLocalPath, null);
+  assert.equal(d.kind, 'no-media');
+  // And the friendly 409 body the route will send:
+  const { status, body } = downloadFailureBody('2c94144a-eac0-4b12-866e-c9ad3e82bf7c', 'no-media');
+  assert.equal(status, 409);
+  assert.equal(body.error, 'This video failed to render — there is no file to download. Please regenerate it.');
+  assert.equal(body.failed, true);
+});
+
+test('classifyDownload: bare LOCAL-PATH finalVideoUrl on failed project → no-media + status', () => {
+  const d = classifyDownload(null, projectLocalPath);
+  assert.equal(d.kind, 'no-media');
+  if (d.kind === 'no-media') assert.equal(d.projectStatus, 'failed');
+});
+
+test('classifyDownload: local-path fileUrl + usable metadata.r2Key rescue → ok (URL-clobber rescue preserved)', () => {
+  const d = classifyDownload(creationLocalPathWithKeyRescue, null);
+  assert.equal(d.kind, 'ok');
+  if (d.kind === 'ok') {
+    assert.equal(d.mediaUrl, creationLocalPathWithKeyRescue.fileUrl);
+    // route falls back to meta.r2Key when extractR2Key(bare path) → null
+    assert.equal((d.meta as any).r2Key, 'brands/u/video.mp4');
+  }
+});
+
+test('classifyDownload: local-path fileUrl + BARE-path metadata.r2Key → no-media (dead key is dead media)', () => {
+  assert.equal(classifyDownload(creationLocalPathWithBareKey, null).kind, 'no-media');
+});
+
+test('classifyDownload: genuine R2 signed URL → ok', () => {
+  const d = classifyDownload(creationR2Signed, null);
+  assert.equal(d.kind, 'ok');
+  if (d.kind === 'ok') assert.equal(d.mediaUrl, creationR2Signed.fileUrl);
+});
+
+test('classifyDownload: generic http URL → ok (real remote reference; extraction-scope note: proxy can only fetch R2-hosted keys, so a non-R2 host answers 502 with reason downstream, never a bare 404/409)', () => {
+  const d = classifyDownload(creationGenericHttp, null);
+  assert.equal(d.kind, 'ok');
+  if (d.kind === 'ok') assert.equal(d.mediaUrl, creationGenericHttp.fileUrl);
+});
+
 test('downloadFailureBody: bad-key → 502 with id + human reason', () => {
   const { status, body } = downloadFailureBody('abc', 'bad-key');
   assert.equal(status, 502);
