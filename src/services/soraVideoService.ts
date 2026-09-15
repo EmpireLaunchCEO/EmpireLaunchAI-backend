@@ -52,17 +52,16 @@ export function sanitizeNeedSeconds(v: number | undefined): number {
   if (v === undefined || !Number.isFinite(v)) return SORA_MOTION_SECONDS === '20' ? 20 : 16;
   return Math.min(SORA_MAX_TOTAL_SECONDS, Math.max(1, Math.round(v)));
 }
-/** Duration-scaled Sora call budget (owner directive, live Sep 8): a Scene-Based /
- *  Customize video may spend at most 1 Sora call (20s single take) for ≤30s videos,
- *  2 calls for ~1 minute, 3 calls for 2–3 minutes — soraCallBudget(d) =
- *  clamp(ceil(d/30), 1, 3): 15s→1, 30s→1, 60s→2, 120s→3, 180s→3. Sora is ONLY
- *  used where GPT explicitly elects motion (it names which 20s blocks deserve it);
- *  everything else renders as gpt-image-2 stills animated with FFmpeg Ken Burns.
- *  At ~$0.40/call × max 3 calls × 3 Scene videos/wk this caps worst-case Sora spend
- *  at ~$15/month/client — inside the $50 subscription (cost-viability RESOLVED). */
+/** Sora call budget (OWNER Sep 14 — supersedes the Sep 8 duration-scaled multi-call
+ *  policy): Scene-Based / Customize videos spend EXACTLY ONE Sora call per video at
+ *  EVERY length — soraCallBudget(any duration) === 1. The single call is the 16s tier
+ *  ($1.60): the one take spans ALL elected motion scenes' IMPORTANT-SECONDS windows
+ *  (3 × ~5s = 15s ≤ 16) via the span plan, so a 1-minute OR 2-minute video still pays
+ *  ONE 16s take, never 2–3 calls. Sora is ONLY used where GPT explicitly elects
+ *  motion; everything else renders as gpt-image-2 stills animated with FFmpeg Ken
+ *  Burns. Worst-case Sora spend ≈ $1.60/video — far inside the $50 subscription. */
 export function soraCallBudget(duration: number): number {
-  const d = Number.isFinite(duration) ? Math.max(1, Math.round(duration)) : 30;
-  return Math.min(3, Math.max(1, Math.ceil(d / 30)));
+  return 1; // one 16s take per video, ALL lengths (owner Sep 14 directive)
 }
 export type SoraSize = typeof SORA_SCENE_SIZE | '1280x720';
 

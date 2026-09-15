@@ -12,20 +12,25 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
-export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (multi-Sora hybrid, owner directive Sep 8); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
-/** SORA SPAN (owner directive, live re-test): ONE 20s Sora take shared by EVERY
- *  contiguous scene of a soraBlock. The single take is sliced contiguously —
- *  scene N renders the [cumulativeOffset, +duration) window — so 3×6s scenes show
- *  one continuous 20s shot (t[0..6] / t[6..12] / t[12..18]) instead of one ~6s
- *  trimmed clip with ~14s of paid motion discarded. Persisted in project metadata
+export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
+/** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
+ *  Sora take (16s tier, $1.60) shared by EVERY contiguous scene of a soraBlock. The
+ *  single take is sliced contiguously into per-scene IMPORTANT-SECONDS windows
+ *  (planMotionWindows) — scene N renders its [motionStartSeconds, +motionSeconds)
+ *  window — so 3 scenes at ~5s each show one continuous 15s shot (t[0..5] / t[5..10] /
+ *  t[10..15]) inside ONE 16s call instead of three full-scene lengths (3×6s=18s pushed
+ *  the bill to the '20' tier — the owner's $2.00 case). Persisted in project metadata
  *  (`spans`) as the auditable plan + cost record. */
 export interface SoraSpan {
   /** 0-based index of the shared soraContent block this span maps to (ONE Sora call). */
   soraBlock: number;
   /** Contiguous scene numbers (plan order == final timeline order). */
   sceneNumbers: number[];
-  /** Σ of the span scenes' durations — never exceeds one 20s take (SPAN_TAKE_SECONDS). */
+  /** Σ of the span's motion windows — never exceeds one 16s take (SPAN_TAKE_SECONDS). */
   totalSeconds: number;
+  /** IMPORTANT-SECONDS windows (owner Sep 14): per-scene [motionStartSeconds, +motionSeconds)
+   *  spans of the ONE take — slicing AND the take prompt both consume these exact windows. */
+  windows: MotionWindow[];
   /** Consolidated continuous-take prompt: all span beats IN ORDER + the block prompt. */
   prompt: string;
 }
@@ -305,12 +310,13 @@ export function renderClip(input: string, output: string, duration: number, audi
   });
 }
 /** SLICE a shared Sora take for ONE span scene: extract the CONTIGUOUS window
- *  [offsetSec, offsetSec + durationSec) out of the SAME 20s take (owner directive,
- *  live re-test). `-ss` is placed AFTER `-i` (output-seek) so every slice is
- *  FRAME-ACCURATE — slice N starts on the exact frame slice N-1 ended on, so the
- *  re-assembled scenes are ONE continuous shot (t[0..6], t[6..12], t[12..18]).
- *  Never re-trims from 0, never disjoint, never loop-pads. Source audio is dropped
- *  (-an) — the AUDIO BLEED policy maps ONLY the narration track in renderClip. */
+ *  [offsetSec, offsetSec + durationSec) out of the SAME 16s take (owner directive,
+ *  live re-test; 16s cap Sep 14). `-ss` is placed AFTER `-i` (output-seek) so every
+ *  slice is FRAME-ACCURATE — slice N starts on the exact frame slice N-1 ended on, so
+ *  the re-assembled scenes are ONE continuous shot (t[0..5], t[5..10], t[10..15] for
+ *  3×5s important-seconds windows). Never re-trims from 0, never disjoint, never
+ *  loop-pads. Source audio is dropped (-an) — the AUDIO BLEED policy maps ONLY the
+ *  narration track in renderClip. */
 export function sliceSoraTake(input: string, output: string, offsetSec: number, durationSec: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const offset = Math.max(0, Number(offsetSec) || 0);
@@ -325,6 +331,31 @@ export function sliceSoraTake(input: string, output: string, offsetSec: number, 
     ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
       if (err) reject(new Error('ffmpeg slice exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
       else resolve();
+    });
+  });
+}
+/** PAD a clip's END with cloned last frames (tpad stop_mode=clone) up to exactly
+ *  `targetSec` — used when a scene's IMPORTANT-SECONDS motion window (< 5s) is shorter
+ *  than the scene's timeline duration: the tail holds the window's last frame so the
+ *  final montage keeps its planned length + narration slot. ZERO paid Sora seconds are
+ *  spent on the hold. */
+export function padClipToDuration(input: string, targetSec: number): Promise<void> {
+  const t = Math.max(0.1, Number(targetSec) || 0);
+  const out = `${input}.padded.mp4`;
+  return new Promise((resolve, reject) => {
+    execFile('ffmpeg', [
+      '-y', '-i', input,
+      '-vf', 'tpad=stop_mode=clone:stop_duration=0.5',
+      '-t', String(t),
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      out,
+    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      if (err) reject(new Error('ffmpeg tpad exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      else {
+        try { fs.renameSync(out, input); resolve(); }
+        catch (e) { reject(e); }
+      }
     });
   });
 }
@@ -575,10 +606,10 @@ export function extractSoraBlockPrompts(raw: any, budget: number): string[] {
  * - FACELESS: legacy scene-script shape (scenes[] of {sceneNumber,duration,visualType,
  *   narration,visualPrompt}) → parseScenes() → stills forced downstream.
  * - SCENE (hybrid, owner-locked): the director emits a FULL-VIDEO PLAN with
- *   `soraContent` (MULTI-SORA HYBRID, owner directive Sep 8: an ARRAY of up to
- *   `soraCallBudget(duration)` {duration:20, prompt} blocks — each a 20s max single
- *   take; the legacy single-OBJECT form is tolerated and coerced to a 1-element
- *   array so no previously-valid plan is rejected) + `scenes[]` where the director
+ *   `soraContent` (ONE call budget since Sep 14: an ARRAY whose FIRST block's prompt
+ *   rides the single 16s take; the legacy multi-block / single-OBJECT forms are
+ *   tolerated and coerced to the 1-element slice so no previously-valid plan is
+ *   rejected) + `scenes[]` where the director
  *   types up to `budget` scenes "sora" (the motion-worthy beats: hero open, mid
  *   transformation, payoff/CTA) and the rest "gpt-image" stills that FFmpeg animates
  *   with Ken Burns (mirroring Faceless). We read the scene list with per-scene
@@ -643,20 +674,66 @@ export function parseScenePlan(raw: any, idea: string, durationTarget: number, m
 /** Midsize words never used for the motion-floor keyword scoring (keep the score
  *  deterministic and meaningful — matching on "the/with/into" is noise). */
 const FLOOR_STOPWORDS = new Set(['about','after','also','and','are','before','between','can','each','for','from','has','into','its','just','more','not','only','other','over','same','show','some','than','that','their','them','then','the','this','through','very','was','when','where','which','while','who','will','with','you','your']);
-const SPAN_TAKE_SECONDS = 20;
-/** SCENE MOTION FLOOR → SPAN (owner directive, live re-test): Scene-Based must NEVER
- *  render Sora-less, AND a paid 20s take must cover MORE than one short scene (the
- *  old floor promoted ONE scene, then renderClip trimmed the 20s take to that scene's
- *  ~6s window — discarding ~14s of paid motion). When a parsed SCENE plan has NO motion
- *  at all, deterministically promote the most-important beat (best keyword overlap with
- *  soraContent[0], else the MIDDLE/transformation scene) to a CONTIGUOUS SPAN of short
- *  scenes sharing ONE 20s take (soraBlock=0): K = the max forward run whose durations
- *  sum ≤ SPAN_TAKE_SECONDS — her 5×6s=30s plan → scenes 3,4,5 (3×6s=18s≤20) all covered
- *  by one continuous shot. If the hero is the LAST scene (no forward room), extend
- *  BACKWARD for the nearest contiguous best fit (K ≥ 2 whenever short scenes exist).
- *  The over-budget CAP is preserved (this only ever ADDS motion when there is none and
- *  never exceeds `budget`); budget 0 and plans that already carry motion are no-ops.
- *  Faceless (zero-Sora hard-lock) and Neural Twin never call this.
+const SPAN_TAKE_SECONDS = 16; // owner Sep 14: Scene takes NEVER request '20' — 16s cap ($1.60)
+/** IMPORTANT-SECONDS WINDOWS (owner Sep 14, owner #2): each span motion scene's paid
+ *  window is sized to its important beat — target ~4-6s, DEFAULT min(duration,5) so the
+ *  owner's 3 scene beats sit at ~5s each = 15s ≤ 16 inside ONE take. Her $2.00 bill was
+ *  3×6s=18s → the '20' tier; windows keep ALL THREE motion scenes but snap to '16'. */
+export const MOTION_WINDOW_TARGET_SECONDS = 5;
+export const MOTION_WINDOW_FLOOR_SECONDS = 4;
+export interface MotionWindow { sceneNumber: number; motionStartSeconds: number; motionSeconds: number; }
+/** Proposed window for ONE motion scene: the beat target (≤5s, ≥1s, never longer than
+ *  the scene's own timeline duration). Pure + deterministic. */
+export function proposedMotionWindowSeconds(scene: { duration: number }): number {
+  const d = Number.isFinite(scene?.duration) ? Math.round(scene.duration) : MOTION_WINDOW_TARGET_SECONDS;
+  return Math.min(MOTION_WINDOW_TARGET_SECONDS, Math.max(1, d));
+}
+/** IMPORTANT-SECONDS PLANNING (owner Sep 14, owner #2 — pure, deterministic, tested):
+ *  size each span scene's motion WINDOW to its important beat and persist the exact
+ *  take seconds — motionStartSeconds = cumulative start INSIDE the ONE take (s3:0s,
+ *  s4:5s, s5:10s for 3×5s), motionSeconds = window length — so slicing + the take
+ *  prompt both spend paid motion on the key windows, never full-scene filler.
+ *  Targets: 3 scenes at ~5s each (15s ≤ 16) preferred over 2 scenes at 6s. If the
+ *  combined beats exceed the 16s take, shrink the LEAST important window first
+ *  (reverse span order — the span lead/hero stays longest), never below the 4s floor;
+ *  a run that still overflows (5+ motion scenes) truncates from the END. */
+export function planMotionWindows(run: SceneScript[]): MotionWindow[] {
+  if (!run.length) return [];
+  const windows = run.map(s => ({ sceneNumber: s.sceneNumber, sec: proposedMotionWindowSeconds(s) }));
+  while (windows.reduce((a, w) => a + w.sec, 0) > SPAN_TAKE_SECONDS) {
+    let shrunk = false;
+    for (let i = windows.length - 1; i >= 0; i--) {
+      if (windows[i].sec > MOTION_WINDOW_FLOOR_SECONDS) { windows[i].sec -= 1; shrunk = true; break; }
+    }
+    if (!shrunk) {
+      // All at the 4s floor but still over 16s (a >4-scene motion run) — keep only the
+      // longest prefix that fits (4 × 4s = 16s); the rest fall back to stills.
+      windows.length = Math.max(1, Math.floor(SPAN_TAKE_SECONDS / MOTION_WINDOW_FLOOR_SECONDS));
+      break;
+    }
+  }
+  let acc = 0;
+  return windows.map(w => {
+    const out: MotionWindow = { sceneNumber: w.sceneNumber, motionStartSeconds: acc, motionSeconds: w.sec };
+    acc += w.sec;
+    return out;
+  });
+}
+/** SCENE MOTION FLOOR → SPAN (owner directive, live re-test; 16s + important-seconds
+ *  Sep 14): Scene-Based must NEVER render Sora-less, AND the ONE 16s take ($1.60) must
+ *  cover MORE than one short scene's IMPORTANT-SECONDS window (the old floor promoted
+ *  ONE scene, then renderClip trimmed a 20s take to that scene's ~6s window — discarding
+ *  ~14s of paid motion; the 16s cap fixes the 3×6s=18s → '20' tier $2.00 bill). When a
+ *  parsed SCENE plan has NO motion at all, deterministically promote the most-important
+ *  beat (best keyword overlap with soraContent[0], else the MIDDLE/transformation scene)
+ *  to a CONTIGUOUS SPAN of short scenes sharing ONE 16s take (soraBlock=0): K = the max
+ *  forward run whose MOTION WINDOWS (proposedMotionWindowSeconds — ≤5s each) sum ≤
+ *  SPAN_TAKE_SECONDS — her 5×6s=30s plan → scenes 3,4,5 (3 windows at 5s = 15s ≤ 16) all
+ *  covered by one continuous shot at the '16' tier. If the hero is the LAST scene (no
+ *  forward room), extend BACKWARD for the nearest contiguous best fit (K ≥ 2 whenever
+ *  short scenes exist). The over-budget CAP is preserved (this only ever ADDS motion when
+ *  there is none and never exceeds `budget`); budget 0 and plans that already carry motion
+ *  are no-ops. Faceless (zero-Sora hard-lock) and Neural Twin never call this.
  */
 export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[], budget: number): SceneScript[] {
   if (budget < 1 || !script.length) return script;
@@ -679,23 +756,26 @@ export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[
   // No usable block prompt (or no overlap) → the middle scene (the transformation
   // beat) is the deterministic "hero" fallback.
   if (best < 0 || bestHits === 0) best = Math.floor(next.length / 2);
-  // SPAN: start AT the hero beat and extend FORWARD while the run still fits inside
-  // ONE 20s take (K = the max contiguous run ≤ SPAN_TAKE_SECONDS).
+  // SPAN: start AT the hero beat and extend FORWARD while the run's MOTION WINDOWS fit
+  // inside ONE 16s take (owner Sep 14, important-seconds): K = the max contiguous run
+  // whose proposed windows (3 × 5s = 15s ≤ 16) sum ≤ SPAN_TAKE_SECONDS — her 3×6s=18s
+  // case stays on the '16' tier ($1.60) instead of the 18s→'20' ($2.00) bill.
+  const windowSum = (i: number): number => proposedMotionWindowSeconds(next[i] || { duration: 0 });
   let lo = best;
   let hi = best;
-  let sum = next[best].duration || 0;
-  while (hi + 1 < next.length && sum + (next[hi + 1].duration || 0) <= SPAN_TAKE_SECONDS) {
+  let sum = windowSum(best);
+  while (hi + 1 < next.length && sum + windowSum(hi + 1) <= SPAN_TAKE_SECONDS) {
     hi += 1;
-    sum += next[hi].duration || 0;
+    sum += windowSum(hi);
   }
   // Nearest contiguous best fit: hero at the END of the plan (no forward room) →
   // extend BACKWARD so the run still captures K ≥ 2 short scenes when possible.
   if (hi === best && best > 0) {
-    let sumB = next[best].duration || 0;
+    let sumB = windowSum(best);
     let loB = best;
-    while (loB - 1 >= 0 && sumB + (next[loB - 1].duration || 0) <= SPAN_TAKE_SECONDS) {
+    while (loB - 1 >= 0 && sumB + windowSum(loB - 1) <= SPAN_TAKE_SECONDS) {
       loB -= 1;
-      sumB += next[loB].duration || 0;
+      sumB += windowSum(loB);
     }
     lo = loB;
   }
@@ -717,28 +797,41 @@ export function applySceneMotionFloor(script: SceneScript[], soraBlocks: string[
   trace(`scene_motion_floor_span budget=${budget} scenes=[${spanSceneNumbers.join(',')}] sum=${sum}s`);
   return next;
 }
-/** Build the single consolidated prompt for ONE shared 20s Sora take that flows
- *  through the ENTIRE span (owner directive): every scene beat in plan order plus the
- *  soraContent block prompt, so the take runs hook → transformation → … as ONE fluid
- *  unbroken movement (never a single scene's trimmed fragment). */
-export function buildSpanPrompt(run: SceneScript[], blockPrompt?: string): string {
-  const total = run.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
+/** Build the single consolidated prompt for ONE shared 16s Sora take that flows
+ *  through the ENTIRE span (owner directive; important-seconds Sep 14): every scene
+ *  beat in plan order plus the soraContent block prompt, so the take runs hook →
+ *  transformation → … as ONE fluid unbroken movement (never a single scene's trimmed
+ *  fragment). When windows are supplied the prompt names each scene's IMPORTANT
+ *  window with explicit second markers ("motion at 0-5s scene 3 beat, 5-10s scene 4,
+ *  10-15s scene 5 — ONE continuous take") so Sora spends paid motion on the beats the
+ *  planner elected, never arbitrary full-scene-length filler. */
+export function buildSpanPrompt(run: SceneScript[], blockPrompt?: string, windows?: MotionWindow[]): string {
+  const total = windows && windows.length
+    ? windows.reduce((a, w) => a + w.motionSeconds, 0)
+    : run.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
   const takeSeconds = Math.min(SPAN_TAKE_SECONDS, Math.max(1, Math.round(total)));
   const beats = run.map(s => String(s.visualPrompt || '').trim()).filter(Boolean);
-  const flow = beats.length > 0
-    ? `Render ONE continuous ${takeSeconds}-second single take that flows seamlessly through these beats IN ORDER as one fluid unbroken camera move — no cuts, no scene changes, no transitions, same subject throughout: ${beats.join(' THEN ')}.`
-    : `Render ONE continuous ${takeSeconds}-second single take — no cuts, no scene changes, one fluid unbroken camera move.`;
+  let flow: string;
+  if (windows && windows.length) {
+    const winDesc = windows.map((w, i) => `${w.motionStartSeconds}-${w.motionStartSeconds + w.motionSeconds}s scene ${w.sceneNumber}${beats[i] ? `: ${beats[i]}` : ''}`).join(', ');
+    flow = `Render ONE continuous ${takeSeconds}-second single take. The important motion flows through these windows IN ORDER: ${winDesc} — no cuts, no scene changes, one fluid unbroken camera move, same subject throughout.`;
+  } else if (beats.length > 0) {
+    flow = `Render ONE continuous ${takeSeconds}-second single take that flows seamlessly through these beats IN ORDER as one fluid unbroken camera move — no cuts, no scene changes, no transitions, same subject throughout: ${beats.join(' THEN ')}.`;
+  } else {
+    flow = `Render ONE continuous ${takeSeconds}-second single take — no cuts, no scene changes, one fluid unbroken camera move.`;
+  }
   return blockPrompt ? `${flow} ${blockPrompt}` : flow;
 }
 /** Deterministically group every contiguous run of scenes that share a soraBlock into
- *  ONE SoraSpan. On-disk the span maps to EXACTLY ONE 20s Sora call; each span scene
- *  later slices its own [cumulativeOffset, +duration) window out of that same take
- *  (t[0..6] → scene 3, t[6..12] → scene 4, t[12..18] → scene 5 for her 30s plan).
- *  Duration sums are capped at SPAN_TAKE_SECONDS; trailing same-block scenes beyond the
- *  cap are left OUT of the span (processScene's legacy per-scene take is their fallback
- *  — the floor guarantees this cannot occur for budget-1 plans). Parser multi-Sora plans
- *  (budget 2–3) keep ONE span per block: each 20s call may span its own run of short
- *  scenes, never merged across blocks. */
+ *  ONE SoraSpan. On-disk the span maps to EXACTLY ONE 16s Sora call ($1.60, owner Sep
+ *  14); each span scene later slices its own IMPORTANT-SECONDS window
+ *  [motionStartSeconds, +motionSeconds) out of that same take (t[0..5] → scene 3,
+ *  t[5..10] → scene 4, t[10..15] → scene 5 for her 30s plan — 3×5s windows = 15s ≤ 16).
+ *  Window sums are capped at SPAN_TAKE_SECONDS (16); trailing same-block scenes beyond
+ *  the cap are left OUT of the span (processScene's legacy per-scene take is their
+ *  fallback — the floor guarantees this cannot occur for budget-1 plans). Parser legacy
+ *  multi-block plans keep ONE span per block: each 16s call may span its own run of
+ *  short scenes with its own windows, never merged across blocks. */
 export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []): SoraSpan[] {
   const spans: SoraSpan[] = [];
   let i = 0;
@@ -748,21 +841,25 @@ export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []):
     let sum = 0;
     let j = i;
     while (j < script.length && script[j].soraBlock === blk) {
-      const d = Number.isFinite(script[j].duration) ? script[j].duration : 0;
-      if (sum + d > SPAN_TAKE_SECONDS) break;
-      sum += d;
+      const w = proposedMotionWindowSeconds(script[j]);
+      if (sum + w > SPAN_TAKE_SECONDS) break;
+      sum += w;
       j += 1;
     }
-    const run = script.slice(i, j);
+    let run = script.slice(i, j);
+    const windows = planMotionWindows(run); // exact important-seconds windows (shrink least-important first)
+    if (windows.length < run.length) run = run.slice(0, windows.length);
     if (run.length > 0) {
+      const totalSeconds = windows.reduce((a, w) => a + w.motionSeconds, 0);
       spans.push({
         soraBlock: blk,
-        sceneNumbers: run.map(s => s.sceneNumber),
-        totalSeconds: sum,
-        prompt: buildSpanPrompt(run, soraBlocks[blk]),
+        sceneNumbers: windows.map(w => w.sceneNumber),
+        totalSeconds,
+        windows,
+        prompt: buildSpanPrompt(run, soraBlocks[blk], windows),
       });
     }
-    // Skip any trailing same-block scenes the 20s cap truncated out of this span.
+    // Skip any trailing same-block scenes the 16s cap truncated out of this span.
     while (j < script.length && script[j].soraBlock === blk) j += 1;
     i = j;
   }
@@ -1233,11 +1330,12 @@ export class SceneVideoPipelineService {
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
-    // Duration-scaled Sora call budget (owner directive, live Sep 8):
-    // soraCallBudget(duration) = clamp(ceil(duration/30), 1, 3) — 30s→1, ~1min→2,
-    // 2–3min→3. Sora is ONLY used where GPT explicitly elects motion (it names
-    // WHICH 20s blocks deserve it); everything else renders as gpt-image-2 stills
-    // animated with slow FFmpeg Ken Burns. Worst-case Sora spend ≈ $15/mo/client.
+    // Duration-scaled Sora call budget (owner Sep 14): EXACTLY ONE 16s Sora call per
+    // video at EVERY length — soraCallBudget(duration) === 1. The ONE take spans all
+    // elected motion scenes' IMPORTANT-SECONDS windows (3 × ~5s = 15s ≤ 16) via the
+    // span plan. Sora is ONLY used where GPT explicitly elects motion; everything
+    // else renders as gpt-image-2 stills animated with slow FFmpeg Ken Burns.
+    // Worst-case Sora spend ≈ $1.60/video — far inside the $50 subscription.
     const budget = soraCallBudget(duration);
     let generatedScript = input.script;
     if (!generatedScript) {
@@ -1251,20 +1349,20 @@ export class SceneVideoPipelineService {
         const perScene = Math.max(1, Math.round(duration / sceneCount));
         const srcHint = sourceScriptHint(input.sourceImages?.[0]);
         const maxNarrationWords = Math.max(14, Math.round(perScene * 2.75));
-        const importantBlock = Math.min(20, duration);
+        const importantBlock = Math.min(16, duration);
         const heroComponentHint = mode !== 'faceless' && inventory.length > 0
           ? ` soraContent[0]'s prompt MUST center the single most-important relayed component — "${inventory[0]}" — as the hero moment / key benefit / payoff of this video.`
           : '';
-        // Hybrid Scene director (owner-locked): GPT 5.2 plans the WHOLE video up front —
-        // which up-to-`budget` 20-second blocks genuinely need motion (each ONE Sora call,
-        // a continuous 20s max single take), and the full scene list/order/timings.
-        // Everything else renders as gpt-image-2 stills animated with slow FFmpeg Ken
-        // Burns (mirroring Faceless). Sora is called per elected block, NEVER fragmented
-        // into many 5-6s clips, and NEVER more than the `budget` calls.
+        // Hybrid Scene director (owner-locked; Sep 14): GPT 5.2 plans the WHOLE video
+        // up front — which scenes' IMPORTANT-SECONDS beats need motion (ONE 16s Sora
+        // call per video at EVERY length — soraCallBudget = 1), and the full scene
+        // list/order/timings. Everything else renders as gpt-image-2 stills animated
+        // with slow FFmpeg Ken Burns (mirroring Faceless). Sora is called EXACTLY
+        // ONCE per video — never fragmented, never more than the 1-call budget.
         const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "avatarLook" string — the EXACT shared description of the avatar, included ONLY when any scene has a TALKING avatar (one consistent person/look, reused VERBATIM by every avatar scene); omit it entirely when there is no talking avatar —, a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
  a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words), narrationRole: "avatar-dialogue" only for scenes whose visual shows a TALKING avatar SPEAKING to camera (lips moving) — narration written as that avatar's own first-person spoken words — else "narrator" (static avatar or no avatar keeps voiceover; never both in one scene) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
 FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 60-second video with a 2-call budget this is the required JSON:
-{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 20, "prompt": "One continuous ~20s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 20, "prompt": "One continuous ~20s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Opening: watch how this saves your time.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 20, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 8, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
+{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 16, "prompt": "One continuous ~16s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 16, "prompt": "One continuous ~16s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Opening: watch how this saves your time.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
@@ -1311,14 +1409,15 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (mode === 'faceless') { for (const s of scriptBeforeFloor) { s.visualType = 'still'; } }
     // HARD TIME BUDGET runs FIRST so the motion-floor SPAN election below sees the
     // EXACT durations the assembly will render (rounding drift can't push a span over
-    // the 20s single-take cap after the fact; durations still sum EXACTLY to `duration`).
+    // the 16s single-take cap after the fact; durations still sum EXACTLY to `duration`).
     const timeExact = normalizePlanTimeBudget(scriptBeforeFloor, duration);
-    // SCENE MOTION FLOOR → SPAN (owner directive, live re-test): a Scene plan that
-    // elected ZERO sora scenes renders Sora-less. Deterministically promote the
-    // most-important beat to a CONTIGUOUS SPAN of short scenes sharing ONE 20s Sora
-    // take (soraBlock=0 — K = the max forward run whose durations sum ≤ 20s: her 5
-    // scene ~6s-each 30s video gets 3 of 5 scenes covered by one continuous shot).
-    // Never exceeds the budget; Faceless (zero-Sora hard-lock) skips this by mode.
+    // SCENE MOTION FLOOR → SPAN (owner directive, live re-test; 16s Sep 14): a Scene
+    // plan that elected ZERO sora scenes renders Sora-less. Deterministically promote
+    // the most-important beat to a CONTIGUOUS SPAN of short scenes sharing ONE 16s
+    // take (soraBlock=0 — K = the max forward run whose MOTION WINDOWS sum ≤ 16s: her
+    // 5 scene ~6s-each 30s video gets 3 of 5 scenes covered by one continuous shot via
+    // 3 × 5s windows). Never exceeds the budget; Faceless (zero-Sora hard-lock) skips
+    // this by mode.
     const script = mode === 'scene'
       ? applySceneMotionFloor(timeExact, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
       : timeExact;
@@ -1343,22 +1442,18 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       // Durations are untouched by injection (text only) — the exact time budget holds.
       planned.splice(0, planned.length, ...afterInjection);
     }
-    // SORA SPAN PLANNING (owner directive, live re-test): every motion scene pairs
-    // with ONE shared 20s take per soraBlock. Contiguous scenes of a block slice their
-    // windows [cumulativeOffset, +duration) out of the SAME take (one paid call, the
-    // full 20s flowing across the scene cuts) instead of each re-trimming its own clip
-    // from 0. Pure + deterministic; persisted for audit + the worker's take pre-pass.
+    // SORA SPAN PLANNING (owner directive, live re-test; 16s cap + important-seconds
+    // Sep 14): every motion scene pairs with ONE shared 16s take per soraBlock.
+    // Contiguous scenes of a block slice their IMPORTANT-SECONDS windows
+    // [motionStartSeconds, +motionSeconds) out of the SAME take (one paid call, the
+    // full 16s flowing across the scene beats) — 3×5s windows = 15s ≤ 16 ('16', $1.60)
+    // vs the old 3×6s=18s → '20' ($2.00) bill. Pure + deterministic; persisted for
+    // audit + the worker's take pre-pass.
     const spanPlans = mode === 'scene'
       ? planSoraSpans(planned, extractSoraBlockPrompts(generatedScript || {}, budget))
       : [];
-    const spanOffsetByScene = new Map<number, number>();
-    for (const span of spanPlans) {
-      let acc = 0;
-      for (const sceneNumber of span.sceneNumbers) {
-        spanOffsetByScene.set(sceneNumber, acc);
-        acc += planned.find(s => s.sceneNumber === sceneNumber)?.duration || 0;
-      }
-    }
+    const motionWindowByScene = new Map<number, MotionWindow>();
+    for (const span of spanPlans) for (const w of span.windows) motionWindowByScene.set(w.sceneNumber, w);
     // CONTENT DIRECTION (owner Sep 9 — folded into this planner rewrite): resolve
     // the per-scene narration role deterministically (AVATAR-VOICE RULE v3: only a
     // TALKING avatar w/ lips moving suppresses narration; that scene's ONLY voice
@@ -1378,14 +1473,14 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       .map(s => s.sceneNumber);
     const narrationRolesFinal = planned.map(s => s.narrationRole || 'narrator');
     trace(`content_direction project=${projectId} roles=[${narrationRolesFinal.join(',')}] avatarLook=${avatarPass.avatarLook ? 'set' : 'none'} actionInjected=[${actionPass.injectedInto.join(',')}] abstractNarration=[${actionAudit.narrationAbstract.join(',')}]`);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt})=>({soraBlock,sceneNumbers,totalSeconds,prompt})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
-      const spanOffset = isMotion ? spanOffsetByScene.get(s.sceneNumber) : undefined;
+      const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
       return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{
         importantSora:isMotion,
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
-        ...(spanOffset !== undefined ? { spanOffset } : {}),
+        ...(mw ? { motionStartSeconds: mw.motionStartSeconds, motionSeconds: mw.motionSeconds, spanOffset: mw.motionStartSeconds } : {}),
         ...(s.narrationRole !== undefined ? { narrationRole: s.narrationRole } : {}),
       }};
     }));
@@ -1408,12 +1503,13 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       : [];
     const heroSource = sourceImages[0];
 if (!skipGeneration) {
-      // SORA SPAN PRE-PASS (owner directive, live re-test): generate EXACTLY ONE 20s
-      // take per soraBlock BEFORE the scene loop, then let every contiguous scene of
-      // the block slice its own window out of that same take. This is what makes 3×6s
-      // scenes show ONE continuous 20s shot (t[0..6] → scene 3, t[6..12] → scene 4,
-      // t[12..18] → scene 5) instead of one ~6s trimmed clip with ~14s of paid motion
-      // discarded. Legacy projects (no persisted `spans` metadata) skip this entirely
+      // SORA SPAN PRE-PASS (owner directive, live re-test; 16s cap Sep 14): generate
+      // EXACTLY ONE 16s take per soraBlock BEFORE the scene loop, then let every
+      // contiguous scene of the block slice its own IMPORTANT-SECONDS window out of
+      // that same take. This is what makes 3 motion scenes show ONE continuous 16s
+      // shot (t[0..5] → scene 3, t[5..10] → scene 4, t[10..15] → scene 5) instead of
+      // a 3×6s=18s run that previously tipped the bill to the '20' tier. Legacy
+      // projects (no persisted `spans` metadata) skip this entirely
       // and keep the old per-scene take path. Serialized (≤ `budget` spans) so Sora
       // spend is exactly budget × 1 call; each span retries with the same backoff the
       // legacy path used. A span take failure fails its scenes FAST (predictable spend
@@ -1684,18 +1780,27 @@ if (!skipGeneration) {
 else {
         // ── MOTION: shared SPAN take when this scene belongs to a planned span ──
         const spanBlock = Number((scene.metadata as any)?.soraBlock ?? NaN);
-        const spanOffset = Number((scene.metadata as any)?.spanOffset ?? NaN);
+        const spanOffset = Number((scene.metadata as any)?.motionStartSeconds ?? (scene.metadata as any)?.spanOffset ?? NaN);
+        const motionWindow = Number((scene.metadata as any)?.motionSeconds ?? NaN);
         if (spanTakePath && fs.existsSync(spanTakePath)) {
-          // One 20s take per soraBlock, sliced CONTIGUOUSLY across every scene of the
-          // span (owner directive, live re-test): this scene renders the
-          // [spanOffset, spanOffset + duration) window of the SAME take as its
-          // siblings — t[0..6], t[6..12], t[12..18] — so the full paid 20s flows
-          // across the scene cuts as ONE continuous shot (never re-trimmed from 0,
-          // never disjoint, never loop-padded). Output-seek = frame-accurate.
+          // One 16s take per soraBlock (owner Sep 14), sliced CONTIGUOUSLY into each
+          // scene's IMPORTANT-SECONDS window [motionStart, +motionSeconds) — 3×5s →
+          // t[0..5], t[5..10], t[10..15] — the paid 16s flows across the scene beats
+          // as ONE continuous shot (never re-trimmed from 0, never disjoint, never
+          // loop-padded). Output-seek = frame-accurate. When the beat window is
+          // SHORTER than the scene's timeline duration, the slice is held (tpad
+          // clone-last-frame) to fill the scene's exact slot — zero extra Sora cost,
+          // the planned timeline length + narration slot are preserved.
           const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
           fs.mkdirSync(sliceDir, { recursive: true });
           const slicePath = path.join(sliceDir, `sora-block-${spanBlock}-scene-${scene.sceneNumber}.mp4`);
-          await sliceSoraTake(spanTakePath, slicePath, spanOffset, scene.duration || 3);
+          const sliceWindow = Number.isFinite(motionWindow) ? motionWindow : (scene.duration || 3);
+          await sliceSoraTake(spanTakePath, slicePath, spanOffset, sliceWindow);
+          if (Number.isFinite(motionWindow) && sliceWindow < (scene.duration || 3) - 0.05) {
+            await padClipToDuration(slicePath, scene.duration || 3);
+          }
+          localPath = slicePath;
+          trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s win=${sliceWindow}s pad=${Math.max(0, Math.round(((scene.duration || 3) - sliceWindow) * 10) / 10)}s`);
           localPath = slicePath;
           trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s dur=${scene.duration || 3}s`);
         } else if ((scene.metadata as any)?.soraBlock !== undefined && Number.isFinite(spanOffset)) {
@@ -1714,13 +1819,15 @@ else {
               trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
-            const sceneSeconds = Math.min(20, Math.round(scene.duration || 20));
+            const sceneSeconds = Math.min(16, Math.round(scene.duration || 16));
             sceneSoraVideoId = (scene.metadata as any)?.soraJob?.id ?? ((scene.metadata as any)?.soraVideoId || sceneSoraVideoId);
             const isImportant = Boolean(scene.metadata?.importantSora);
             soraResult = await soraVideoService.generateVideo(subjectPrompt, {
               userId: undefined,
-              // 16|20 GATE (owner Sora 2 spec, supersedes the old always-20 policy):
-              // a scene that needs ≤16s requests seconds:'16', else '20' — a single
+              // 16s GATE (owner Sep 14 — supersedes the old always-20 / 16|20 policy):
+              // the LEGACY per-scene fallback is HARD-CAPPED at 16s like every Scene
+              // caller: seconds resolves ONLY to '16' — '20' ($2.00) is UNREACHABLE
+              // from Scene/Customize, including legacy in-flight projects. A single
               // take FFmpeg trims with `-t` to the scene window (continuous motion,
               // no loop-padding, no repeat). NEVER 4/8/12. Explicit size ALWAYS.
               seconds: snapSora16or20(sceneSeconds),
@@ -1763,16 +1870,21 @@ else {
    * (neuralFeedbackAutoFixService) can re-voice an edited line in place without a
    * full scene re-render. $0-ish: ONE gpt-audio call (~micro-cost per line).
    */
-/** Generate ONE Sora take (16|20 GATE) for a whole span (soraBlock) with the same
-   *  retry / backoff policy the legacy per-scene path used — the span makes budget
-   *  calls EXACTLY: 1 take per block, every contiguous block scene slices from it.
+/** Generate ONE Sora take (16s cap, owner Sep 14) for a whole span (soraBlock) with
+   *  the same retry / backoff policy the legacy per-scene path used — the span makes
+   *  EXACTLY ONE call (soraCallBudget = 1 at every length): 1 take per block, every
+   *  contiguous block scene slices its IMPORTANT-SECONDS window from it. Scene takes
+   *  NEVER request '20' — needSeconds is hard-capped at SPAN_TAKE_SECONDS (16) so the
+   *  $1.60 tier applies to every Scene/Customize take.
    *  EXACTLY-ONCE (owner spec): the take's Sora video id is persisted in project
    *  metadata (soraJobs[block], shape {id, status, createdAt}) the moment the API
    *  returns it, and a retry (even
    *  after a process restart) RESUMES that id via existingVideoId — never re-POST. */
   private async generateSoraTake(spanPrompt: string, span: SoraSpan, projectId: string): Promise<string> {
-    const needSeconds = span.totalSeconds > 0 ? Math.round(span.totalSeconds) : 20;
-    const seconds = snapSora16or20(needSeconds); // 16|20 HARD GATE — never 4/8/12
+    // OWNER Sep 14: Scene takes NEVER request '20' — window sum is hard-capped at 16s;
+    // fallback is 16, so '20' is UNREACHABLE from Scene/Customize (always $1.60).
+    const needSeconds = Math.min(SPAN_TAKE_SECONDS, Math.max(1, span.totalSeconds > 0 ? Math.round(span.totalSeconds) : SPAN_TAKE_SECONDS));
+    const seconds = snapSora16or20(needSeconds); // "16" for every Scene take — never 4/8/12/20
     let persistedVideoId: string | undefined = await this.loadSoraTakeVideoId(projectId, span.soraBlock);
     for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
@@ -1789,7 +1901,9 @@ else {
         needSeconds,
         existingVideoId: persistedVideoId, // exactly-once: never re-POST a known id
         size: SORA_SCENE_SIZE,             // explicit size ALWAYS (owner)
-        promptHint: `Render ONE continuous single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${needSeconds}s of scene windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
+        promptHint: span.windows?.length
+          ? `Important motion windows IN ORDER: ${span.windows.map(w => `${w.motionStartSeconds}-${w.motionStartSeconds + w.motionSeconds}s scene ${w.sceneNumber}`).join(', ')} — ONE continuous take through those ${needSeconds}s windows, no cuts, one fluid unbroken camera move, same subject throughout.`
+          : `Render ONE continuous single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${needSeconds}s of important motion windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
         onVideoCreated: (id) => {
           persistedVideoId = id;
           void this.persistSoraTakeVideoId(projectId, span.soraBlock, id);
