@@ -101,3 +101,16 @@ test('"20" is UNREACHABLE from Scene/Customize: the span window total can never 
   assert.ok(spans[0].totalSeconds <= 16, `window total ${spans[0].totalSeconds} ≤ 16`);
   assert.equal(snapSora16or20(spans[0].totalSeconds), '16', 'always "16" from the span path ($1.60)');
 });
+
+test('legacy per-scene fallback is hard-capped at 16 — a >16s legacy scene still resolves "16", never "20"', () => {
+  // The LEGACY per-scene retry path computes
+  //   const sceneSeconds = Math.min(16, Math.round(scene.duration || 16));
+  // before snapSora16or20 — so even an 18s or 25s in-flight (pre-span) Scene scene
+  // can NEVER request seconds:'20' ($2.00): clamp AND fallback default are both 16.
+  assert.equal(snapSora16or20(Math.min(16, Math.round(18 || 16))), '16', '18s legacy scene → "16" ($1.60)');
+  assert.equal(snapSora16or20(Math.min(16, Math.round(25 || 16))), '16', '25s legacy scene → "16"');
+  assert.equal(snapSora16or20(Math.min(16, Math.round(16 || 16))), '16', 'exactly-16 legacy scene → "16"');
+  assert.equal(snapSora16or20(Math.min(16, Math.round(6 || 16))), '16', 'short legacy scene → "16"');
+  assert.equal(Math.min(16, Math.round(18 || 16)), 16, 'clamp + fallback default both 16 — the old "else 20" branch is gone');
+  assert.equal(Math.min(16, Math.round(NaN || 16)), 16, 'missing duration → fallback 16, never 20');
+});

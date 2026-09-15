@@ -1819,13 +1819,15 @@ else {
               trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
-            const sceneSeconds = Math.min(20, Math.round(scene.duration || 20));
+            const sceneSeconds = Math.min(16, Math.round(scene.duration || 16));
             sceneSoraVideoId = (scene.metadata as any)?.soraJob?.id ?? ((scene.metadata as any)?.soraVideoId || sceneSoraVideoId);
             const isImportant = Boolean(scene.metadata?.importantSora);
             soraResult = await soraVideoService.generateVideo(subjectPrompt, {
               userId: undefined,
-              // 16|20 GATE (owner Sora 2 spec, supersedes the old always-20 policy):
-              // a scene that needs ≤16s requests seconds:'16', else '20' — a single
+              // 16s GATE (owner Sep 14 — supersedes the old always-20 / 16|20 policy):
+              // the LEGACY per-scene fallback is HARD-CAPPED at 16s like every Scene
+              // caller: seconds resolves ONLY to '16' — '20' ($2.00) is UNREACHABLE
+              // from Scene/Customize, including legacy in-flight projects. A single
               // take FFmpeg trims with `-t` to the scene window (continuous motion,
               // no loop-padding, no repeat). NEVER 4/8/12. Explicit size ALWAYS.
               seconds: snapSora16or20(sceneSeconds),
