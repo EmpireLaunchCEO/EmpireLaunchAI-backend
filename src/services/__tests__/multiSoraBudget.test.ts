@@ -1,13 +1,16 @@
 /**
- * Unit tests for the MULTI-SORA HYBRID (owner directive, live Sep 8): duration-scaled
- * Sora call budget — 30s→1 call, ~1min→2, 2–3min→3, each a 20s max single take,
- * GPT elects WHICH 20-second blocks genuinely need motion; everything else renders
- * as gpt-image-2 stills animated with FFmpeg Ken Burns. At ~$0.40/call this caps
- * worst-case Sora spend at ~$15/month/client.
+ * Unit tests for the SORA ONE-CALL HYBRID (owner directive, live Sep 14):
+ * EXACTLY ONE 16s Sora call per Scene/Customize video at EVERY length —
+ * soraCallBudget(any duration) === 1. GPT elects WHICH scenes' important-seconds
+ * beats deserve motion; everything else renders as gpt-image-2 stills animated
+ * with FFmpeg Ken Burns. Worst-case Sora spend ≈ $1.60/video (~$0.40/call era
+ * superseded — the 20s multi-call budget is retired; legacy multi-block plans are
+ * still TOLERATED at parse time (only the first block's prompt is paired / a
+ * coerced single motion scene) so no previously-valid plan is rejected).
  *
  * NO paid renders — all pure/deterministic helpers (budget mapping, plan parsing
  * incl. legacy object coercion + per-block prompt pairing, budget capping of sora
- * scenes, and the shipped planning-QC helpers on multi-Sora plans).
+ * scenes, and the shipped planning-QC helpers on one-call plans).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,38 +41,39 @@ const multiPlan = {
   ],
 };
 
-test('soraCallBudget maps duration onto the owner 1/2/3 budget', () => {
-  // Owner directive: 30s→1 call, 1 min→2 calls, 2 and 3 min→3 calls (20s each).
+test('soraCallBudget is EXACTLY 1 at EVERY duration (one 16s take per Scene video)', () => {
+  // Owner Sep 14: one call per video, ALL lengths — supersedes the old 1/2/3 scale.
+  assert.equal(soraCallBudget(1), 1);
   assert.equal(soraCallBudget(15), 1);
   assert.equal(soraCallBudget(29), 1);
-  assert.equal(soraCallBudget(30), 1);   // ≤30s → 1
-  assert.equal(soraCallBudget(31), 2);   // just over 30s → 2
-  assert.equal(soraCallBudget(45), 2);
-  assert.equal(soraCallBudget(60), 2);   // ~1 min → 2
-  assert.equal(soraCallBudget(61), 3);
-  assert.equal(soraCallBudget(89), 3);
-  assert.equal(soraCallBudget(90), 3);
-  assert.equal(soraCallBudget(120), 3);  // 2 min → 3 (cap)
-  assert.equal(soraCallBudget(180), 3);  // 3 min → 3 (cap)
-  assert.equal(soraCallBudget(240), 3);  // never exceeds 3 calls — cost cap
-  assert.equal(soraCallBudget(0), 1);    // degenerate → 1
-  assert.equal(soraCallBudget(NaN), 1);  // degenerate → 1
-  assert.equal(soraCallBudget(30.5), 2); // ceil of rounded 31/30
-  assert.equal(soraCallBudget(-5), 1);   // clamp floor
+  assert.equal(soraCallBudget(30), 1);
+  assert.equal(soraCallBudget(31), 1);   // was 2
+  assert.equal(soraCallBudget(45), 1);
+  assert.equal(soraCallBudget(60), 1);   // ~1 min → STILL 1
+  assert.equal(soraCallBudget(61), 1);
+  assert.equal(soraCallBudget(90), 1);
+  assert.equal(soraCallBudget(120), 1);  // 2 min → STILL 1
+  assert.equal(soraCallBudget(180), 1);  // 3 min → STILL 1
+  assert.equal(soraCallBudget(240), 1);  // never more than one call — $1.60 hard cap
+  assert.equal(soraCallBudget(0), 1);
+  assert.equal(soraCallBudget(NaN), 1);
+  assert.equal(soraCallBudget(30.5), 1);
+  assert.equal(soraCallBudget(-5), 1);
 });
 
-test('parseScenePlan accepts the soraContent ARRAY form and pairs blocks in order', () => {
+test('parseScenePlan accepts the soraContent ARRAY form and pairs the ONE budgeted block', () => {
   const scenes = parseScenePlan(multiPlan, 'test subject', 60, 'scene');
   assert.equal(scenes.length, 6);
   const motion = scenes.filter(s => s.visualType === 'motion');
   const stills = scenes.filter(s => s.visualType === 'still');
-  assert.equal(motion.length, 2, 'exactly the 2 budgeted blocks become motion scenes');
-  assert.equal(stills.length, 4);
-  // Scene #2 (index 1) pairs with soraContent[0]; scene #5 (index 4) with soraContent[1].
+  assert.equal(motion.length, 1, 'budget is exactly 1 — only the FIRST block becomes motion (the 16s take spans every elected beat)');
+  assert.equal(stills.length, 5);
+  // Scene #2 (index 1) pairs with soraContent[0]; scene #5 (index 4) is RE-BUDGETED
+  // to a still (a 2nd block would mean a 2nd paid call — never allowed now).
   assert.equal(scenes[1].soraBlock, 0);
   assert.ok(scenes[1].visualPrompt.includes('BLOCK-A hero take'), 'block 0 prompt appended to its scene');
-  assert.equal(scenes[4].soraBlock, 1);
-  assert.ok(scenes[4].visualPrompt.includes('BLOCK-B payoff take'), 'block 1 prompt appended to its scene');
+  assert.equal(scenes[4].visualType, 'still', 'the extra GPT block is coerced to Ken Burns');
+  assert.ok(!scenes[4].visualPrompt.includes('BLOCK-'), 'coerced still carries no block prompt');
   // Still scenes are NOT augmented with any block prompt.
   assert.ok(!scenes[0].visualPrompt.includes('BLOCK-'));
   assert.ok(!scenes[5].visualPrompt.includes('BLOCK-'));
@@ -101,7 +105,7 @@ test('parseScenePlan tolerates the legacy OBJECT soraContent (coerced to 1 block
   assert.equal(normalized.reduce((a, s) => a + s.duration, 0), 30);
 });
 
-test('sora scenes beyond the duration-scaled budget are coerced to stills (cost cap)', () => {
+test('sora scenes beyond the ONE-call budget are coerced to stills (cost cap)', () => {
   const overBudget = {
     soraContent: [
       { duration: 20, prompt: 'BLOCK-1' },
@@ -116,15 +120,15 @@ test('sora scenes beyond the duration-scaled budget are coerced to stills (cost 
       { sceneNumber: 6, duration: 10, type: 'gpt-image', visualPrompt: 'Closing cta', narration: 'CTA.' },
     ],
   };
-  // 60s → budget 2, but GPT typed 3 sora scenes → the FIRST 2 keep motion, the 3rd
-  // is coerced to a still so spend never exceeds the owner's budget.
+  // 60s → budget 1: GPT typed 3 sora scenes → the FIRST keeps motion, the other 2 are
+  // coerced to stills so spend never exceeds ONE 16s call.
   const scenes = parseScenePlan(overBudget, 'test subject', 60, 'scene');
   const motion = scenes.filter(s => s.visualType === 'motion');
-  assert.equal(motion.length, 2, 'motion scenes capped at the budget');
+  assert.equal(motion.length, 1, 'motion scenes capped at the one-call budget');
   assert.equal(scenes[0].soraBlock, 0);
   assert.ok(scenes[0].visualPrompt.includes('BLOCK-1'));
-  assert.equal(scenes[2].soraBlock, 1);
-  assert.ok(scenes[2].visualPrompt.includes('BLOCK-2'));
+  assert.equal(scenes[2].visualType, 'still', 'the 2nd GPT sora scene is coerced to still');
+  assert.ok(!scenes[2].visualPrompt.includes('BLOCK-2'), 'coerced still carries no block prompt');
   assert.equal(scenes[4].visualType, 'still', 'the 3rd GPT sora scene is coerced to still');
   assert.ok(!scenes[4].visualPrompt.includes('BLOCK-'), 'coerced still carries no block prompt');
 });
@@ -143,7 +147,7 @@ test('GPT may elect FEWER sora scenes than the budget (Sora only where motion is
   };
   const scenes = parseScenePlan(fewer, 'test subject', 60, 'scene');
   const motion = scenes.filter(s => s.visualType === 'motion');
-  assert.equal(motion.length, 1, 'fewer than budget is allowed');
+  assert.equal(motion.length, 1, 'at most the one-call budget');
   assert.equal(motion[0].soraBlock, 0, 'uses the FIRST block prompt');
   assert.ok(motion[0].visualPrompt.includes('BLOCK-1'));
 });
@@ -171,7 +175,7 @@ test('malformed plan (no soraContent) falls back to ≤1 motion scene — never 
   assert.equal(motion[0].soraBlock, 0);
 });
 
-test('planning QC stays green on multi-Sora plans (arc + components + exact budget)', () => {
+test('planning QC stays green on one-call plans (arc + components + exact budget)', () => {
   const scenes: SceneScript[] = parseScenePlan(multiPlan, 'test subject', 60, 'scene');
   assert.deepEqual(verifyArcCoverage(scenes), { hook: true, about: true, cta: true });
   // A relayed component present in the plan is verified; an absent one is reported.
@@ -181,13 +185,13 @@ test('planning QC stays green on multi-Sora plans (arc + components + exact budg
   const normalized = normalizePlanTimeBudget(scenes, 60);
   assert.equal(normalized.reduce((a, s) => a + s.duration, 0), 60);
   const motion = normalized.filter(s => s.visualType === 'motion');
-  assert.equal(motion.length, 2, 'multi-Sora motion count survives time-budget normalization');
+  assert.equal(motion.length, 1, 'one-call motion count survives time-budget normalization');
   assert.ok(motion.every(s => s.soraBlock !== undefined), 'every motion scene keeps its block index');
 });
 
-test('SORA_MOTION_SECONDS policy is unchanged: every motion call is a 20s max single take', () => {
-  assert.equal(SORA_MOTION_SECONDS, '20');
-  // The budget says HOW MANY calls; the policy constant says HOW LONG each is.
-  assert.equal(soraCallBudget(120), 3);
-  assert.equal(SORA_MOTION_SECONDS, '20');
+test('SORA_MOTION_SECONDS stays the generic UNANSWERED default; ONE-CALL budget retires the old 20s scale', () => {
+  assert.equal(SORA_MOTION_SECONDS, '20'); // generic gate default when no target is supplied — every Scene take now supplies needSeconds ≤ 16
+  // The budget says HOW MANY calls — exactly 1 at every length (Scene always lands on "16").
+  assert.equal(soraCallBudget(120), 1);
+  assert.equal(soraCallBudget(180), 1);
 });
