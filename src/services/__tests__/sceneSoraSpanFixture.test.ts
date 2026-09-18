@@ -94,7 +94,12 @@ test('Sora SPAN fixture: 20s take → 3×6s contiguous slices → full-span asse
     const replayDb = firstFramePsnr(sliceFrames[0], sliceFrames[1]);
     assert.ok(replayDb < 30, `slice 2 ≠ slice 1 (PSNR ${replayDb.toFixed(1)}dB < 30 — no replay-from-0)`);
 
-    // 5) real assembly path (concatClips): full 3-scene span ≈ 17s (3×6 − 2×0.5s xfade)
+    // 5) real assembly path (concatClips): full 3-scene span ≈ 17s (3×6 − 2×0.5s
+    //    xfade). Pin SCENE_TRANSITION_MS=500 for THIS fixture so its span-length
+    //    math (18 − 2×0.5 = 17) stays deterministic and independent of the
+    //    production default (800ms since the seamless-stitching change; a longer
+    //    dissolve would shrink the assembled span by the same diff).
+    process.env.SCENE_TRANSITION_MS = '500';
     const assembled = path.join(dir, 'final.mp4');
     await concatClips(slices, assembled);
     const total = probeSeconds(assembled);

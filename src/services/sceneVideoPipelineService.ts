@@ -212,10 +212,12 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Re
       report.freezeCount = (fz.match(/freeze_(start|end)/g) || []).length;
       if ((report.freezeCount || 0) > 0) { report.ok = false; report.flags.push('freeze_detected'); }
     } catch { report.freezeCount = -1; }
-    // blackdetect (all-black frames > 0.5s)
+    // blackdetect (all-black frames > 0.1s — tightened from 0.5s after the owner's
+    // "flashed black" report: a 1–2 frame dark hold at a cut was previously below
+    // the 0.5s detection floor and slipped past QC unseen).
     try {
       const blk = execFileSync('ffmpeg', [
-        '-i', media, '-vf', 'blackdetect=d=0.5:pix_th=0.10', '-f', 'null', '-',
+        '-i', media, '-vf', 'blackdetect=d=0.1:pix_th=0.10', '-f', 'null', '-',
       ], { maxBuffer: 2 * 1024 * 1024 }).toString();
       report.blackCount = (blk.match(/black_(start|end)/g) || []).length;
       if ((report.blackCount || 0) > 0) { report.ok = false; report.flags.push('black_frame_detected'); }
@@ -228,7 +230,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Re
   return report;
 }
 
-export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean }): Promise<void> {
+export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right' }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
@@ -284,11 +286,33 @@ export function renderClip(input: string, output: string, duration: number, audi
     // the boundary) + setpts=PTS-STARTPTS (reset timestamps so xfade offsets and
     // tpad math are all in the same 30fps timeline).
     const fpsNorm = 'fps=30:round=0,setpts=PTS-STARTPTS';
-    // Ken Burns smoothness: zoompan's integer zoom steps stutter at slow rates.
-    // minterpolate=fps=30:mi_mode=mci motion-interpolates between the zoompan
-    // frames for smooth, fluid pan/zoom.
+    // SEAMLESS KEN BURNS (owner Sep 17 directive — "stitching needs to be A LOT
+    // better, seamless transition of scenes"):
+    //  1. EASED zoom (smoothstep on output-frame count) so each clip's motion is
+    //     slowest at ITS END — the eye is at near-zero velocity when the dissolve
+    //     begins, so the switch feels continuous instead of a hard stop+restart.
+    //  2. CONTINUOUS zoom across scenes: opts.kenburnsStartZoom/EndZoom let the
+    //     caller thread the PREVIOUS still's end zoom into the NEXT still (the
+    //     assembly loop does this), killing the old per-clip "zoom 1.0→1.15 then
+    //     snap back to 1.0" reset that made every cut read as a camera jump.
+    //  3. Direction preserved from the caller (zoom-in default; same dir as the
+    //     previous still when threaded) — motion vectors never reverse at a cut.
+    //  zoompan's `on` = output-frame counter; smoothstep p = on/(d-1).
+    const kbFrames = Math.max(2, Math.round(duration * 30));
+    const kbZ0 = Number(opts?.kenburnsStartZoom) || 1.0;
+    const kbZ1 = Number(opts?.kenburnsEndZoom) || 1.15;
+    const kbDir = opts?.kenburnsDir ?? 'zoom-in';
+    const kbP = `min(on/${kbFrames - 1},1)`;
+    // smoothstep: p²(3−2p) → velocity ~0 at both ends
+    const kbEase = `(${kbP}*${kbP}*(3-2*${kbP}))`;
+    const kbZ = `'${kbZ0}+(${kbZ1}-${kbZ0})*${kbEase}'`;
+    const kbXY = kbDir === 'pan-left'
+      ? `x='(iw-iw/zoom)*${kbEase}':y='ih/2-(ih/zoom/2)'`
+      : kbDir === 'pan-right'
+        ? `x='${kbEase}*(iw-iw/zoom)':y='ih/2-(ih/zoom/2)'`
+        : `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
     const kenburnsVf = kenburns
-      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':d=${Math.max(1, Math.round(duration * 30))}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30,minterpolate=fps=30:mi_mode=mci`
+      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z=${kbZ}:d=${kbFrames}:${kbXY}:s=1080x1920:fps=30,minterpolate=fps=30:mi_mode=mci`
       // Contain/refit — NEVER crop — every segment (still AND Sora motion) to the
       // 1080x1920 / 9:16 output contract BEFORE fps normalization, so concatClips'
       // xfade math sees identical cadence AND dimensions.
@@ -363,7 +387,10 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
   // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
   // be crossfaded directly. Each xfade overlaps by TRANSITION_MS.
-  const DURATION_MS = process.env.SCENE_TRANSITION_MS ? Number(process.env.SCENE_TRANSITION_MS) : 500;
+  // SEAMLESS STITCHING (owner Sep 17): default dissolve LONGER — 800ms (was
+  // 500ms). A 500ms linear fade between two unrelated stills reads as a flash;
+  // ~800ms + the eased zoom in renderClip reads as a continuous camera move.
+  const DURATION_MS = process.env.SCENE_TRANSITION_MS ? Number(process.env.SCENE_TRANSITION_MS) : 800;
   const TR_MS = Math.min(DURATION_MS, 1000);
   if (inputs.length === 1) {
     const cmd = ffmpeg().input(inputs[0]);
@@ -389,16 +416,31 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     const probes = inputs.map(probe);
     const seconds = probes.map(p => p.seconds);
     const tr = TR_MS/1000;
+    // ── BLACK-FLASH GUARD (owner Sep 17: "0.5s xfade ... flashed black") ─────
+    // The old chain set offset+duration == clip end EXACTLY; on MP4s where the
+    // container duration is a hair longer than the decodable frame PTS, the fade's
+    // last frame(s) request a frame past EOF → ffmpeg emits a black/dark hold for
+    // 1–2 frames at every cut. Fix: clone-pad EVERY input's tail (tpad stop_mode
+    // =clone) so the fade always completes on real/cloned frames, then trim the
+    // output back to the planned total with -t. Pad = tr + 0.15s safety margin.
+    const tailPad = (tr + 0.15).toFixed(3);
+    const totalSec = (seconds.reduce((a,b)=>a+b,0) - tr * Math.max(0, inputs.length - 1)).toFixed(3);
     const filter = [];
     let offsetAcc = 0;
-    // xfade chain (VIDEO). IMPORTANT: the FIRST input is stream 0:v (never renamed),
-    // so the first transition is [0:v][1:v]xfade[v1]; each following reuses the
-    // previous output: [v1][2:v]xfade[v2], ...
+    // Per-input clone-tail pad (video only; audio handled below by acrossfade):
+    // [i:v]tpad=...:[i:p] — every input is extended so NO xfade ever reads EOF.
+    for (let i = 0; i < inputs.length; i++) {
+      filter.push(`[${i}:v]tpad=stop_mode=clone:stop_duration=${tailPad}[v${i}p]`);
+    }
+    // xfade chain (VIDEO) over the PADDED labels. IMPORTANT: padding only extends
+    // each input's TAIL (start PTS unchanged), so xfade offsets computed from the
+    // ORIGINAL probed durations stay exact AND the fade-out region always has
+    // real frames to read — deterministic no-black at the boundary.
     offsetAcc = Math.max(0, seconds[0] - tr);
-    filter.push(`[0:v][1:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
+    filter.push(`[v0p][v1p]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
     for (let i=2;i<inputs.length;i++){
       offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
-      filter.push(`[v${i-1}][${i}:v]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
+      filter.push(`[v${i-1}][v${i}p]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
     }
     // ── AUDIO: carry each clip's narration through with acrossfade between
     //    consecutive audio-bearing clips (same overlap tr as the video xfade), then
@@ -433,7 +475,7 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       inputs.forEach(i=>{ args.push('-i',i); });
       args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']');
       if (audioMap) { args.push('-map', audioMap, '-c:a','aac','-b:a','128k'); }
-      args.push('-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
+      args.push('-t', totalSec, '-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
       execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
         if(err) reject(new Error('ffmpeg xfade exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
         else resolve();
@@ -1598,6 +1640,10 @@ if (!skipGeneration) {
     try {
       const dir=path.join(process.cwd(),'temp','scene-projects',projectId); fs.mkdirSync(dir,{recursive:true});
       const clips:string[]=[];
+      // Ken Burns continuity state (threaded across consecutive still scenes; see
+      // the renderClip call below — SEAMLESS STITCHING, owner Sep 17).
+      let kbCam: number | null = null;
+      let kbDir: 'zoom-in' | 'pan-left' | 'pan-right' = 'zoom-in';
       for (const scene of complete) {
         const local=String((scene.metadata as any)?.localPath||'');
         if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber}`); continue; }
@@ -1610,8 +1656,24 @@ if (!skipGeneration) {
         // Ken Burns (slow zoompan) applies to EVERY still scene — Faceless by design and
         // Scene's gpt-image scenes (mirroring the owner-approved Faceless look). Motion
         // (Sora) scenes are NOT Ken Burns'ed — they carry real motion already.
+        // SEAMLESS STITCHING (owner Sep 17): thread a CONTINUOUS zoom across
+        // consecutive stills — each still starts at the previous still's end zoom
+        // (capped 1.30) and pushes in ~0.10 more, with the SAME direction. The
+        // camera never "snaps back" to 1.0 at a cut; a motion scene in between
+        // resets the camera (new shot, no continuity to preserve).
         const sceneAudio = audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined;
-        await renderClip(local,clip,scene.duration||3,sceneAudio,{kenburns:scene.visualType==='still'});
+        const kbOpts: any = { kenburns: scene.visualType === 'still' };
+        if (scene.visualType === 'still') {
+          const nextStart = kbCam === null ? 1.0 : Math.min(kbCam, 1.30);
+          const nextEnd = Math.min(1.30, nextStart + 0.10);
+          kbOpts.kenburnsStartZoom = nextStart;
+          kbOpts.kenburnsEndZoom = nextEnd;
+          kbOpts.kenburnsDir = kbDir;
+          kbCam = nextEnd;
+        } else {
+          kbCam = null; // Sora motion scene = fresh camera for the next still run
+        }
+        await renderClip(local,clip,scene.duration||3,sceneAudio,kbOpts);
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
