@@ -5,7 +5,6 @@ import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
-import { soraVideoService, type SoraGenerationOptions } from './soraVideoService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
 import { PromptTemplate } from '@langchain/core/prompts';
@@ -22,7 +21,7 @@ export interface TwinCreationRequest {
   voiceStyle?: string; // 'natural' | 'energetic' | 'calm'
   voiceId?: string;
   mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
-  duration?: number;   // requested twin video length (seconds); honored via frame pacing (Sora single-clip cannot take a duration param)
+  duration?: number;   // requested twin video length (seconds); honored via frame pacing (zero-video-API Faceless-style engine — Twin never uses a video API)
 }
 
 export interface CinemaAsset {
@@ -99,56 +98,14 @@ export class CinemaEngineService {
       // Step 1: Extract Facial DNA from photo using Gemini Vision
       const facialDna = await this.extractFacialDna(userId, inputPath);
 
-      // Step 2: Try Sora 2 for direct video generation.
-      // NOTE: We do NOT pass a raw `duration` to Sora — the configured Sora endpoint
-      // rejects an arbitrary duration param (400 unknown parameter: duration). Instead
-      // we pass `needSeconds` so the owner 16|20 GATE resolves the tier: a 15s twin
-      // requests seconds:'16' (bills $1.60, not the $2.00 '20' default); a 30s twin
-      // stays on the '20' budget tier. Fallback frame pacing still honors the target
-      // length when Sora is unavailable, exactly as before.
-      try {
-        const soraPrompt = this.buildSoraTwinPrompt(facialDna, script, voiceStyle, mood);
-        console.log(`[CinemaEngine] Attempting Sora 2 Neural Twin for user ${userId}...`);
-        const soraOptions: SoraGenerationOptions = {};
-        if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
-          soraOptions.needSeconds = Math.round(duration); // 15 -> gate '16' ($1.60); 30+ -> '20'
-        }
-
-        const soraResult = await soraVideoService.generateVideo(soraPrompt, soraOptions);
-
-        if (soraResult.success && soraResult.videoPath) {
-          // Copy Sora output to the expected cinema path
-          fs.copyFileSync(soraResult.videoPath, outputPath);
-          try { fs.unlinkSync(soraResult.videoPath); } catch {}
-
-          await generateTwinVariants();
-          // Upload to R2 if available
-          const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
-
-          await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'sora-2' });
-
-          return {
-            id: assetId,
-            videoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
-            thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
-            status: 'completed',
-            metadata: {
-              script,
-              facialDna,
-              engine: 'Sora 2 Neural Twin',
-            },
-            variants: exportVariants,
-          };
-        }
-        console.warn(`[CinemaEngine] Sora 2 failed: ${soraResult.error}. Falling back to frame pipeline...`);
-      } catch (soraErr: any) {
-        console.warn(`[CinemaEngine] Sora 2 error: ${soraErr.message}. Falling back.`);
-      }
-
-      // Fallback: legacy frame-by-frame pipeline.
-      // Honor the requested twin duration (30/60s) via frame pacing — a Sora single
-      // clip cannot accept a duration param, so we reach the target by generating the
-      // right number of frames and holding each frame for the matching duration.
+      // Step 2: ZERO-VIDEO-API FACELESS-STYLE PIPELINE (owner Sep 18 lock — "what
+      // if we did twin the same way we do faceless": Twin = Faceless engine, NO
+      // Sora, NO Veo, NO video API of any kind, at BOTH 15s and 30s). Sora was the
+      // legacy primary here and is scheduled to permanently shut down 2026-09-24;
+      // Twin now renders directly through the frame pipeline below — facial-DNA
+      // talking-head stills (sharp, local) + FFmpeg compose — which is already
+      // zero video API and was the pre-existing fallback. Cost ledger never sees
+      // a Sora spend for Twin.
       const lipSyncData = await this.generateLipSyncReasoning(script);
       const framePaths = await this.generateTalkingFrames(
         facialDna, lipSyncData, script, this.cinemaDir, assetId, duration
@@ -159,7 +116,7 @@ export class CinemaEngineService {
       // Upload to R2 if available
       const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
 
-      await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length });
+      await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'faceless-engine' });
 
       for (const fp of framePaths) {
         try { fs.unlinkSync(fp); } catch {}
@@ -174,7 +131,7 @@ export class CinemaEngineService {
           script,
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
-          engine: 'Empire Cinema Neural Layer v2 (fallback)',
+          engine: 'faceless-engine (frame pipeline · zero video API, no Sora/Veo)',
         },
         variants: exportVariants,
       };
@@ -192,24 +149,8 @@ export class CinemaEngineService {
   }
 
   /**
-   * Build a Sora 2 prompt from facial DNA + script for Neural Twin generation.
+   * Load a photo as a base64 data-URI from either a local path or an http(s) URL.
    */
-  private buildSoraTwinPrompt(facialDna: FacialDNA, script: string, voiceStyle?: string, mood?: string): string {
-    const style = voiceStyle || 'natural';
-    const moodClause = mood ? `\nOverall mood: ${mood} — the person's delivery, expression and the scene lighting should all convey a ${mood} tone.` : '';
-    return `Create a realistic talking-head video of a person with the following characteristics:
-
-Face: ${facialDna.faceShape} face shape, ${facialDna.skinTone} skin tone, ${facialDna.eyeColor} eyes.
-Hair: ${facialDna.hairStyle}, ${facialDna.hairColor}.
-Features: ${facialDna.jawline} jawline, ${facialDna.lipShape} lips, ${facialDna.noseShape} nose, ${facialDna.eyebrowShape} eyebrows.
-
-The person is speaking directly to camera in a ${style} tone, delivering this script:
-"${script}"
-
-Style: professional, well-lit studio background, natural head movement, ${style} expression.${moodClause}`;
-  }
-
-  /** Load a photo as a base64 data-URI from either a local path or an http(s) URL. */
   private async loadImageDataUri(ref: string): Promise<{ dataUri: string; mime: string }> {
     const mime = (name: string) =>
       /\.png$/i.test(name) ? 'image/png'
