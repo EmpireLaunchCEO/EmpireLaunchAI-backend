@@ -47,9 +47,14 @@ export interface VoiceoverConfig {
 /**
  * Resolve a (gender, tone) selection to a concrete gpt-audio voice id.
  *
- * Maps:
- *  - female: nova (bright), sage (calm), shimmer (warm), ash (serious)
+ * Maps (AUDIT 2026-09-21, Defect 2 — owner Faceless test heard a male voice on
+ * a female+serious selection). gpt-audio voice sex per OpenAI's own voice
+ * descriptions / measured f0:
+ *  - female: nova (bright), sage (calm/steady), shimmer (warm), sage (serious)
  *  - male:   echo (confident), fable (warm/calm), onyx (serious/deep), verse (energetic)
+ *  - 'ash' is MALE-presenting (firm/confident) — it is NOT a female voice and
+ *    must never sit in a female bucket (it previously mapped female+serious →
+ *    ash; owner's recorded MP4 measured median f0 131.1 Hz = male range).
  *
  * `tone === 'auto'` (or unknown tone) falls back to a gender default, which the
  * pipeline may leave as the model's natural delivery to "match the video's vibe".
@@ -62,7 +67,7 @@ export function resolveVoice(gender?: VoiceGender, tone?: VoiceTone): GptAudioVo
     enthusiastic: 'nova',
     calm: 'sage',
     warm: 'shimmer',
-    serious: 'ash',
+    serious: 'sage',
   };
   const maleByTone: Partial<Record<VoiceTone, GptAudioVoice>> = {
     enthusiastic: 'verse',
