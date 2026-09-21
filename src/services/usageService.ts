@@ -90,8 +90,8 @@ export class UsageService {
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
     // Weekly video-production quotas (168-hour rolling window), final owner config:
-    // Scene-Based (customize_video) = 3/wk, Faceless = 10/wk, Neural Twin (neural_twin) = 5/wk.
-    const weeklySceneLimit = 3;   // customize_video
+    // Scene-Based (customize_video) = 4/wk (owner Sep 18), Faceless = 10/wk, Neural Twin (neural_twin) = 5/wk.
+    const weeklySceneLimit = 4;   // customize_video
     const weeklyFacelessLimit = 10;
     const weeklyTwinLimit = 5;    // neural_twin
     const monthlyDesignLimit = 50;
@@ -146,7 +146,7 @@ export class UsageService {
       } catch {
         periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       }
-      // Final per-type weekly limits: customize_video=3, faceless=10, neural_twin=5.
+      // Final per-type weekly limits: customize_video=4, faceless=10, neural_twin=5 (owner Sep 18).
       if (type === 'customize_video') limit = weeklySceneLimit;
       else if (type === 'faceless') limit = weeklyFacelessLimit;
       else limit = weeklyTwinLimit; // neural_twin

@@ -1939,6 +1939,7 @@ else {
         } else {
           // LEGACY path (in-flight pre-span projects / single-scene regeneration):
           // Veo 3.1 Lite — one 6s call per scene, sliced to the scene's window.
+          let veoLocalPath: string | undefined;
           let veoLastError: string | undefined;
           for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
             if (attempt > 1) {
@@ -1966,14 +1967,15 @@ else {
               const slicePath = path.join(sliceDir, `veo-legacy-scene-${scene.sceneNumber}.mp4`);
               await sliceSoraTake(veoResult.videoPath, slicePath, 0, sliceWindow);
               if (sliceWindow < (scene.duration || 3) - 0.05) await padClipToDuration(slicePath, scene.duration || 3);
-              localPath = slicePath;
+              veoLocalPath = slicePath;
               trace(`scene_veo_legacy_ok id=${scene.id} win=${sliceWindow}s billed=${veoResult.billedSeconds}s`);
               break;
             }
             veoLastError = veoResult.error || 'no video path';
             trace(`scene_veo_attempt_failed id=${scene.id} attempt=${attempt} error=${veoLastError}`);
           }
-          if (!localPath) throw new Error(veoLastError || 'Veo scene generation failed');
+          if (!veoLocalPath) throw new Error(veoLastError || 'Veo scene generation failed');
+          localPath = veoLocalPath;
         }
       }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
