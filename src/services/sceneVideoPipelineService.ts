@@ -6,6 +6,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
+import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from './veoVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -906,7 +907,46 @@ export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []):
     i = j;
   }
   return spans;
-}/** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
+}
+/** VEO MOTION WINDOW BUDGET (owner Sep 18 — Sora → Veo Lite): each motion WINDOW of a
+ *  Scene plan becomes its OWN Veo call of <=6s (Lite enum 4|6|8), exactly-once per
+ *  window. Total paid motion per Scene video is capped at VEO_MOTION_BUDGET_SECONDS
+ *  (12s = 2x6s calls ~= $0.60 for a 30s video — the owner-approved canonical Scene
+ *  bill). Windows beyond the budget are demoted back to stills (front windows first:
+ *  planMotionWindows already treats the END of a run as least important — it shrinks
+ *  and truncates from the END), so the persisted plan, scene visualTypes and span
+ *  metadata all agree with what the worker will actually pay for. Pure + deterministic.
+ *  Runs for mode==='scene' only (Faceless + Twin-15s stay zero-video-API). */
+export function capVeoMotionWindows(
+  script: SceneScript[],
+  spans: SoraSpan[],
+  maxWindows: number = Math.max(1, Math.floor(VEO_MOTION_BUDGET_SECONDS / VEO_CALL_SECONDS)),
+): { script: SceneScript[]; spans: SoraSpan[] } {
+  if (!spans.length) return { script, spans };
+  const demoted = new Set<number>();
+  let kept = 0;
+  const capped = spans
+    .map((span) => {
+      const windows = (span.windows ?? []).filter((w) => {
+        if (kept < maxWindows) { kept += 1; return true; }
+        demoted.add(w.sceneNumber);
+        return false;
+      });
+      return {
+        ...span,
+        windows,
+        sceneNumbers: windows.map((w) => w.sceneNumber),
+        totalSeconds: windows.reduce((a, w) => a + (w.motionSeconds || 0), 0),
+      };
+    })
+    .filter((span) => span.windows.length > 0);
+  if (!demoted.size) return { script, spans: capped };
+  const script2 = script.map((s) =>
+    demoted.has(s.sceneNumber) ? { ...s, visualType: 'still' as const, soraBlock: undefined } : s,
+  );
+  return { script: script2, spans: capped };
+}
+/** True if a URL looks like a short video file (used to splice an uploaded clip as b-roll/opening). */
 function isVideoUrl(url: string): boolean {
   const clean = (url.split('?')[0] || '').toLowerCase();
   return /\.(mp4|mov|webm|m4v|mkv|avi)$/.test(clean);
@@ -1491,9 +1531,24 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // full 16s flowing across the scene beats) — 3×5s windows = 15s ≤ 16 ('16', $1.60)
     // vs the old 3×6s=18s → '20' ($2.00) bill. Pure + deterministic; persisted for
     // audit + the worker's take pre-pass.
-    const spanPlans = mode === 'scene'
+    // VEO MOTION BUDGET (owner Sep 18 — Sora -> Veo Lite): the span/window election
+    // above is Sora-shaped (ONE contiguous <=16s take per block). Veo Lite caps every
+    // call at 6s (enum 4|6|8), so each motion WINDOW becomes its OWN Veo call and total
+    // paid motion is budget-capped at VEO_MOTION_BUDGET_SECONDS (12s = 2x6s calls ~=
+    // $0.60 for a 30s video — the owner-approved canonical Scene bill). Windows beyond
+    // the budget are deterministically demoted back to stills (front-first, matching
+    // planMotionWindows' least-important-tail semantics) so the persisted plan, span
+    // metadata and the worker's per-window Veo takes all agree. Faceless (zero-video-API
+    // hard lock) and Twin never reach this step.
+    let spanPlans = mode === 'scene'
       ? planSoraSpans(planned, extractSoraBlockPrompts(generatedScript || {}, budget))
       : [];
+    if (mode === 'scene' && spanPlans.length) {
+      const cap = capVeoMotionWindows(planned, spanPlans);
+      spanPlans = cap.spans;
+      planned.splice(0, planned.length, ...cap.script);
+      trace(`veo_window_cap project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} demotedToStill=${planned.filter(s => s.visualType !== 'motion').length}`);
+    }
     const motionWindowByScene = new Map<number, MotionWindow>();
     for (const span of spanPlans) for (const w of span.windows) motionWindowByScene.set(w.sceneNumber, w);
     // CONTENT DIRECTION (owner Sep 9 — folded into this planner rewrite): resolve
@@ -1521,6 +1576,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
       return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{
         importantSora:isMotion,
+        ...(isMotion && mode === 'scene' ? { veoWindowReady: true } : {}),
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
         ...(mw ? { motionStartSeconds: mw.motionStartSeconds, motionSeconds: mw.motionSeconds, spanOffset: mw.motionStartSeconds } : {}),
         ...(s.narrationRole !== undefined ? { narrationRole: s.narrationRole } : {}),
@@ -1545,32 +1601,30 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       : [];
     const heroSource = sourceImages[0];
 if (!skipGeneration) {
-      // SORA SPAN PRE-PASS (owner directive, live re-test; 16s cap Sep 14): generate
-      // EXACTLY ONE 16s take per soraBlock BEFORE the scene loop, then let every
-      // contiguous scene of the block slice its own IMPORTANT-SECONDS window out of
-      // that same take. This is what makes 3 motion scenes show ONE continuous 16s
-      // shot (t[0..5] → scene 3, t[5..10] → scene 4, t[10..15] → scene 5) instead of
-      // a 3×6s=18s run that previously tipped the bill to the '20' tier. Legacy
-      // projects (no persisted `spans` metadata) skip this entirely
-      // and keep the old per-scene take path. Serialized (≤ `budget` spans) so Sora
-      // spend is exactly budget × 1 call; each span retries with the same backoff the
-      // legacy path used. A span take failure fails its scenes FAST (predictable spend
-      // — never a second Sora call for the same block).
+      // VEO SPAN PRE-PASS (owner Sep 18 — Sora → Veo Lite): generate ONE Veo call PER
+      // motion WINDOW before the scene loop (Lite caps a call at 6s — enum 4|6|8), then
+      // each motion scene consumes its own already-window-sliced take (veoWindowReady —
+      // no shared-span re-slicing). Total paid motion was capped at planning time
+      // (capVeoMotionWindows → 2 windows ≈ $0.60 for a 30s video). EXACTLY-ONCE per
+      // window: the operation name is persisted in metadata.veoJobs BEFORE polling and
+      // retries resume the SAME operation — never a second paid POST. Serialized per
+      // span; a window take failure fails its scene FAST (predictable spend). Legacy
+      // projects (no persisted `spans` metadata) skip this entirely and keep the old
+      // per-scene path (which is also Veo now — see processScene).
       const spanPlans: SoraSpan[] = Array.isArray(pmeta.spans) ? pmeta.spans : [];
       const takeRegistry = new Map<number, string>();
       const failedSpanSceneIds = new Set<string>();
       for (const span of spanPlans) {
         try {
-          const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
-          const takePath = await withDeadline(
-            this.generateSoraTake(spanPrompt, span, projectId),
+          const takes = await withDeadline(
+            this.generateVeoTakes(span, projectId, heroSource),
             SCENE_DEADLINE_MS,
-            `Sora span ${span.soraBlock}`,
+            `Veo span ${span.soraBlock}`,
           );
-          takeRegistry.set(span.soraBlock, takePath);
-          trace(`span_take_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] total=${span.totalSeconds}s`);
+          for (const [sceneNumber, takePath] of takes) takeRegistry.set(sceneNumber, takePath);
+          trace(`veo_span_takes_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takes.size}`);
         } catch (spanError: any) {
-          trace(`span_take_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
+          trace(`veo_span_take_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
           const ids = span.sceneNumbers
             .map(n => scenes.find(s => s.sceneNumber === n)?.id)
             .filter((id): id is string => Boolean(id));
@@ -1578,7 +1632,7 @@ if (!skipGeneration) {
           if (ids.length) {
             await db.update(schema.videoScenes).set({
               status: 'failed',
-              metadata: { error: `Sora span take ${span.soraBlock} failed: ${spanError?.message}` },
+              metadata: { error: `Veo span take ${span.soraBlock} failed: ${spanError?.message}` },
               updatedAt: new Date(),
             }).where(inArray(schema.videoScenes.id, ids));
           }
@@ -1594,9 +1648,9 @@ if (!skipGeneration) {
       // all-settled semantics (fulfilled/rejected per scene) so rejection handling below
       // is unchanged.
       const outcomes = await mapLimit(scenes, SCENE_CONCURRENCY, async (scene: any) => {
-        if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // block take failed → already marked failed
+        if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // window take failed → already marked failed
         try {
-          const takePath = takeRegistry.get(Number((scene.metadata as any)?.soraBlock ?? -1));
+          const takePath = takeRegistry.get(scene.sceneNumber);
           await withDeadline(this.processScene(scene, userId, voice, tone, heroSource, takePath), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
@@ -1821,6 +1875,7 @@ if (!skipGeneration) {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraJob?.id ?? (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
+      let sceneVeoOperation: string | undefined = (scene.metadata as any)?.veoJob?.operation; // exactly-once resume op (Veo legacy/per-scene path)
       // Use the uploaded source image as the continuous subject. Where the provider
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
@@ -1845,69 +1900,80 @@ else {
         const spanOffset = Number((scene.metadata as any)?.motionStartSeconds ?? (scene.metadata as any)?.spanOffset ?? NaN);
         const motionWindow = Number((scene.metadata as any)?.motionSeconds ?? NaN);
         if (spanTakePath && fs.existsSync(spanTakePath)) {
-          // One 16s take per soraBlock (owner Sep 14), sliced CONTIGUOUSLY into each
-          // scene's IMPORTANT-SECONDS window [motionStart, +motionSeconds) — 3×5s →
-          // t[0..5], t[5..10], t[10..15] — the paid 16s flows across the scene beats
-          // as ONE continuous shot (never re-trimmed from 0, never disjoint, never
-          // loop-padded). Output-seek = frame-accurate. When the beat window is
-          // SHORTER than the scene's timeline duration, the slice is held (tpad
-          // clone-last-frame) to fill the scene's exact slot — zero extra Sora cost,
-          // the planned timeline length + narration slot are preserved.
-          const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
-          fs.mkdirSync(sliceDir, { recursive: true });
-          const slicePath = path.join(sliceDir, `sora-block-${spanBlock}-scene-${scene.sceneNumber}.mp4`);
-          const sliceWindow = Number.isFinite(motionWindow) ? motionWindow : (scene.duration || 3);
-          await sliceSoraTake(spanTakePath, slicePath, spanOffset, sliceWindow);
-          if (Number.isFinite(motionWindow) && sliceWindow < (scene.duration || 3) - 0.05) {
-            await padClipToDuration(slicePath, scene.duration || 3);
+          if ((scene.metadata as any)?.veoWindowReady) {
+            // VEO PER-WINDOW (owner Sep 18 — Sora → Veo Lite): the take path IS this
+            // scene's already-window-sliced Veo clip (generateOneVeoWindow sliced the
+            // 6s call to the scene's important-seconds window). Hold (tpad
+            // clone-last-frame) to the scene's full timeline slot so the planned
+            // length + narration window are preserved — zero extra paid seconds.
+            const sliceWindow = Number.isFinite(motionWindow) ? motionWindow : (scene.duration || 3);
+            if (Number.isFinite(motionWindow) && sliceWindow < (scene.duration || 3) - 0.05) {
+              await padClipToDuration(spanTakePath, scene.duration || 3);
+            }
+            localPath = spanTakePath;
+            trace(`scene_veo_window_ready id=${scene.id} win=${sliceWindow}s pad=${Math.max(0, Math.round(((scene.duration || 3) - sliceWindow) * 10) / 10)}s`);
+          } else {
+            // One 16s take per soraBlock (owner Sep 14), sliced CONTIGUOUSLY into each
+            // scene's IMPORTANT-SECONDS window [motionStart, +motionSeconds) — 3×5s →
+            // t[0..5], t[5..10], t[10..15] — the paid 16s flows across the scene beats
+            // as ONE continuous shot (never re-trimmed from 0, never disjoint, never
+            // loop-padded). Output-seek = frame-accurate. When the beat window is
+            // SHORTER than the scene's timeline duration, the slice is held (tpad
+            // clone-last-frame) to fill the scene's exact slot — zero extra Sora cost,
+            // the planned timeline length + narration slot are preserved.
+            const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
+            fs.mkdirSync(sliceDir, { recursive: true });
+            const slicePath = path.join(sliceDir, `sora-block-${spanBlock}-scene-${scene.sceneNumber}.mp4`);
+            const sliceWindow = Number.isFinite(motionWindow) ? motionWindow : (scene.duration || 3);
+            await sliceSoraTake(spanTakePath, slicePath, spanOffset, sliceWindow);
+            if (Number.isFinite(motionWindow) && sliceWindow < (scene.duration || 3) - 0.05) {
+              await padClipToDuration(slicePath, scene.duration || 3);
+            }
+            localPath = slicePath;
+            trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s win=${sliceWindow}s pad=${Math.max(0, Math.round(((scene.duration || 3) - sliceWindow) * 10) / 10)}s`);
           }
-          localPath = slicePath;
-          trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s win=${sliceWindow}s pad=${Math.max(0, Math.round(((scene.duration || 3) - sliceWindow) * 10) / 10)}s`);
-          localPath = slicePath;
-          trace(`scene_sora_slice id=${scene.id} block=${spanBlock} offset=${spanOffset}s dur=${scene.duration || 3}s`);
         } else if ((scene.metadata as any)?.soraBlock !== undefined && Number.isFinite(spanOffset)) {
-          // New-plan span scene whose shared take failed to generate: fail FAST and
-          // predictably — never silently re-fire a second Sora call for the same block.
-          throw new Error(`Sora span take ${spanBlock} missing (span generation failed) — regenerate in Studio`);
+          // New-plan span scene whose take failed to generate: fail FAST and
+          // predictably — never silently re-fire a second motion call for the same block.
+          throw new Error(`Motion span take ${spanBlock} missing (span generation failed) — regenerate in Studio`);
         } else {
           // LEGACY path (in-flight pre-span projects / single-scene regeneration):
-          // Sora 2 flakes ~50% (status:failed ~55-90s in). Retry with backoff.
-          let soraResult: { success: boolean; videoPath?: string; error?: string } | null = null;
-          let retriesUsed = 0;
+          // Veo 3.1 Lite — one 6s call per scene, sliced to the scene's window.
+          let veoLastError: string | undefined;
           for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
             if (attempt > 1) {
-              retriesUsed = attempt - 1;
               const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
-              trace(`scene_sora_retry_${retriesUsed} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+              trace(`scene_veo_retry_${attempt - 1} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
-            const sceneSeconds = Math.min(16, Math.round(scene.duration || 16));
-            sceneSoraVideoId = (scene.metadata as any)?.soraJob?.id ?? ((scene.metadata as any)?.soraVideoId || sceneSoraVideoId);
-            const isImportant = Boolean(scene.metadata?.importantSora);
-            soraResult = await soraVideoService.generateVideo(subjectPrompt, {
-              userId: undefined,
-              // 16s GATE (owner Sep 14 — supersedes the old always-20 / 16|20 policy):
-              // the LEGACY per-scene fallback is HARD-CAPPED at 16s like every Scene
-              // caller: seconds resolves ONLY to '16' — '20' ($2.00) is UNREACHABLE
-              // from Scene/Customize, including legacy in-flight projects. A single
-              // take FFmpeg trims with `-t` to the scene window (continuous motion,
-              // no loop-padding, no repeat). NEVER 4/8/12. Explicit size ALWAYS.
-              seconds: snapSora16or20(sceneSeconds),
-              needSeconds: sceneSeconds,
-              existingVideoId: sceneSoraVideoId, // exactly-once: never re-POST a known id
-              size: SORA_SCENE_SIZE,
-              // secondary content-continuity steer only (cannot change clip length).
-              promptHint: isImportant ? `Render ONE continuous single take of this important content — no cuts, no scene changes, one fluid motion sequence. FFmpeg will trim it to this scene's ~${sceneSeconds}s window.` : undefined,
-              onVideoCreated: (id) => {
-                sceneSoraVideoId = id;
-                void this.persistSceneSoraVideoId(scene.id, id);
+            const windowSeconds = Math.min(VEO_CALL_SECONDS, Math.max(1, Math.round(scene.duration || VEO_CALL_SECONDS)));
+            sceneVeoOperation = (scene.metadata as any)?.veoJob?.operation ?? sceneVeoOperation;
+            const veoResult = await veoVideoService.generateSceneVideo({
+              prompt: `${subjectPrompt} — One continuous single take of this scene's content: no cuts, no scene changes, one fluid motion sequence, same subject throughout.`,
+              sceneKey: `scene${scene.sceneNumber}`,
+              existingOperationName: sceneVeoOperation, // exactly-once: never re-POST a known op
+              onOperationCreated: (operation) => {
+                sceneVeoOperation = operation;
+                void this.persistSceneVeoOperation(scene.id, operation);
               },
+              durationSeconds: VEO_CALL_SECONDS,
             });
-            if (soraResult.success && soraResult.videoPath) break;
-            trace(`scene_sora_attempt_failed id=${scene.id} attempt=${attempt} error=${soraResult.error || 'no video path'}`);
+            if (veoResult.operationName) sceneVeoOperation = veoResult.operationName;
+            if (veoResult.success && veoResult.videoPath) {
+              const sliceWindow = Math.min(windowSeconds, veoResult.billedSeconds ?? VEO_CALL_SECONDS);
+              const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
+              fs.mkdirSync(sliceDir, { recursive: true });
+              const slicePath = path.join(sliceDir, `veo-legacy-scene-${scene.sceneNumber}.mp4`);
+              await sliceSoraTake(veoResult.videoPath, slicePath, 0, sliceWindow);
+              if (sliceWindow < (scene.duration || 3) - 0.05) await padClipToDuration(slicePath, scene.duration || 3);
+              localPath = slicePath;
+              trace(`scene_veo_legacy_ok id=${scene.id} win=${sliceWindow}s billed=${veoResult.billedSeconds}s`);
+              break;
+            }
+            veoLastError = veoResult.error || 'no video path';
+            trace(`scene_veo_attempt_failed id=${scene.id} attempt=${attempt} error=${veoLastError}`);
           }
-          if (!soraResult?.success || !soraResult.videoPath) throw new Error(soraResult?.error || 'Sora 2 failed');
-          localPath = soraResult.videoPath;
+          if (!localPath) throw new Error(veoLastError || 'Veo scene generation failed');
         }
       }
       let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
@@ -1922,7 +1988,8 @@ else {
         const uploaded = await r2Storage.uploadLocalFile(copyPath, userId, 'video-scenes', mime);
         assetUrl = uploaded.url || safeLocal;
       }
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':'sora-2',localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
@@ -1942,43 +2009,104 @@ else {
    *  metadata (soraJobs[block], shape {id, status, createdAt}) the moment the API
    *  returns it, and a retry (even
    *  after a process restart) RESUMES that id via existingVideoId — never re-POST. */
-  private async generateSoraTake(spanPrompt: string, span: SoraSpan, projectId: string): Promise<string> {
-    // OWNER Sep 14: Scene takes NEVER request '20' — window sum is hard-capped at 16s;
-    // fallback is 16, so '20' is UNREACHABLE from Scene/Customize (always $1.60).
-    const needSeconds = Math.min(SPAN_TAKE_SECONDS, Math.max(1, span.totalSeconds > 0 ? Math.round(span.totalSeconds) : SPAN_TAKE_SECONDS));
-    const seconds = snapSora16or20(needSeconds); // "16" for every Scene take — never 4/8/12/20
-    let persistedVideoId: string | undefined = await this.loadSoraTakeVideoId(projectId, span.soraBlock);
+  /** Generate Veo takes for EVERY motion window of a span (owner Sep 18 — Sora → Veo
+   *  Lite): each window is its OWN Veo call (6s — Lite enum 4|6|8) sliced to the
+   *  window's important seconds, so the returned Map<sceneNumber, takePath> gives each
+   *  motion scene a ready-to-use clip (tpad-hold fills the scene's fuller timeline slot
+   *  downstream in renderClip). EXACTLY-ONCE per window (owner spec): the operation name
+   *  is persisted in project metadata (metadata.veoJobs[sceneKey] = {operation, status,
+   *  createdAt}) the moment the API returns it; retries (even after a process restart)
+   *  RESUME that operation via existingOperationName — never a second paid POST. */
+  private async generateVeoTakes(span: SoraSpan, projectId: string, heroSource?: string): Promise<Map<number, string>> {
+    const takes = new Map<number, string>();
+    const windows = span.windows ?? [];
+    if (!windows.length) return takes;
+    for (const w of windows) {
+      const sceneKey = `block${span.soraBlock}-scene${w.sceneNumber}`;
+      const takePath = await this.generateOneVeoWindow(span, w, projectId, sceneKey, heroSource);
+      takes.set(w.sceneNumber, takePath);
+    }
+    return takes;
+  }
+  /** Generate ONE Veo window take with exactly-once resume + the same retry/backoff
+   *  policy the legacy Sora span path used. The 6s take is sliced to THIS window's
+   *  important seconds (tpad-hold fills the rest of the scene below — zero extra paid
+   *  seconds). Provider tag 'veo-3.1-lite' for cost tracking (never in UI). */
+  private async generateOneVeoWindow(span: SoraSpan, w: MotionWindow, projectId: string, sceneKey: string, heroSource?: string): Promise<string> {
+    const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
+    const windowSeconds = Math.max(1, Math.min(w.motionSeconds || VEO_CALL_SECONDS, VEO_CALL_SECONDS));
+    let persistedOp: string | undefined = await this.loadVeoTakeOperation(projectId, sceneKey);
     for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
         const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
-        trace(`span_sora_retry_${attempt - 1} block=${span.soraBlock} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+        trace(`veo_window_retry_${attempt - 1} project=${projectId} ${sceneKey} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
-      const soraResult = await soraVideoService.generateVideo(spanPrompt, {
-        userId: undefined,
-        // 16|20 GATE (owner Sora 2 spec): a block that needs ≤16s requests seconds:'16',
-        // else '20' — one continuous take; FFmpeg slices it contiguously across the
-        // span's scene windows (never snapped, never disjoint, never loop-padded).
-        seconds,
-        needSeconds,
-        existingVideoId: persistedVideoId, // exactly-once: never re-POST a known id
-        size: SORA_SCENE_SIZE,             // explicit size ALWAYS (owner)
-        promptHint: span.windows?.length
-          ? `Important motion windows IN ORDER: ${span.windows.map(w => `${w.motionStartSeconds}-${w.motionStartSeconds + w.motionSeconds}s scene ${w.sceneNumber}`).join(', ')} — ONE continuous take through those ${needSeconds}s windows, no cuts, one fluid unbroken camera move, same subject throughout.`
-          : `Render ONE continuous single take flowing through all ${span.sceneNumbers.length} beats IN ORDER — no cuts, no scene changes, one fluid unbroken camera move across the full ~${needSeconds}s of important motion windows. FFmpeg will slice it contiguously into ${span.sceneNumbers.length} scene windows.`,
-        onVideoCreated: (id) => {
-          persistedVideoId = id;
-          void this.persistSoraTakeVideoId(projectId, span.soraBlock, id);
+      const result = await veoVideoService.generateSceneVideo({
+        prompt: `${spanPrompt} — One continuous single take of this beat only (scene ${w.sceneNumber}): no cuts, no scene changes, one fluid motion sequence, same subject throughout.`,
+        sceneKey,
+        existingOperationName: persistedOp, // exactly-once: never a second paid POST
+        onOperationCreated: (operation) => {
+          persistedOp = operation;
+          void this.persistVeoTakeOperation(projectId, sceneKey, operation);
         },
+        durationSeconds: VEO_CALL_SECONDS,
       });
-      if (soraResult.videoId) persistedVideoId = soraResult.videoId;
-      if (soraResult.success && soraResult.videoPath) {
-        void this.markSoraJobStatus(projectId, span.soraBlock, 'completed');
-        return soraResult.videoPath;
+      if (result.operationName) persistedOp = result.operationName;
+      if (result.success && result.videoPath) {
+        const dir = path.join(process.cwd(), 'temp', 'scene-projects', projectId);
+        fs.mkdirSync(dir, { recursive: true });
+        const slicedPath = path.join(dir, `veo-${sceneKey}.mp4`);
+        // The 6s take is sliced to THIS window's important seconds; tpad-hold fills the
+        // rest of the scene's timeline slot downstream (zero extra paid seconds).
+        await sliceSoraTake(result.videoPath, slicedPath, 0, windowSeconds);
+        void this.markVeoJobStatus(projectId, sceneKey, 'completed');
+        trace(`veo_window_ready project=${projectId} ${sceneKey} window=${windowSeconds}s billed=${result.billedSeconds}s`);
+        return slicedPath;
       }
-      trace(`span_sora_attempt_failed block=${span.soraBlock} attempt=${attempt} error=${soraResult.error || 'no video path'} videoId=${persistedVideoId || 'none'}`);
+      trace(`veo_window_attempt_failed project=${projectId} ${sceneKey} attempt=${attempt} error=${result.error || 'no video path'} op=${persistedOp || 'none'}`);
     }
-    throw new Error(`Sora span take ${span.soraBlock} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
+    throw new Error(`Veo window ${sceneKey} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
+  }
+  /** Persist a Veo window's operation name in project metadata under `veoJobs[sceneKey]`
+   *  = {operation, status:'in_progress', createdAt} BEFORE polling (durable, exactly-once
+   *  resume across retries / restarts). Best-effort: never fails the take. */
+  private async persistVeoTakeOperation(projectId: string, sceneKey: string, operation: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
+      veoJobs[sceneKey] = { operation, status: 'in_progress', createdAt: new Date().toISOString() };
+      await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      trace(`veo_window_operation_persisted project=${projectId} ${sceneKey} op=${operation}`);
+    } catch (err: any) {
+      trace(`veo_window_operation_persist_failed project=${projectId} ${sceneKey} error=${err?.message}`);
+    }
+  }
+  /** Mark a Veo window job status (e.g. 'completed' after the take downloads).
+   *  Best-effort: never fails the take. */
+  private async markVeoJobStatus(projectId: string, sceneKey: string, status: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
+      const job = veoJobs[sceneKey];
+      if (!job?.operation) return;
+      veoJobs[sceneKey] = { ...job, status };
+      await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+    } catch { /* best-effort */ }
+  }
+  /** Load a persisted Veo window's operation name (exactly-once resume). */
+  private async loadVeoTakeOperation(projectId: string, sceneKey: string): Promise<string | undefined> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      const meta = ((row?.metadata as any) || {});
+      return meta?.veoJobs?.[sceneKey]?.operation;
+    } catch {
+      return undefined;
+    }
   }
   /** Persist a span take's Sora video id in project metadata under the plan-contract
    *  key `soraJobs[block]` with the ratified shape {id, status, createdAt?} (durable,
@@ -2036,6 +2164,20 @@ else {
       trace(`scene_sora_video_id_persisted scene=${sceneId} id=${videoId}`);
     } catch (err: any) {
       trace(`scene_sora_video_id_persist_failed scene=${sceneId} error=${err?.message}`);
+    }
+  }
+  /** Persist a legacy/per-scene Veo operation name on the scene row metadata under
+   *  `veoJob: {operation, status, createdAt}` (exactly-once resume across retries /
+   *  regenerateScene). Best-effort: never fails the scene. */
+  private async persistSceneVeoOperation(sceneId: string, operation: string): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, sceneId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      await db.update(schema.videoScenes).set({ metadata: { ...meta, veoJob: { operation, status: 'in_progress', createdAt: new Date().toISOString() } }, updatedAt: new Date() }).where(eq(schema.videoScenes.id, sceneId));
+      trace(`scene_veo_operation_persisted scene=${sceneId} op=${operation}`);
+    } catch (err: any) {
+      trace(`scene_veo_operation_persist_failed scene=${sceneId} error=${err?.message}`);
     }
   }
   private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
