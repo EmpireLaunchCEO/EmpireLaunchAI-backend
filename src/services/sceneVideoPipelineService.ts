@@ -66,6 +66,23 @@ export function variantExportIssue(
   if (!sourcePresent) return 'variant source missing before export'; // impossible after the reorder
   return resultsLength > 0 ? undefined : `0/${VIDEO_EXPORT_VARIANTS.length} variants exported`;
 }
+/**
+ * Defect 3 (owner Faceless test, 2026-09-21): pipeline completion used to REPLACE
+ * project metadata with { sceneCount, totalDuration, variantExportCount }, WIPING
+ * the create-time fields this same service persists on insert — voice, tone,
+ * conversation, components, plan, veoJobs (exactly-once resume info), etc. After
+ * completion, regenerateScene read pmeta.voice/pmeta.tone → undefined → silently
+ * defaulted to nova; the Veo exactly-once operation registry was destroyed.
+ *
+ * Merge semantics: prior metadata wins unless the completion explicitly overrides
+ * that key. Pure + deterministic (unit-tested — completion preserves prior fields).
+ */
+export function mergeCompletionMetadata(
+  prior: Record<string, unknown> | null | undefined,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...(prior || {}), ...next };
+}
 /** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -1681,7 +1698,7 @@ if (!skipGeneration) {
       const failedCount = complete.filter(s=>s.status==='failed').length;
       await db.update(schema.videoProjects).set({
         status:'failed',
-        metadata: { failedSceneCount: failedCount, totalScenes: complete.length },
+        metadata: mergeCompletionMetadata(pmeta, { failedSceneCount: failedCount, totalScenes: complete.length }),
         updatedAt:new Date()
       }).where(eq(schema.videoProjects.id,projectId));
       return;
@@ -1771,9 +1788,11 @@ if (!skipGeneration) {
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
       const completeMeta: Record<string, any> = {
-        sceneCount: complete.length,
-        totalDuration: complete.reduce((a,s)=>a+(s.duration||0),0),
-        variantExportCount: variantResults.length,
+        ...mergeCompletionMetadata(pmeta, {
+          sceneCount: complete.length,
+          totalDuration: complete.reduce((a,s)=>a+(s.duration||0),0),
+          variantExportCount: variantResults.length,
+        }),
       };
       if (variantIssue) completeMeta.variantExportError = variantIssue;
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:completeMeta}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
@@ -1868,7 +1887,7 @@ if (!skipGeneration) {
       }
     } catch(assemblyErr:any) {
       trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
-      await db.update(schema.videoProjects).set({status:'failed',metadata:{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length},updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
+      await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(pmeta,{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
   async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
