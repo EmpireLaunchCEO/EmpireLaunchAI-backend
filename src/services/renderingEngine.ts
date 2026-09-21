@@ -4,7 +4,6 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { ProductionScene, TextOverlay } from './productionDirector.js';
-import { soraVideoService } from './soraVideoService.js';
 import { r2Storage } from './r2StorageService.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -28,7 +27,7 @@ export interface RenderResult {
 
 /**
  * Rendering Engine — takes a Production Script and renders it into a video.
- * Pipeline: Sora 2 (attempted first) → GPT Image 2 + Sharp → FFmpeg (fallback)
+ * Pipeline: GPT Image 2 + Sharp → FFmpeg (faceless engine — zero video API)
  */
 export class RenderingEngine {
   private tempDir: string;
@@ -41,51 +40,43 @@ export class RenderingEngine {
   }
 
   /**
-   * Full render pipeline: try Sora 2 first, fall back to gpt-image-2 + FFmpeg.
+   * Full render pipeline (faceless engine — zero video API).
+   * GPT Image 2 stills per scene -> Sharp text overlays -> FFmpeg compose -> R2.
+   * Video-API path removed 2026-09-21 (vendor shutdown 2026-09-24; owner
+   * Sep 18 decision: non-Scene motion = GPT Image 2 + FFmpeg pan/zoom on paid stills).
    */
   async render(params: RenderParams): Promise<RenderResult> {
     const taskId = uuidv4().slice(0, 8);
     const workingDir = path.join(this.tempDir, `render_${taskId}`);
     fs.mkdirSync(workingDir, { recursive: true });
-
     const sceneImages: string[] = [];
-
-    // Build a unified Sora prompt from all scene prompts
-    const soraPrompt = params.scenes
-      .map((s, i) => `Scene ${i + 1}: ${s.imagePrompt}`)
-      .join('\n');
-
-    // Sora 2 is the only video generation path — no GPT Image 2 fallback for video
     try {
-      console.log(`[RenderingEngine] Generating video via Sora 2...`);
-      const soraResult = await soraVideoService.generateVideo(soraPrompt);
-
-      if (soraResult.success && soraResult.videoPath) {
-        console.log(`[RenderingEngine] Sora 2 generated video: ${soraResult.videoPath}`);
-        const vidUrl = soraResult.videoUrl || soraResult.videoPath;
-        let finalUrl = vidUrl;
-        if (params.userId && r2Storage.isAvailable) {
-          const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, params.userId, 'renders/sora', 'video/mp4');
-          finalUrl = r2.url || vidUrl;
-        }
-        return {
-          success: true,
-          videoUrl: finalUrl,
-          sceneImages: [soraResult.videoPath],
-        };
+      // Phase 1+2: GPT Image 2 still per scene, then Sharp text overlays.
+      const stillPaths: string[] = [];
+      for (let i = 0; i < params.scenes.length; i++) {
+        const scene = params.scenes[i];
+        const localPath = await this.generateSceneImage(scene.imagePrompt, workingDir, i, 'high');
+        const overlayPath = await this.applyTextOverlays(localPath, scene.textOverlays, workingDir, i);
+        stillPaths.push(overlayPath);
+        sceneImages.push(overlayPath);
       }
-      return {
-        success: false,
-        sceneImages: [],
-        error: soraResult.error || 'Sora 2 generation failed',
-      };
-    } catch (soraErr: any) {
-      console.error(`[RenderingEngine] Sora 2 error: ${soraErr.message}`);
-      return {
-        success: false,
-        sceneImages: [],
-        error: soraErr.message || 'Sora 2 unavailable',
-      };
+      // Phase 3: FFmpeg compose — animates paid stills, never creates images.
+      // Clamp durations: the source-images caller (studioRoutes) passes 0.
+      const clampedScenes = params.scenes.map((sc) => ({
+        ...sc,
+        durationSeconds: sc.durationSeconds > 0 ? sc.durationSeconds : 2,
+      }));
+      const videoPath = await this.composeVideo(stillPaths, clampedScenes, params.pacing, workingDir, params.backgroundAudioUrl);
+      let finalUrl = videoPath;
+      if (params.userId && r2Storage.isAvailable) {
+        const r2 = await r2Storage.uploadLocalFile(videoPath, params.userId, 'renders/native', 'video/mp4');
+        finalUrl = r2.url || videoPath;
+      }
+      return { success: true, videoUrl: finalUrl, sceneImages };
+    } catch (err: any) {
+      console.error(`[RenderingEngine] Faceless render failed: ${err.message}`);
+      this.cleanupDir(workingDir);
+      return { success: false, sceneImages: [], error: err.message || 'Faceless render failed' };
     }
   }
 
