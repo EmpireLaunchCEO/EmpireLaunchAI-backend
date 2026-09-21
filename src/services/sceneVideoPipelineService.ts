@@ -83,6 +83,35 @@ export function mergeCompletionMetadata(
 ): Record<string, unknown> {
   return { ...(prior || {}), ...next };
 }
+/**
+ * Completion-draft base payload for the Operations feed (master + variants).
+ * `mode` MUST reflect the project's REAL engine mode — a hardcoded 'scene' made
+ * every Faceless submission consume a Scene quota slot: usageService counts
+ * DISTINCT projectId WHERE payload->>'mode'='scene', and the old label stamped
+ * mode:'scene' on Faceless drafts too (cross-stamping diagnosis, Sep 21; the
+ * owner's 4 faceless drafts all carried mode:'scene', cat:null).
+ * - Faceless projects → mode 'faceless' (+ category 'faceless-video', matching
+ *   the submission receipt — the server-authoritative marker the Operations
+ *   queue's cardQueueType reads for the Faceless box).
+ * - Legacy projects whose create-time metadata predates a persisted `mode` →
+ *   default 'scene' (preserves the pre-fix behavior for those rows).
+ * Pure + deterministic — unit-tested in sceneDraftMode.test.ts.
+ */
+export function buildDraftBase(
+  projectId: string,
+  pmeta: Record<string, unknown> | null | undefined,
+  qc?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const mode = pmeta?.mode === 'faceless' ? 'faceless' : 'scene';
+  return {
+    projectId,
+    mode,
+    provider: 'ffmpeg',
+    saved: false,
+    ...(mode === 'faceless' ? { category: 'faceless-video' } : {}),
+    ...(qc ? { qc } : {}),
+  };
+}
 /** Railway-safe deadline: ticks every 5s (no long setTimeout) and rejects after ms. */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -1813,18 +1842,14 @@ if (!skipGeneration) {
           if (pRow?.title) projectTitle = pRow.title;
         } catch {}
 
-        // Shared draft metadata: mode:'scene' marks these for the scene quota
-        // (counted by distinct projectId — see usageService.getDailyRemaining),
-        // saved:false flags them as not-yet-in-Library drafts.
-        const draftBase = {
-          projectId,
-          mode: 'scene',
-          provider: 'ffmpeg',
-          saved: false,
-          // QC report attached ONLY when present (10s max extra on local disk,
-          // never blocks upload; owner-facing UI ignores it).
-          ...(qc ? { qc } : {}),
-        };
+        // Shared draft metadata: mode reflects the project's REAL engine mode
+        // (faceless stays 'faceless' — see buildDraftBase; scene drafts keep
+        // mode:'scene' so the Scene quota counted by distinct projectId in
+        // usageService.getDailyRemaining is unaffected). Faceless drafts also
+        // carry category:'faceless-video' (consistent with the receipt) so the
+        // Operations queue classifies them into the Faceless box. saved:false
+        // flags drafts as not-yet-in-Library.
+        const draftBase = buildDraftBase(projectId, pmeta, qc);
 
         // Primary 9:16 master — labelled "Vertical · TikTok" alongside variants.
         await db.insert(schema.approvals).values({
