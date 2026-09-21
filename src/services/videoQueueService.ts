@@ -6,26 +6,19 @@
 
 import { db, schema } from '../db/index.js';
 import { eq, and, lt } from 'drizzle-orm';
-import type { SoraGenerationResult } from './soraVideoService.js';
 
-// ── Sora retry policy ──────────────────────────────────────────────
-// Sora's API intermittently returns status:failed ~55-90s into generation
-// (~50% flake rate observed in production on 2026-08-12). We retry up to 2
-// additional attempts with a short backoff before marking the creation
-// failed. FFmpeg/R2 are NOT re-run on retry — only the Sora create/generate
-// call is repeated. Policy per task #26627131 (2 retries, 10-15s backoff).
-const SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
-const SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempt 1/2/3 (10s then 15s)
+// ── Faceless engine (zero video API) ─────────────────────────────
+// Customize Video runs the same zero-video-API engine as Faceless videos
+// (GPT Image 2 still + FFmpeg Ken Burns). Video-generation API retired
+// 2026-09-24 (vendor shutdown; owner Sep 18 decision).
 
 // A queue job is considered orphaned only after this much inactivity. Every
-// worker state transition refreshes updatedAt, so an in-flight Sora request is
+// worker state transition refreshes updatedAt, so an in-flight render is
 // not re-queued while it is still making progress.
 const VIDEO_JOB_STALE_MS = 8 * 60 * 1000;
 const VIDEO_QUEUE_RECOVERY_INTERVAL_MS = 60 * 1000;
 const MAX_RECOVERY_BATCH = 25;
 
-// We import the pipeline function dynamically to avoid circular deps
-let executeVideoPipeline: Function | null = null;
 
 interface VideoJobPayload {
   creationId: string;
@@ -211,19 +204,10 @@ export function startVideoQueueWorker(): void {
 
       console.log(`[VideoQueue] Processing job: ${job.id}`);
 
-      // Lazy-load the pipeline function
-      if (!executeVideoPipeline) {
-        const mod = await import('../routes/studioRoutes.js');
-        // executeVideoPipeline is not exported from studioRoutes — it's internal.
-        // We need a different approach.
-      }
-
-      // Since we can't import the function, inline the pipeline here
-      // or use the soraVideoService directly.
-      const { soraVideoService } = await import('./soraVideoService.js');
       const { ffmpegRenderService } = await import('./ffmpegRenderService.js');
       const { r2Storage } = await import('./r2StorageService.js');
       const fs = await import('fs');
+      const path = await import('path');
       const { v4: uuidv4 } = await import('uuid');
 
       const creationId = job.id;
@@ -240,66 +224,54 @@ export function startVideoQueueWorker(): void {
         : undefined;
       const userId = job.userId;
 
-      console.log(`[VideoQueue] Starting Sora for ${creationId}`);
-
+      console.log(`[VideoQueue] Starting faceless-engine render for ${creationId}`);
       try {
-        // ── Sora (with automatic retry on upstream flake) ──────────────
-        // Sora's API intermittently returns status:failed ~55-90s into
-        // generation. Retry up to 2 additional attempts with a short
-        // backoff before marking the creation failed. FFmpeg/R2 below run
-        // only once, after a successful Sora result — retries never re-run them.
-        let soraResult: SoraGenerationResult | null = null;
-        let retriesUsed = 0;
-
-        for (let attempt = 1; attempt <= SORA_MAX_ATTEMPTS; attempt++) {
-          if (attempt > 1) {
-            retriesUsed = attempt - 1;
-            const backoffMs = SORA_RETRY_BACKOFF_MS[attempt - 1]; // 10s then 15s
-            console.log(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} starting after ${backoffMs}ms backoff (creation=${creationId})`);
-            await db.update(schema.creations).set({
-              metadata: { ...normalizeMetadata(meta), pipeline_trace: `sora_retry_${retriesUsed}`, retryCount: retriesUsed },
-              updatedAt: new Date(),
-            }).where(eq(schema.creations.id, creationId));
-            await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
-          }
-
-          soraResult = await soraVideoService.generateVideo(prompt, { userId, duration });
-          if (soraResult.success && soraResult.videoPath) break;
-          console.warn(`[VideoQueue] Sora attempt ${attempt}/${SORA_MAX_ATTEMPTS} failed: ${soraResult.error || 'no video path'} (creation=${creationId})`);
-        }
-
-        if (!soraResult?.success || !soraResult.videoPath) {
+        // ── Faceless engine (zero video API) ──────────────────────────
+        // Owner Sep 18 decision + vendor shutdown 2026-09-24: Customize
+        // Video no longer calls any video-generation API. Pipeline:
+        //   GPT Image 2 still -> FFmpeg Ken Burns clip -> FFmpeg/resize/variants.
+        const { renderingEngine } = await import('./renderingEngine.js');
+        const sourceImage = Array.isArray(meta?.sourceImages) && meta.sourceImages.length > 0
+          ? meta.sourceImages[0]
+          : undefined;
+        const stillResult = await renderingEngine.renderImage(prompt, undefined, sourceImage);
+        if (!stillResult.success || !stillResult.imageUrl) {
           await db.update(schema.creations).set({
             status: 'failed',
             metadata: {
               ...normalizeMetadata(meta),
-              error: soraResult?.error || 'Sora failed',
-              pipeline_trace: 'sora_failed',
-              retryCount: retriesUsed,
+              error: stillResult.error || 'GPT Image 2 still generation failed',
+              pipeline_trace: 'faceless_still_failed',
+              aiProvider: 'faceless-engine',
             },
             updatedAt: new Date(),
           }).where(eq(schema.creations.id, creationId));
           return;
         }
-
+        // Ken Burns the paid still into a 9:16/30fps clip (target = job duration or 30s)
+        const { renderClip } = await import('./sceneVideoPipelineService.js');
+        const clipDir = path.join(process.cwd(), 'temp', 'videoqueue');
+        fs.mkdirSync(clipDir, { recursive: true });
+        const clipPath = path.join(clipDir, `${creationId}.mp4`);
+        await renderClip(stillResult.imageUrl, clipPath, duration || 30, undefined, { kenburns: true });
         // Validate
         try {
-          const stat = fs.statSync(soraResult.videoPath);
+          const stat = fs.statSync(clipPath);
           if (stat.size < 1024) {
             await db.update(schema.creations).set({
               status: 'failed',
-              metadata: { ...normalizeMetadata(meta), error: 'Sora output too small', pipeline_trace: 'validation_failed' },
+              metadata: { ...normalizeMetadata(meta), error: 'Faceless output too small', pipeline_trace: 'validation_failed', aiProvider: 'faceless-engine' },
               updatedAt: new Date(),
             }).where(eq(schema.creations.id, creationId));
-            try { fs.unlinkSync(soraResult.videoPath); } catch {}
+            try { fs.unlinkSync(clipPath); } catch {}
             return;
           }
         } catch {}
-
         // FFmpeg — never clobber an existing remote URL with a relative/local path
-        let videoUrl = soraResult.videoUrl || soraResult.videoPath;
+        let videoPath = clipPath;
+        let videoUrl = videoPath;
         try {
-          const renderResult = await ffmpegRenderService.render(soraResult.videoPath, {
+          const renderResult = await ffmpegRenderService.render(videoPath, {
             platforms,
             enableWatermark: !!meta?.brandContext?.name,
           });
@@ -331,8 +303,8 @@ export function startVideoQueueWorker(): void {
                 const j = await vr.json();
                 const aud = j?.choices?.[0]?.message?.audio;
                 if (aud?.data) {
-                  const inputVideoPath = soraResult.videoPath;
-                  if (!inputVideoPath) throw new Error('Sora returned no video path for voiceover');
+                  const inputVideoPath = videoPath;
+                  if (!inputVideoPath) throw new Error('Faceless engine returned no video path for voiceover');
                   const audioFile = `${inputVideoPath}.voice.mp3`;
                   const fsMod = await import('fs');
                   fsMod.writeFileSync(audioFile, Buffer.from(aud.data as string, 'base64'));
@@ -340,7 +312,7 @@ export function startVideoQueueWorker(): void {
                   await new Promise<void>((resolve, reject) => {
                     execFile('ffmpeg', ['-y', '-i', inputVideoPath, '-i', audioFile, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxed], (err: Error | null) => err ? reject(err) : resolve());
                   });
-                  if (fsMod.existsSync(muxed)) { soraResult.videoPath = muxed; voiceoverPath = audioFile; fsMod.unlinkSync(audioFile); videoUrl = soraResult.videoPath; }
+                  if (fsMod.existsSync(muxed)) { videoPath = muxed; voiceoverPath = audioFile; fsMod.unlinkSync(audioFile); videoUrl = videoPath; }
                 }
               }
             }
@@ -353,10 +325,10 @@ export function startVideoQueueWorker(): void {
         //    upload, so a later variant pass silently finds nothing (count=0
         //    defect, scene run b5f88145). Each variant becomes its own draft
         //    approval row (Operations), never auto-saved to Library.
-        if (soraResult.videoPath && fs.existsSync(soraResult.videoPath)) {
+        if (videoPath && fs.existsSync(videoPath)) {
           try {
             const { generateVideoExportVariants } = await import('./videoExportVariants.js');
-            const variants = await generateVideoExportVariants(soraResult.videoPath, userId, 'video-projects');
+            const variants = await generateVideoExportVariants(videoPath, userId, 'video-projects');
             for (const v of variants) {
               try {
                 await db.insert(schema.approvals).values({
@@ -392,20 +364,19 @@ export function startVideoQueueWorker(): void {
           }
         }
         // R2 — only upload if we don't already have a remote URL and the file still exists.
-        // soraResult.videoUrl is already an R2 signed URL when R2 is configured —
-        // never clobber it with a dead local-path fallback.
+        // videoPath is a local clip; never clobber an existing remote URL.
         let r2Key: string | undefined;
         try {
-          if (r2Storage.isAvailable && !/^https?:\/\//.test(videoUrl) && fs.existsSync(soraResult.videoPath)) {
-            const r2 = await r2Storage.uploadLocalFile(soraResult.videoPath, userId, 'cinema/sora', 'video/mp4');
+          if (r2Storage.isAvailable && !/^https?:\/\//.test(videoUrl) && fs.existsSync(videoPath)) {
+            const r2 = await r2Storage.uploadLocalFile(videoPath, userId, 'cinema/faceless', 'video/mp4');
             if (r2.url && /^https?:\/\//.test(r2.url)) videoUrl = r2.url;
             if (r2.r2Key) r2Key = r2.r2Key;
           }
         } catch {}
 
-        // If we kept the existing R2 URL (upload skipped), derive the key from it for metadata
-        if (!r2Key && soraResult.videoUrl && /^https?:\/\//.test(soraResult.videoUrl)) {
-          r2Key = extractR2Key(soraResult.videoUrl) ?? undefined;
+        // If we kept the existing remote URL (upload skipped), derive the key from it for metadata
+        if (!r2Key && /^https?:\/\//.test(videoUrl)) {
+          r2Key = extractR2Key(videoUrl) ?? undefined;
         }
 
         // Complete
@@ -414,9 +385,8 @@ export function startVideoQueueWorker(): void {
           fileUrl: videoUrl,
           metadata: {
             ...normalizeMetadata(meta),
-            aiProvider: 'sora-2',
+            aiProvider: 'faceless-engine',
             pipeline_trace: 'completed',
-            ...(retriesUsed > 0 ? { soraRetries: retriesUsed } : {}),
             ...(r2Key ? { r2Key } : {}),
           },
           updatedAt: new Date(),
