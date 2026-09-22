@@ -4,7 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
-import { usageService } from '../services/usageService.js';
+import { usageService, WEEKLY_SCENE_LIMIT, WEEKLY_FACELESS_LIMIT, WEEKLY_TWIN_LIMIT, MONTHLY_DESIGN_LIMIT } from '../services/usageService.js';
 import { creationEngine } from '../services/creationEngine.js';
 import { neuralActionEngine } from '../services/neuralActionEngine.js';
 import { db, schema } from '../db/index.js';
@@ -330,7 +330,7 @@ export class CinemaController {
         userId,
         neural: {
           remaining: neuralRemaining,
-          limit: 7,
+          limit: WEEKLY_TWIN_LIMIT,
           period: 'week',
         },
         enhanced: {
@@ -339,17 +339,17 @@ export class CinemaController {
         },
         design: {
           remaining: designRemaining,
-          limit: 50,
+          limit: MONTHLY_DESIGN_LIMIT,
           period: 'month',
         },
         customize: {
           remaining: customizeRemaining,
-          limit: 7,
+          limit: WEEKLY_SCENE_LIMIT,
           period: 'week',
         },
         faceless: {
           remaining: facelessRemaining,
-          limit: 7,
+          limit: WEEKLY_FACELESS_LIMIT,
           period: 'week',
         },
       });
