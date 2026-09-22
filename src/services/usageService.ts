@@ -52,6 +52,17 @@ function isValidUuid(value: string): boolean {
   return typeof value === 'string' && UUID_REGEX.test(value);
 }
 
+/**
+ * Locked quota model (owner Sep 18): Scene/Customize = 4/wk, Faceless = 10/wk,
+ * Neural Twin = 5/wk, High-Res Design = 50/mo. Single source of truth — the
+ * enforcement paths (getDailyRemaining/enforceLimit) AND the reporting endpoint
+ * (cinemaController.getUsage) read these, so Studio chips can never drift from
+ * what the backend actually enforces.
+ */
+export const WEEKLY_SCENE_LIMIT = 4;      // customize_video (Scene-Based)
+export const WEEKLY_FACELESS_LIMIT = 10;  // faceless
+export const WEEKLY_TWIN_LIMIT = 5;       // neural_twin
+export const MONTHLY_DESIGN_LIMIT = 50;   // high_res_design
 export class UsageService {
   /**
    * Tracks a new usage event.
@@ -91,10 +102,10 @@ export class UsageService {
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
     // Weekly video-production quotas (168-hour rolling window), final owner config:
     // Scene-Based (customize_video) = 4/wk (owner Sep 18), Faceless = 10/wk, Neural Twin (neural_twin) = 5/wk.
-    const weeklySceneLimit = 4;   // customize_video
-    const weeklyFacelessLimit = 10;
-    const weeklyTwinLimit = 5;    // neural_twin
-    const monthlyDesignLimit = 50;
+    const weeklySceneLimit = WEEKLY_SCENE_LIMIT;      // customize_video
+    const weeklyFacelessLimit = WEEKLY_FACELESS_LIMIT;
+    const weeklyTwinLimit = WEEKLY_TWIN_LIMIT;        // neural_twin
+    const monthlyDesignLimit = MONTHLY_DESIGN_LIMIT;
     // Unidentified / non-UUID caller — never run a Postgres query with the raw
     // value (it would throw a uuid cast error). There is no user row to count
     // usage against, so report the full allowance for the type (never crash).
