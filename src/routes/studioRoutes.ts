@@ -6,6 +6,7 @@ import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
+import { tryResolveDesignDna } from '../services/designDnaBridge.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
@@ -240,7 +241,33 @@ router.post('/process', async (req: Request, res: Response) => {
           const bodyImages = (req.body as any)?.sourceImages;
           if (Array.isArray(bodyImages) && bodyImages.length) designInputImage = String(bodyImages[0]);
           if (!designInputImage && typeof (req.body as any)?.imageUrl === 'string') designInputImage = (req.body as any).imageUrl;
-          const imageResult = await renderingEngine.renderImage(decision.prompt, uid, designInputImage);
+          // ── Vault DNA foundation (owner requirement) ─────────────────────────
+          // The client's harvested Canva DNA must be the BASE FOUNDATION for the
+          // design. The backend resolves niche/archetype from its own records
+          // (brandId → goals row, else the user's most recent goal) — never expects
+          // it from the client request. Best-effort: when no niche is known or vault
+          // resolution fails, fall back to the router prompt unchanged.
+          let generationPrompt = decision.prompt;
+          let dnaProvenance: any = {};
+          try {
+            const dna = await tryResolveDesignDna(uid, {
+              brandId: brandId || null,
+              niche: (brandContext as any)?.niche || null,
+              archetype: (brandContext as any)?.archetype || null,
+            });
+            if (dna) {
+              generationPrompt = `${decision.prompt}\n\n${dna.directive}`;
+              dnaProvenance = {
+                styleDnaSource: 'vault',
+                styleDna: dna.styleDna,
+                vaultStrandsUsed: dna.designReasoning.vaultStrandsUsed,
+                strategy: dna.designReasoning.strategy,
+              };
+            }
+          } catch (dnaErr: any) {
+            console.warn('[StudioRoute] Vault DNA resolution skipped (prompt-only):', dnaErr?.message);
+          }
+          const imageResult = await renderingEngine.renderImage(generationPrompt, uid, designInputImage);
 
           if (!imageResult.success) {
             return res.status(500).json({
@@ -263,7 +290,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 id: creationId, userId: uid, type: 'design',
                 title: decision.prompt.slice(0, 60), status: 'completed',
                 fileUrl: imgUrl,
-                metadata: { classification: decision.classification, prompt: decision.prompt, aiProvider },
+                metadata: { classification: decision.classification, prompt: generationPrompt, aiProvider, ...dnaProvenance },
               });
             } catch (creationErr: any) {
               console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
@@ -276,7 +303,7 @@ router.post('/process', async (req: Request, res: Response) => {
                 userId: uid,
                 type: assetType,
                 status: 'pending',
-                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'pending' },
+                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'pending', ...dnaProvenance },
                 createdAt: new Date(),
                 updatedAt: new Date(),
               });
