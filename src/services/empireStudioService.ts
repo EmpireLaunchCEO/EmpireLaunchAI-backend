@@ -36,6 +36,17 @@ export interface StyleDNA {
 export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube' | 'facebook' | 'etsy' | 'fiverr' | 'shopify';
 
 /**
+ * Output of the High-Intelligence Design Reasoner — the strategy layer that runs
+ * BEFORE design generation and decides how the client's vault DNA should be applied.
+ */
+export interface DesignReasoningResult {
+  strategy: string;
+  reasoning: string;
+  templateStyle: string;
+  suggestedHooks: string[];
+  vaultStrandsUsed: string[];
+}
+/**
  * Strategy for creating the master asset.
  * Defaults to free-tier tools first (Canva Free), falls back to Hunter-Gatherer.
  */
@@ -230,6 +241,31 @@ export class EmpireStudioService {
    * Resolves best-fit StyleDNA from the Universal Vault for a given niche.
    * Queries top-performing DNA strands and synthesizes them into a StyleDNA object.
    */
+  /**
+   * Public facade for the design generation path (approvalController type=design
+   * and Empire Studio image_creation/image_editing). Resolves the client's
+   * harvested Canva DNA from the Universal Vault and runs the High-Intelligence
+   * Design Reasoner over it — giving any downstream generator the SAME
+   * colors/fonts/tone foundation + vaultStrandsUsed that the Studio master-asset
+   * path uses. Never throws: if vault synthesis or reasoning fails it falls back
+   * to defaults, so design generation can always proceed.
+   */
+  async resolveClientDesignFoundation(
+    userId: string,
+    niche: string,
+    angle: string,
+    archetype: string = 'creator'
+  ): Promise<{ styleDna: StyleDNA; designReasoning: DesignReasoningResult }> {
+    const styleDna = await this.resolveStyleDnaFromVault(userId, niche, angle, archetype);
+    const designReasoning = await this.runDesignReasoner(userId, {
+      niche,
+      angle,
+      styleDna,
+      title: `${niche} - ${angle || 'design'}`,
+      archetype,
+    });
+    return { styleDna, designReasoning };
+  }
   private async resolveStyleDnaFromVault(userId: string, niche: string, angle: string, archetype: string = 'creator'): Promise<StyleDNA> {
     console.log(`[EmpireStudio] Resolving StyleDNA from Vault for "${niche}" (archetype: ${archetype})`);
 
@@ -351,13 +387,7 @@ export class EmpireStudioService {
    */
   private async runDesignReasoner(userId: string, params: {
     niche: string; angle: string; styleDna: StyleDNA; title: string; archetype?: string;
-  }): Promise<{
-    strategy: string;
-    reasoning: string;
-    templateStyle: string;
-    suggestedHooks: string[];
-    vaultStrandsUsed: string[];
-  }> {
+  }): Promise<DesignReasoningResult> {
     // Get tier config to determine reasoning depth
     const modelConfig = await getModelConfig(userId);
     const isDeepReasoning = modelConfig.modelName === 'gpt-5.2';
