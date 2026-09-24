@@ -4,6 +4,7 @@ import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { usageService } from '../services/usageService.js';
 import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import { generateDesignAndRecord } from '../services/designGenerationService.js';
 import {
   FACELESS_MOODS,
   FACELESS_DURATIONS,
@@ -75,6 +76,68 @@ export const createApproval = async (req: Request, res: Response) => {
       ...(['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? { tone: req.body.tone } : {}),
       ...(Array.isArray(req.body.sourceImages) && req.body.sourceImages.length ? { sourceImages: req.body.sourceImages } : {}),
     };
+
+    // ── Design: anti-copycat-gated generation (owner Sep 24 hard rule) ──────
+    // The Studio design box submits { type:'design', description,
+    // payload:{category:'custom-design',hasUpload,uploadPreview}, sourceImages }.
+    // generateDesignAndRecord resolves the client's harvested Vault DNA
+    // server-side (niche/archetype from the platform's own records — never
+    // trusted from the request), renders the design via GPT Image 2, runs the
+    // uniqueness gate (uniquenessService.validateUniqueness, imageBuffer+niche)
+    // BEFORE storage — Visual Pivot once, 409 if still not unique — then
+    // records the completed creation (type='design', status='completed',
+    // title/fileUrl R2/thumbnailUrl/metadata w/ dnaStrandIds+uniquenessScore)
+    // plus an operations approval row. Client sourceImages are INPUT-ONLY
+    // (ZERO-SOURCE-IMAGE policy: never stored, cached, or served).
+    if (type === 'design') {
+      const sourceImage = Array.isArray(enrichedPayload.sourceImages) && enrichedPayload.sourceImages.length
+        ? String(enrichedPayload.sourceImages[0])
+        : null;
+      const outcome = await generateDesignAndRecord({
+        userId,
+        description: description.trim(),
+        brandId: (payload as any)?.brandId || null,
+        sourceImageUrl: sourceImage,
+        classification: 'image_creation',
+        category: (enrichedPayload as any)?.category || 'custom-design',
+      });
+      if (!outcome.ok) {
+        return res.status(outcome.httpStatus).json({
+          status: 'error',
+          error: outcome.error || 'Design generation failed.',
+          ...(outcome.uniqueness
+            ? { uniqueness: { uniquenessScore: outcome.uniqueness.uniquenessScore, geometricScore: outcome.uniqueness.geometricScore, reasoning: outcome.uniqueness.reasoning, pivotApplied: outcome.uniqueness.pivotApplied } }
+            : {}),
+        });
+      }
+      // Approval row carrying the completed asset (owner: design box → Operations).
+      const approval = await db.insert(approvals).values({
+        userId,
+        type: 'design',
+        payload: {
+          assetId: outcome.creationId,
+          title: description.trim().slice(0, 60) || 'Design',
+          imageUrl: outcome.imageUrl,
+          status: 'completed',
+          category: (enrichedPayload as any)?.category || 'custom-design',
+          ...(outcome.dnaProvenance || {}),
+          ...(outcome.uniqueness ? {
+            uniquenessScore: outcome.uniqueness.uniquenessScore,
+            geometricScore: outcome.uniqueness.geometricScore,
+            uniquenessReasoning: outcome.uniqueness.reasoning,
+            visualPivotApplied: outcome.uniqueness.pivotApplied,
+          } : {}),
+        },
+        status: 'pending',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }).returning();
+      console.log(`Design approval created: ${type} for user ${userId} (creation ${outcome.creationId})`);
+      const [approvalRow] = approval;
+      return res.status(201).json({ status: 'success', approval: approvalRow });
+    }
+
+
 
     // ── Faceless: validate + persist mood/duration, then render via scene
     //    composition (NOT a Sora `duration` param — the endpoint rejects it).
