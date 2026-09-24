@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeArchetype, extractNicheFromGoal, buildDnaDirective } from '../designDnaPure.js';
+import { normalizeArchetype, extractNicheFromGoal, buildDnaDirective, buildVisualPivotDirective } from '../designDnaPure.js';
 
 test('normalizeArchetype maps platform archetypes to reasoner vocabulary', () => {
   assert.equal(normalizeArchetype('SELLER'), 'creator');
@@ -82,4 +82,20 @@ test('buildDnaDirective tolerates missing hooks without crashing', () => {
   const d = buildDnaDirective(styleDna, reason);
   assert.match(d, /Bold Creative/);
   assert.ok(!/Hook\/CTA/.test(d));
+});
+
+test('buildVisualPivotDirective produces an anti-copycat pivot instruction with the given reasoning', () => {
+  const p = buildVisualPivotDirective('Geometric similarity too high');
+  assert.match(p, /UNIQUENESS PIVOT/);
+  assert.match(p, /Mirror the layout/);
+  assert.match(p, /120 degrees/);
+  assert.match(p, /vector illustrations/);
+  assert.match(p, /Geometric similarity too high/);
+});
+
+test('buildVisualPivotDirective works without reasoning (empty note tolerated)', () => {
+  const p = buildVisualPivotDirective();
+  assert.match(p, /UNIQUENESS PIVOT/);
+  assert.match(p, /Mirror the layout/);
+  assert.ok(!/Anti-copycat note/.test(p));
 });

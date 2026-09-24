@@ -6,7 +6,7 @@ import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
-import { tryResolveDesignDna } from '../services/designDnaBridge.js';
+import { generateDesignAndRecord } from '../services/designGenerationService.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
@@ -235,88 +235,59 @@ router.post('/process', async (req: Request, res: Response) => {
       case 'image_creation':
       case 'image_editing': {
         try {
-                    // Use the user's uploaded design/reference image (if any) to drive GPT-Image,
+          // Use the user's uploaded design/reference image (if any) to drive GPT-Image,
           // else text-only. Frontend sends it as sourceImages[0] or imageUrl.
+          // ZERO-SOURCE-IMAGE POLICY: sourceImages are INPUT-ONLY — they drive
+          // the gpt-image-2 edits endpoint but are never stored, cached, or served.
           let designInputImage: string | undefined;
           const bodyImages = (req.body as any)?.sourceImages;
           if (Array.isArray(bodyImages) && bodyImages.length) designInputImage = String(bodyImages[0]);
           if (!designInputImage && typeof (req.body as any)?.imageUrl === 'string') designInputImage = (req.body as any).imageUrl;
-          // ── Vault DNA foundation (owner requirement) ─────────────────────────
-          // The client's harvested Canva DNA must be the BASE FOUNDATION for the
-          // design. The backend resolves niche/archetype from its own records
-          // (brandId → goals row, else the user's most recent goal) — never expects
-          // it from the client request. Best-effort: when no niche is known or vault
-          // resolution fails, fall back to the router prompt unchanged.
-          let generationPrompt = decision.prompt;
-          let dnaProvenance: any = {};
-          try {
-            const dna = await tryResolveDesignDna(uid, {
-              brandId: brandId || null,
-              niche: (brandContext as any)?.niche || null,
-              archetype: (brandContext as any)?.archetype || null,
-            });
-            if (dna) {
-              generationPrompt = `${decision.prompt}\n\n${dna.directive}`;
-              dnaProvenance = {
-                styleDnaSource: 'vault',
-                styleDna: dna.styleDna,
-                vaultStrandsUsed: dna.designReasoning.vaultStrandsUsed,
-                strategy: dna.designReasoning.strategy,
-              };
-            }
-          } catch (dnaErr: any) {
-            console.warn('[StudioRoute] Vault DNA resolution skipped (prompt-only):', dnaErr?.message);
-          }
-          const imageResult = await renderingEngine.renderImage(generationPrompt, uid, designInputImage);
 
-          if (!imageResult.success) {
-            return res.status(500).json({
+          // ── Anti-copycat-gated design generation (owner hard rule) ──────────
+          // generateDesignAndRecord resolves the client's harvested Vault DNA
+          // server-side, renders the design via GPT Image 2, runs the uniqueness
+          // gate (uniquenessService.validateUniqueness) on the GENERATED image
+          // BEFORE any storage — Visual Pivot once, 409 if still not unique —
+          // then records the completed design creation + approval row so the
+          // Operations Design Center shows it. Never stores source images.
+          const outcome = await generateDesignAndRecord({
+            userId: uid,
+            description: decision.prompt || request,
+            brandId: brandId || null,
+            sourceImageUrl: designInputImage,
+            explicitNiche: (brandContext as any)?.niche || null,
+            explicitArchetype: (brandContext as any)?.archetype || null,
+            classification: decision.classification,
+            category: decision.classification === 'image_editing' ? 'custom-edit' : 'custom-design',
+          });
+
+          if (!outcome.ok) {
+            return res.status(outcome.httpStatus).json({
               status: 'error',
               classification: decision.classification,
-              response: `Image generation failed: ${imageResult.error || 'Unknown error'}`,
+              response: outcome.error || 'Design generation failed.',
+              ...(outcome.uniqueness
+                ? { metadata: { uniquenessScore: outcome.uniqueness.uniquenessScore, geometricScore: outcome.uniqueness.geometricScore, uniquenessReasoning: outcome.uniqueness.reasoning } }
+                : {}),
             } as StudioResponse);
           }
 
-          if (imageResult.imageUrl) {
-            const imgUrl = imageResult.imageUrl;
-            const aiProvider = 'GPT Image 2';
-            const assetType = decision.classification === 'image_editing' ? 'edit' : 'design';
-            assets.push({ type: 'image', url: imgUrl });
-
-            // Store in creations table with AI provider tag
-            const creationId = uuidv4();
-            try {
-              await db.insert(schema.creations).values({
-                id: creationId, userId: uid, type: 'design',
-                title: decision.prompt.slice(0, 60), status: 'completed',
-                fileUrl: imgUrl,
-                metadata: { classification: decision.classification, prompt: generationPrompt, aiProvider, ...dnaProvenance },
-              });
-            } catch (creationErr: any) {
-              console.warn('[StudioRoute] Failed to insert creation record:', creationErr.message);
-            }
-
-            // Create approval for Operations page
-            try {
-              await db.insert(schema.approvals).values({
-                id: uuidv4(),
-                userId: uid,
-                type: assetType,
-                status: 'pending',
-                payload: { assetId: creationId, title: decision.prompt.slice(0, 60), imageUrl: imgUrl, status: 'pending', ...dnaProvenance },
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              });
-            } catch (approvalErr: any) {
-              console.warn('[StudioRoute] Failed to insert approval record:', approvalErr.message);
-            }
+          if (outcome.imageUrl) {
+            assets.push({ type: 'image', url: outcome.imageUrl, thumbnailUrl: outcome.imageUrl });
+          } else {
+            return res.status(500).json({
+              status: 'error',
+              classification: decision.classification,
+              response: 'Design generated but no image URL was returned.',
+            } as StudioResponse);
           }
         } catch (imgErr: any) {
-          console.error('[StudioRoute] Image generation failed:', imgErr.message);
+          console.error('[StudioRoute] Design generation failed:', imgErr.message);
           return res.status(500).json({
             status: 'error',
             classification: decision.classification,
-            response: `Image generation failed: ${imgErr.message}`,
+            response: `Design generation failed: ${imgErr.message}`,
           } as StudioResponse);
         }
         break;

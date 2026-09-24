@@ -25,6 +25,22 @@ export function extractNicheFromGoal(goal: { title?: string | null; description?
   return goal.title || '';
 }
 
+/** Build the Visual Pivot directive appended to a re-render prompt when the
+ *  anti-copycat gate flags the first render as too similar (owner hard rule:
+ *  "Can't copycat images... every design is to be unique"). Mirrors the Visual
+ *  Pivot strategies in anti_copycat_logic.md §4: inversion (mirror layout),
+ *  palette shift (~120° on the color wheel), abstraction (photo → vector). */
+export function buildVisualPivotDirective(reasoning?: string): string {
+  return [
+    'UNIQUENESS PIVOT — the previous design is too similar to existing work. Rebuild it to be unmistakably unique:',
+    '1. Mirror the layout — move focal elements to the opposite side.',
+    '2. Shift the color palette ~120 degrees on the color wheel from the previous palette.',
+    '3. Replace photographic elements with vector illustrations (or vice versa).',
+    'Keep the same message, niche and DNA intent, but produce a NEW composition.',
+    reasoning ? `Anti-copycat note: ${reasoning}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 /** Build the DNA directive appended to an image prompt so GPT Image follows the client's vault DNA. */
 export function buildDnaDirective(styleDna: StyleDNA, reason: DesignReasoningResult): string {
   const lines: string[] = [
