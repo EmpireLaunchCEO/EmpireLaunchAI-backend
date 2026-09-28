@@ -84,6 +84,29 @@ export function mergeCompletionMetadata(
   return { ...(prior || {}), ...next };
 }
 /**
+ * COMPLETION MERGE BASE (owner Sep 28 follow-up): the project's metadata is
+ * mutated DURING the run by persistVeoTakeOperation / markVeoJobStatus /
+ * soraJobs writers (they re-select the row and merge veoJobs/soraJobs in).
+ * processProject's initial `pmeta` snapshot therefore becomes STALE, and any
+ * terminal write that merges into it re-stamps the old base — wiping the live
+ * veoJobs/soraJobs (breaks exactly-once resume + regenerateScene voicing).
+ * Terminal writes MUST merge into the LIVE row metadata instead. Best-effort:
+ * a read error falls back to the snapshot so completion/failure never fails.
+ */
+async function liveProjectMetadata(projectId: string, snapshot: Record<string, any>): Promise<Record<string, any>> {
+  try {
+    const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+    return { ...snapshot, ...((row?.metadata as any) || {}) };
+  } catch { return snapshot; }
+}
+/** Same live-merge base for videoScenes rows (span-fail / timeout / complete / fail writes). */
+async function liveSceneMetadata(sceneId: string, snapshot: Record<string, any>): Promise<Record<string, any>> {
+  try {
+    const [row] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, sceneId)).limit(1);
+    return { ...snapshot, ...((row?.metadata as any) || {}) };
+  } catch { return snapshot; }
+}
+/**
  * Completion-draft base payload for the Operations feed (master + variants).
  * `mode` MUST reflect the project's REAL engine mode — a hardcoded 'scene' made
  * every Faceless submission consume a Scene quota slot: usageService counts
@@ -1728,12 +1751,12 @@ if (!skipGeneration) {
             .map(n => scenes.find(s => s.sceneNumber === n)?.id)
             .filter((id): id is string => Boolean(id));
           for (const id of ids) failedSpanSceneIds.add(id);
-          if (ids.length) {
+          for (const id of ids) {
             await db.update(schema.videoScenes).set({
               status: 'failed',
-              metadata: { error: `Veo span take ${span.soraBlock} failed: ${spanError?.message}` },
+              metadata: mergeCompletionMetadata(await liveSceneMetadata(id, {}), { error: `Veo span take ${span.soraBlock} failed: ${spanError?.message}` }),
               updatedAt: new Date(),
-            }).where(inArray(schema.videoScenes.id, ids));
+            }).where(eq(schema.videoScenes.id, id));
           }
         }
       }
@@ -1762,17 +1785,21 @@ if (!skipGeneration) {
         // A timed-out provider call may still be in flight; persist a terminal state
         // now so polling can never report a permanently generating scene. Scope to
         // non-completed scenes only — never clobber a scene that already finished.
-        await db.update(schema.videoScenes).set({
-          status: 'failed',
-          metadata: { error: 'Scene generation timed out after 7 minutes' },
-          updatedAt: new Date(),
-        }).where(and(
+        // MERGE into each scene's live metadata (never wipe in-progress job refs).
+        const timedOutRows = await db.select().from(schema.videoScenes).where(and(
           eq(schema.videoScenes.projectId, projectId),
           or(
             eq(schema.videoScenes.status, 'generating'),
             eq(schema.videoScenes.status, 'pending'),
           ),
         ));
+        for (const tRow of timedOutRows) {
+          await db.update(schema.videoScenes).set({
+            status: 'failed',
+            metadata: mergeCompletionMetadata(await liveSceneMetadata(tRow.id, {}), { error: 'Scene generation timed out after 7 minutes' }),
+            updatedAt: new Date(),
+          }).where(eq(schema.videoScenes.id, tRow.id));
+        }
       }
     }
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
@@ -1780,7 +1807,7 @@ if (!skipGeneration) {
       const failedCount = complete.filter(s=>s.status==='failed').length;
       await db.update(schema.videoProjects).set({
         status:'failed',
-        metadata: mergeCompletionMetadata(pmeta, { failedSceneCount: failedCount, totalScenes: complete.length }),
+        metadata: mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), { failedSceneCount: failedCount, totalScenes: complete.length }),
         updatedAt:new Date()
       }).where(eq(schema.videoProjects.id,projectId));
       return;
@@ -1870,7 +1897,7 @@ if (!skipGeneration) {
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
       const completeMeta: Record<string, any> = {
-        ...mergeCompletionMetadata(pmeta, {
+        ...mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), {
           sceneCount: complete.length,
           totalDuration: complete.reduce((a,s)=>a+(s.duration||0),0),
           variantExportCount: variantResults.length,
@@ -1965,7 +1992,7 @@ if (!skipGeneration) {
       }
     } catch(assemblyErr:any) {
       trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
-      await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(pmeta,{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
+      await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta),{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
   async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
@@ -2088,8 +2115,8 @@ else {
         assetUrl = uploaded.url || safeLocal;
       }
       const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:{provider:scene.visualType==='still'?'gpt-image-2':motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
-    } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:{error:error.message},updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?'gpt-image-2':motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+    } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
    * Regenerate ONE scene's narration audio via GPT-Audio (or TTS fallback) in the
@@ -2325,23 +2352,28 @@ else {
     }
     if (stale.length === 0) return 0;
     const ids = stale.map((p: any) => p.id);
-    await db.update(schema.videoProjects).set({
-      status: 'failed',
-      metadata: { error: 'Pipeline interrupted by service restart — regenerate this video', recoveredBy: 'resume-on-boot' },
-      updatedAt: new Date(),
-    }).where(inArray(schema.videoProjects.id, ids));
+    for (const pid of ids) {
+      await db.update(schema.videoProjects).set({
+        status: 'failed',
+        metadata: mergeCompletionMetadata(await liveProjectMetadata(pid, {}), { error: 'Pipeline interrupted by service restart — regenerate this video', recoveredBy: 'resume-on-boot' }),
+        updatedAt: new Date(),
+      }).where(eq(schema.videoProjects.id, pid));
+    }
     // Also fail any scene still stuck in generating/pending so per-scene UI reflects it.
-    await db.update(schema.videoScenes).set({
-      status: 'failed',
-      metadata: { error: 'Scene interrupted by service restart' },
-      updatedAt: new Date(),
-    }).where(and(
+    const stuckScenes = await db.select().from(schema.videoScenes).where(and(
       inArray(schema.videoScenes.projectId, ids),
       or(
         eq(schema.videoScenes.status, 'generating'),
         eq(schema.videoScenes.status, 'pending'),
       ),
     ));
+    for (const sRow of stuckScenes) {
+      await db.update(schema.videoScenes).set({
+        status: 'failed',
+        metadata: mergeCompletionMetadata(await liveSceneMetadata(sRow.id, {}), { error: 'Scene interrupted by service restart' }),
+        updatedAt: new Date(),
+      }).where(eq(schema.videoScenes.id, sRow.id));
+    }
     trace(`recovered_stale_projects count=${stale.length} ids=${ids.map(i=>i.slice(0,8)).join(',')}`);
     return stale.length;
   }
