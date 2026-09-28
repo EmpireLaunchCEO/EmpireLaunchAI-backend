@@ -175,11 +175,11 @@ test('verifyArcCoverage: the no-plan fallback arc satisfies all three stages (re
   // Mirror buildArcScenes wording (the deterministic fallback every plan degrades to).
   const subject = 'Beadwick & Co';
   const script = [
-    scene(1, 6, `Cinematic establishing shot: hook intro of ${subject}`, `Opening — introducing ${subject}.`),
-    scene(2, 6, `Cinematic medium shot: setting up ${subject}`, `Getting started: the essentials of ${subject} come into focus.`),
-    scene(3, 6, `Cinematic wide shot: ${subject} delivering its key benefit`, `Now it comes together — the transformation and key benefit of ${subject} in action.`),
-    scene(4, 6, `Cinematic close-up: the payoff result of ${subject}`, `The payoff: look at the result ${subject} delivers.`),
-    scene(5, 6, `Cinematic closing shot: ${subject} final call-to-action`, `Call to action: ready to take the next step with ${subject}?`),
+    scene(1, 6, `Cinematic establishing shot: hook intro of ${subject}`, `Say hello to ${subject} — it's about to make things a lot easier.`),
+    scene(2, 6, `Cinematic medium shot: setting up ${subject}`, `The essentials come together fast, and the process is simpler than it looks.`),
+    scene(3, 6, `Cinematic wide shot: ${subject} delivering its key benefit`, `And this is where it clicks — the transformation you came for.`),
+    scene(4, 6, `Cinematic close-up: the payoff result of ${subject}`, "That's the payoff — real results, right in front of you."),
+    scene(5, 6, `Cinematic closing shot: ${subject} final call-to-action`, `Ready to make the move? Tap the link in bio.`),
   ];
   assert.deepEqual(verifyArcCoverage(script), { hook: true, about: true, cta: true });
 });

@@ -560,7 +560,15 @@ function targetSceneCount(durationTarget: number): number {
  * Durations are distributed so the exact sum equals durationTarget.
  */
 function compactCreativeSubject(idea: string, maxChars = 160): string {
-  const firstSentence = String(idea || '').split(/(?<=[.!?])\s+/)[0]?.trim() || String(idea || '').trim();
+  let subject = String(idea || '').replace(/\s+/g, ' ').trim();
+  // CONTENT HYGIENE (owner Sep 28): the idea can arrive as a consultant/assistant
+  // relay (greeting questions, UI framing). Never let that leak into narration as
+  // the subject. Cut everything from the first consultant-framing marker onward;
+  // if nothing real is left, use a neutral finished-copy subject.
+  const cut = subject.search(/(?:what niche should we dominate|describe the vibe|backgrounds, motion graphics, overlays|what visuals are you imagining|let(?:\u2019|')s design your video|one quick detail|tap the wand to generate|what(?:\u2019|')s the platform name|what color palette should)/i);
+  if (cut !== -1) subject = subject.slice(0, cut).trim();
+  const firstSentence = subject.split(/(?<=[.!?])\s+/)[0]?.trim() || subject;
+  if (!firstSentence || CONSULTANT_META_PATTERN.test(firstSentence)) return 'this upgrade';
   if (firstSentence.length <= maxChars) return firstSentence;
   return `${firstSentence.slice(0, maxChars - 1).trimEnd()}…`;
 }
@@ -575,20 +583,26 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
     // handful of near-identical variants (quality bug from the old 3-group arc).
     let narration: string;
     let visualPrompt: string;
+    // FINISHED COPY ONLY (owner Sep 28): narration is the exact voiceover copy a
+    // viewer hears — polished, natural, customer-facing. NEVER plan-speak (no
+    // "Opening —", "Getting started:", "Now it comes together", "The payoff:",
+    // "Call to action:", step-by-step recitals, or descriptions of the video's
+    // own structure). The visualPrompt (internal) still carries the arc stage
+    // wording so the planner coverage checks stay deterministic.
     if (f < 0.25) {
-      narration = `Opening — introducing ${subject}.`;
+      narration = `Say hello to ${subject} — it's about to make things a lot easier.`;
       visualPrompt = `Cinematic establishing shot: hook intro of ${subject}, the subject shown clearly for the first time`;
     } else if (f < 0.5) {
-      narration = `Getting started: the essentials of ${subject} come into focus.`;
+      narration = 'The essentials come together fast, and the process is simpler than it looks.';
       visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${subject}, subject continues from the opening, early stage`;
     } else if (f < 0.75) {
-      narration = `Now it comes together — the transformation and key benefit of ${subject} in action.`;
+      narration = 'And this is where it clicks — the transformation you came for.';
       visualPrompt = `Cinematic wide shot: ${subject} delivering its key benefit, the transformation in progress, same continuous subject`;
     } else if (f < 1) {
-      narration = `The payoff: look at the result ${subject} delivers.`;
+      narration = "That's the payoff — real results, right in front of you.";
       visualPrompt = `Cinematic close-up: the payoff result of ${subject}, same continuous subject, breakthrough moment`;
     } else {
-      narration = `Call to action: ready to take the next step with ${subject}?`;
+      narration = 'Ready to make the move? Tap the link in bio.';
       visualPrompt = `Cinematic closing shot: ${subject} final call-to-action, same continuous subject, confident ending`;
     }
     return {
@@ -605,6 +619,35 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
   });
 }
 
+/** CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY. Plan-speak
+ *  and prompt echoes must never reach GPT-Audio or the final video. This pure
+ *  checker flags the arc-template labels and planner-echo phrases the owner saw
+ *  in her Faceless video ("Opening — introducing", "The payoff:", "Call to action:",
+ *  "we'll walk through", "in this video", scene refs, consultant/planner framing).
+ *  Content-bearing lines that merely start with the same word (e.g. "Opening with
+ *  the lavender palette...") are NOT flagged — only exact plan-speak shapes. */
+export function isPlanSpeakNarration(narration: string | null | undefined): boolean {
+  const t = String(narration || '').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (/(?:^Opening[\u2014\u2013:\s]+introducing|^Getting started:|^Now it comes together\s*[\u2014\u2013:]|^The payoff:|^Call to action:|^Step [0-9]+(?: of [0-9]+)?:|^Scene[\u2014\u2013:\s]+[0-9]+)/i.test(t)) return true;
+  if (/we(?:'|’|‘)ll (?:walk|talk) (?:you )?through|\bin this video\b|\bvisual prompt\b|\bnarration[\u2014\u2013:]/i.test(t)) return true;
+  if (CONSULTANT_META_PATTERN.test(t)) return true;
+  return /what niche should we dominate|describe the vibe|backgrounds, motion graphics|say hello to this upgrade|tap the wand to generate/i.test(t);
+}
+/** Deterministic finished-copy fallback battery — rotated by sceneId hash so
+ *  consecutive scenes never repeat. Pure, zero paid calls. */
+export function finalCopyFallbackLine(seed: string, beat: number): string {
+  const LINES = [
+    "You're going to want to see this one.",
+    "It's simpler than you think — and it works.",
+    "Here's the part that makes it all click.",
+    "That's the result — real, fast, right in front of you.",
+    "Ready to make the move? Tap the link in bio.",
+  ];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return LINES[Math.abs((h + beat) % LINES.length)];
+}
 /**
  * Map `fn` over `items` with at most `limit` promises in-flight at once. Preserves
  * input order in the result. Prevents 30–60 concurrent provider calls on long videos.
@@ -666,7 +709,13 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
         duration: base + (i < rem ? 1 : 0),
         visualType: keepMotion ? 'motion' : 'still',
         ...(keepMotion ? { soraBlock: 0 } : {}),
-        narration: sceneCopyOrFallback(s?.narration, a.narration, a.duration, true),
+        narration: (() => {
+          const chosen = sceneCopyOrFallback(s?.narration, a.narration, a.duration, true);
+          // Plan-speak echo guard (owner Sep 28): if GPT's line is plan-speak /
+          // prompt echo, swap to the finished-copy arc line for the SAME beat.
+          if (isPlanSpeakNarration(chosen)) return a.narration;
+          return chosen;
+        })(),
         ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
         visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
       };
@@ -1439,8 +1488,12 @@ function buildPlannerRequest(params: {
   constrain: string; toneHint: string; moodHint: string; srcHint: string;
   componentsSection: string; timeBudgetSection: string; actionSection: string; avatarSection: string;
 }): string {
+  // CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY and
+  // visualPrompts are IMAGERY ONLY. Shared by the Scene + Faceless planner so
+  // both shapes carry the same anti-plan-speak directive.
+  const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.';
   const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection } = params;
-  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
+  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
@@ -1490,7 +1543,7 @@ export class SceneVideoPipelineService {
         const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "avatarLook" string — the EXACT shared description of the avatar, included ONLY when any scene has a TALKING avatar (one consistent person/look, reused VERBATIM by every avatar scene); omit it entirely when there is no talking avatar —, a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
  a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${duration}), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words), narrationRole: "avatar-dialogue" only for scenes whose visual shows a TALKING avatar SPEAKING to camera (lips moving) — narration written as that avatar's own first-person spoken words — else "narrator" (static avatar or no avatar keeps voiceover; never both in one scene) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
 FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 60-second video with a 2-call budget this is the required JSON:
-{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 16, "prompt": "One continuous ~16s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 16, "prompt": "One continuous ~16s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Opening: watch how this saves your time.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
+{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 16, "prompt": "One continuous ~16s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 16, "prompt": "One continuous ~16s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Watch how this saves your time from day one.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds, around ${perScene}), visualType ("motion" or "still"), narration, and visualPrompt.`
@@ -2322,7 +2375,20 @@ export async function generateSceneAudio(
   sceneId: string,
   voice?: 'female' | 'male' | 'none',
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto',
+  opts?: { allowPlanSpeak?: boolean },
 ): Promise<{ url?: string; localPath: string }> {
+  // CONTENT HYGIENE (owner Sep 28): NEVER voice plan-speak. The pipeline and
+  // auto-fix paths pass finished copy by construction; this is the last-mile
+  // guard so any escaped arc-template/planner-echo line is replaced with a
+  // deterministic finished-copy fallback (cheap string check, no paid calls).
+  // The LINE_CHANGE path passes allowPlanSpeak:true — the user's edited line is
+  // their own authoritative copy and must be voiced verbatim.
+  if (!opts?.allowPlanSpeak && isPlanSpeakNarration(text)) {
+    const beat = (String(text).toLowerCase().includes('bio') || String(text).toLowerCase().includes('ready')) ? 4 : (text.length % 4);
+    const clean = finalCopyFallbackLine(String(sceneId || text), beat);
+    console.warn(`[PIPELINE] narration_hygiene: replaced plan-speak before GPT-Audio (scene ${sceneId}): "${String(text).slice(0, 70)}"`);
+    text = clean;
+  }
   // voice:'none' is the NO-voiceover sentinel. The caller never reaches here with
   // it (processScene guards with shouldGenerateSceneNarration), but normalize so
   // resolveVoice (typed 'female'|'male'|undefined) accepts the widened union.

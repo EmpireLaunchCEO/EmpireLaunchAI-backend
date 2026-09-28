@@ -138,11 +138,11 @@ test('applySceneMotionFloor: promoted scene pairs with soraContent[0] (block pro
 test('injectMissingComponents: every relayed component flows verbatim into the final plan', () => {
   // The owner\'s live project: generic 5-scene plan (exact prod shape) + relayed inventory.
   const generic = [
-    still(1, 'Cinematic establishing shot: hook intro of the subject', 'Opening — introducing the subject.'),
-    still(2, 'Cinematic medium shot: setting up the fundamentals', 'Getting started: the essentials come into focus.'),
-    still(3, 'Cinematic wide shot: the transformation in progress', 'Now it comes together — the key benefit in action.'),
-    still(4, 'Cinematic close-up: the payoff result', 'The payoff: look at the result it delivers.'),
-    still(5, 'Cinematic closing shot: confident ending', 'Call to action: ready to take the next step?'),
+    still(1, 'Cinematic establishing shot: hook intro of the subject', "Say hello to the subject — it's about to make things a lot easier."),
+    still(2, 'Cinematic medium shot: setting up the fundamentals', 'The essentials come together fast, and the process is simpler than it looks.'),
+    still(3, 'Cinematic wide shot: the transformation in progress', 'And this is where it clicks — the transformation you came for.'),
+    still(4, 'Cinematic close-up: the payoff result', "That's the payoff — real results, right in front of you."),
+    still(5, 'Cinematic closing shot: confident ending', 'Ready to make the move? Tap the link in bio.'),
   ];
   const inventory = ['My new platform brings content creation', 'red', 'TikTok', 'lavender', '50% off', 'Comment'];
   const before = verifyComponentsInScript(generic, inventory);
