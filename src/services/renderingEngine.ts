@@ -29,6 +29,20 @@ export interface RenderResult {
  * Rendering Engine — takes a Production Script and renders it into a video.
  * Pipeline: GPT Image 2 + Sharp → FFmpeg (faceless engine — zero video API)
  */
+/**
+ * CONTENT HYGIENE (owner Sep 28): overlay text must ONLY ever be short, customer-facing
+ * hook copy (e.g. "New drop", "Link in bio"). Never visualPrompt/scene/plan/quote echoes.
+ * Exported for cheap unit tests (no Paid render required).
+ */
+export function isCustomerFacingOverlayText(text: string): boolean {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (t.split(/\s+/).length > 7) return false; // hooks are short; anything longer is copy/description
+  if (/scene\s*\d|visual\s*prompt|narration|\bplan\b|director|overlay|prompt|\bcta\b|hook|payoff|opening|getting started|step\s*\d|story\s*arc|transcript|conversation|brief|internal|layout|placeholder/i.test(t)) return false;
+  if (/['"\u2018\u2019\u201c\u201d]/.test(t)) return false; // no quoted/echoed fragments
+  return true;
+}
+
 export class RenderingEngine {
   private tempDir: string;
 
@@ -208,23 +222,15 @@ if (!b64Json) {
    * DROPPED entirely; if no overlay survives, the clean image is returned
    * untouched (safest: no text beats wrong text).
    */
-  private isCustomerFacingOverlayText(text: string): boolean {
-    const t = String(text || '').replace(/\s+/g, ' ').trim();
-    if (!t) return false;
-    if (t.split(/\s+/).length > 7) return false; // hooks are short; anything longer is copy/description
-    if (/scene\s*\d|visual\s*prompt|narration|\bplan\b|director|overlay|prompt|\bcta\b|hook|payoff|opening|getting started|step\s*\d|story\s*arc|transcript|conversation|brief|internal|layout|placeholder/i.test(t)) return false;
-    if (/['"\u2018\u2019\u201c\u201d]/.test(t)) return false; // no quoted/echoed fragments
-    return true;
-  }
   private async applyTextOverlays(
     imagePath: string,
     overlays: TextOverlay[],
     outputDir: string,
     index: number
   ): Promise<string> {
-    const safe = (overlays || []).filter(o => this.isCustomerFacingOverlayText(o.text));
+    const safe = (overlays || []).filter(o => isCustomerFacingOverlayText(o.text));
     if (safe.length === 0) {
-      const dropped = (overlays || []).filter(o => !this.isCustomerFacingOverlayText(o.text));
+      const dropped = (overlays || []).filter(o => !isCustomerFacingOverlayText(o.text));
       if (dropped.length > 0) {
         console.warn(`[PIPELINE] overlay_hygiene: dropped ${dropped.length} non-customer-facing overlay(s): ${dropped.map(o => JSON.stringify(o.text)).join(', ')}`);
       }
