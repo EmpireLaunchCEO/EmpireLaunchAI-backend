@@ -7,6 +7,7 @@ import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
+import { transformTwinScriptToPitch, isInternalBriefEcho } from './creativeTransformation.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -71,6 +72,13 @@ export class CinemaEngineService {
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
     const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration } = request;
+    // CREATIVE TRANSFORMATION (owner Sep 28): the twin's script must be a FINISHED
+    // pitch to potential clients, never a recital of the owner's typed brief or
+    // the chat's internal structure. transformTwinScriptToPitch rewrites
+    // INTERNAL-sounding scripts ("need 5 client beta testers", "5 compelling
+    // reasons", "CTA", meta talk) into a client-directed pitch built from the
+    // creative essence, and leaves already-finished user scripts verbatim.
+    const safeScript = transformTwinScriptToPitch(script);
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -106,9 +114,9 @@ export class CinemaEngineService {
       // talking-head stills (sharp, local) + FFmpeg compose — which is already
       // zero video API and was the pre-existing fallback. Cost ledger never sees
       // a Sora spend for Twin.
-      const lipSyncData = await this.generateLipSyncReasoning(script);
+      const lipSyncData = await this.generateLipSyncReasoning(safeScript);
       const framePaths = await this.generateTalkingFrames(
-        facialDna, lipSyncData, script, this.cinemaDir, assetId, duration
+        facialDna, lipSyncData, safeScript, this.cinemaDir, assetId, duration
       );
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
 
@@ -128,7 +136,9 @@ export class CinemaEngineService {
         thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
         status: 'completed',
         metadata: {
-          script,
+          script: safeScript,
+          scriptOriginal: isInternalBriefEcho(script) ? String(script || '') : undefined,
+          scriptTransformed: isInternalBriefEcho(script),
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
           engine: 'faceless-engine (frame pipeline · zero video API, no Sora/Veo)',
