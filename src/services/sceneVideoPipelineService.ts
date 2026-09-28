@@ -12,6 +12,7 @@ import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice } from './voiceOptions.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, buildTransformationPlannerRule } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -592,6 +593,19 @@ function compactCreativeSubject(idea: string, maxChars = 160): string {
   if (cut !== -1) subject = subject.slice(0, cut).trim();
   const firstSentence = subject.split(/(?<=[.!?])\s+/)[0]?.trim() || subject;
   if (!firstSentence || CONSULTANT_META_PATTERN.test(firstSentence)) return 'this upgrade';
+  // CREATIVE TRANSFORMATION (owner Sep 28): the typed brief is RAW MATERIAL, not
+  // finished copy. If the brief is INTERNAL-sounding (recruiting testers, "5
+  // compelling reasons", "CTA", "I want a video that…", "the making of", meta
+  // talk about the video itself), rewrite it to a FINISHED client-facing subject
+  // derived from the product the brief actually describes — NEVER recite the raw
+  // internal fragment ("…need 5 client beta testers." voiced verbatim was the
+  // owner's live-test defect). Clean briefs pass through untouched.
+  const essence = extractCreativeEssence(subject);
+  if (essence.internal) {
+    const finished = essence.subject;
+    if (finished.length <= maxChars) return finished;
+    return `${finished.slice(0, maxChars - 1).trimEnd()}…`;
+  }
   if (firstSentence.length <= maxChars) return firstSentence;
   return `${firstSentence.slice(0, maxChars - 1).trimEnd()}…`;
 }
@@ -737,6 +751,13 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
           // Plan-speak echo guard (owner Sep 28): if GPT's line is plan-speak /
           // prompt echo, swap to the finished-copy arc line for the SAME beat.
           if (isPlanSpeakNarration(chosen)) return a.narration;
+          // CREATIVE TRANSFORMATION (owner Sep 28): near-verbatim INTERNAL-BRIEF
+          // echoes (recruiting testers, "5 compelling reasons", "CTA" labels, "the
+          // making of", meta talk) are NEVER client copy — swap to the finished
+          // arc line, which is built from the TRANSFORMED subject (never the raw
+          // typed fragment). Deliberate user LINE_CHANGE edits bypass this guard
+          // upstream via allowPlanSpeak and stay voiced verbatim.
+          if (isInternalBriefEcho(chosen)) return a.narration;
           return chosen;
         })(),
         ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
@@ -1231,7 +1252,12 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   // (c) brief chunks, then user-turn chunks (carry the subject/concept itself).
   for (const c of chunkText(input.cleanBrief)) push(c);
   for (const c of chunkText(userText)) push(c);
-  return out.slice(0, INVENTORY_CAP);
+  // CREATIVE TRANSFORMATION (owner Sep 28): the conversation component inventory
+  // must NEVER force INTERNAL talk-points into scenes ("need 5 client beta
+  // testers", "5 compelling reasons", "CTA" as a label, "the making of") — those
+  // are the brief's meta-structure, not relayed client components, and forcing
+  // them in is exactly how the owner's video rendered "5 reasons"/"CTA" cards.
+  return out.filter((c) => !isInternalTalkPoint(c)).slice(0, INVENTORY_CAP);
 }
 /** Every component must appear (case-insensitive substring) in ≥1 scene's text. */
 export function verifyComponentsInScript(script: SceneScript[], components: string[]): { missing: string[] } {
@@ -1514,7 +1540,7 @@ function buildPlannerRequest(params: {
   // CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY and
   // visualPrompts are IMAGERY ONLY. Shared by the Scene + Faceless planner so
   // both shapes carry the same anti-plan-speak directive.
-  const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.';
+  const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.' + buildTransformationPlannerRule();
   const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection } = params;
   return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
 }
@@ -1575,7 +1601,13 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const timeBudgetSection = buildPlannerTimeBudgetSection(duration);
         const actionSection = buildPlannerActionSection();
         const avatarSection = buildPlannerAvatarSection();
-        const request = buildPlannerRequest({ cleanIdea, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection });
+        // CREATIVE TRANSFORMATION (owner Sep 28): the planner ingests the brief as
+        // its creative subject. When the brief is INTERNAL-sounding (recruiting
+        // testers / list-structure / CTA labels / meta talk), feed the planner the
+        // FINISHED client-facing subject derived from the product the brief
+        // describes — never the raw fragment it would otherwise echo.
+        const plannerBrief = extractCreativeEssence(cleanIdea).internal ? extractCreativeEssence(cleanIdea).subject : cleanIdea;
+        const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection });
         const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
         generatedScript = decision.script || decision.parameters?.script;
         // Planning-layer QC (deterministic, NO paid renders): every relayed component
@@ -1692,7 +1724,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       .map(s => s.sceneNumber);
     const narrationRolesFinal = planned.map(s => s.narrationRole || 'narrator');
     trace(`content_direction project=${projectId} roles=[${narrationRolesFinal.join(',')}] avatarLook=${avatarPass.avatarLook ? 'set' : 'none'} actionInjected=[${actionPass.injectedInto.join(',')}] abstractNarration=[${actionAudit.narrationAbstract.join(',')}]`);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -2415,7 +2447,7 @@ export async function generateSceneAudio(
   // deterministic finished-copy fallback (cheap string check, no paid calls).
   // The LINE_CHANGE path passes allowPlanSpeak:true — the user's edited line is
   // their own authoritative copy and must be voiced verbatim.
-  if (!opts?.allowPlanSpeak && isPlanSpeakNarration(text)) {
+  if (!opts?.allowPlanSpeak && (isPlanSpeakNarration(text) || isInternalBriefEcho(text))) {
     const beat = (String(text).toLowerCase().includes('bio') || String(text).toLowerCase().includes('ready')) ? 4 : (text.length % 4);
     const clean = finalCopyFallbackLine(String(sceneId || text), beat);
     console.warn(`[PIPELINE] narration_hygiene: replaced plan-speak before GPT-Audio (scene ${sceneId}): "${String(text).slice(0, 70)}"`);
