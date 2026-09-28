@@ -229,7 +229,9 @@ async function remixFromStoredComponents(
   const assembled = path.join(dir, 'final.mp4');
   await concatClips(clips, assembled);
 
-  const qc = runRenderQC(assembled);
+  // CONTENT HYGIENE (owner Sep 28): a voice:'none' project's clips are silent by
+  // design — the QC must not flag no_audio as a defect on that path.
+  const qc = runRenderQC(assembled, { allowSilent: components.every((c: any) => !c.audioLocal) });
 
   if (!r2Storage.isAvailable) {
     return { error: 'components_expired' };
@@ -296,7 +298,10 @@ async function remixLineChange(
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-linechange-'));
   try {
     // Re-voice the edited line in the SAME voice (ONE gpt-audio micro-call).
-    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone);
+    // CONTENT HYGIENE (owner Sep 28): the user's edited line is THEIR finished
+    // copy — allowPlanSpeak:true voices it verbatim (the hygiene guard only
+    // rewrites auto-generated plan-speak, never a deliberate user edit).
+    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone, { allowPlanSpeak: true });
     if (!audio?.localPath) {
       return { error: 'audio_failed', reason: 'could not regenerate the edited line audio', lineChange: { sceneNumber: match.sceneNumber, oldText: match.narration, newText: lineChange.newText } };
     }
@@ -417,7 +422,9 @@ async function remixRepetitive(
 
   const assembled = path.join(dir, 'final.mp4');
   await concatClips(clips, assembled);
-  const qc = runRenderQC(assembled);
+  // CONTENT HYGIENE (owner Sep 28): same silent-by-design allowance for voice:'none'
+  // projects whose kept scenes carry no narration audio.
+  const qc = runRenderQC(assembled, { allowSilent: keptScenes.every((s: any) => !s.audioUrl && !s.audioLocal) });
 
   if (!r2Storage.isAvailable) {
     return { error: 'components_expired', reason: 'R2 unavailable' };
