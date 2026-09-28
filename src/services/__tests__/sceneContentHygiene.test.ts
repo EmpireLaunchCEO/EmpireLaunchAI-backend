@@ -5,6 +5,7 @@ import {
   finalCopyFallbackLine,
   parseScenePlan,
 } from '../sceneVideoPipelineService.js';
+import { isCustomerFacingOverlayText } from '../renderingEngine.js';
 
 // ─── CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY ────────
 // The owner's Faceless video narrated the assistant's greeting / plan-speak
@@ -78,4 +79,29 @@ test('parseScenes: finished GPT copy survives (never replaced by the generic arc
   };
   const plan = parseScenePlan(raw as any, 'subject', 30, 'scene');
   assert.equal(plan[0].narration, 'The upload takes two seconds and it is already processing.');
+});
+
+// ─── OVERLAY HYGIENE (owner Sep 28): on-screen text is CUSTOMER-FACING ONLY ──
+// Template hooks like "Link in bio → Get yours" and "Most people get this wrong"
+// are the ONLY acceptable on-screen text. Anything that reads like a plan,
+// narration, scene/production note, or a quoted echo must be dropped.
+
+test('isCustomerFacingOverlayText: allows short hook copy', () => {
+  assert.equal(isCustomerFacingOverlayText('Link in bio → Get yours'), true);
+  assert.equal(isCustomerFacingOverlayText('Most people get this wrong'), true);
+  assert.equal(isCustomerFacingOverlayText('The AI-powered solution'), true);
+  assert.equal(isCustomerFacingOverlayText('The #1 secret'), true);
+  assert.equal(isCustomerFacingOverlayText('New drop'), true);
+});
+
+test('isCustomerFacingOverlayText: rejects plan/internal text (owner defect)', () => {
+  assert.equal(isCustomerFacingOverlayText('Scene 2 of 5 — problem statement'), false);
+  assert.equal(isCustomerFacingOverlayText('Visual prompt: close-up of the product'), false);
+  assert.equal(isCustomerFacingOverlayText('Narration line for this scene'), false);
+  assert.equal(isCustomerFacingOverlayText('The plan for this video is simple'), false);
+  assert.equal(isCustomerFacingOverlayText('Opening — introducing the product'), false);
+  assert.equal(isCustomerFacingOverlayText('Step 1: open the app and tap generate'), false);
+  assert.equal(isCustomerFacingOverlayText('"New drop"'), false); // quoted echo
+  assert.equal(isCustomerFacingOverlayText(''), false);
+  assert.equal(isCustomerFacingOverlayText('Long descriptive sentence that explains exactly what the viewer is seeing in this particular scene'), false); // >7 words
 });
