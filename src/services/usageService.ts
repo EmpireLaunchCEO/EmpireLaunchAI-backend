@@ -53,15 +53,15 @@ function isValidUuid(value: string): boolean {
 }
 
 /**
- * Locked quota model (owner Sep 18): Scene/Customize = 4/wk, Faceless = 10/wk,
- * Neural Twin = 5/wk, High-Res Design = 50/mo. Single source of truth — the
- * enforcement paths (getDailyRemaining/enforceLimit) AND the reporting endpoint
- * (cinemaController.getUsage) read these, so Studio chips can never drift from
- * what the backend actually enforces.
+ * Locked quota model (owner Sep 24 rebalance): Scene/Customize = 2/wk (8/mo),
+ * Faceless = 12/wk (48/mo), Neural Twin = 5/wk (20/mo), High-Res Design = 50/mo.
+ * Single source of truth — the enforcement paths (getDailyRemaining/enforceLimit)
+ * AND the reporting endpoint (cinemaController.getUsage) read these, so Studio
+ * chips can never drift from what the backend actually enforces.
  */
-export const WEEKLY_SCENE_LIMIT = 4;      // customize_video (Scene-Based)
-export const WEEKLY_FACELESS_LIMIT = 10;  // faceless
-export const WEEKLY_TWIN_LIMIT = 5;       // neural_twin
+export const WEEKLY_SCENE_LIMIT = 2;      // customize_video (Scene-Based) — 8/mo
+export const WEEKLY_FACELESS_LIMIT = 12;  // faceless — 48/mo
+export const WEEKLY_TWIN_LIMIT = 5;       // neural_twin — 20/mo
 export const MONTHLY_DESIGN_LIMIT = 50;   // high_res_design
 export class UsageService {
   /**
@@ -101,7 +101,7 @@ export class UsageService {
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
     // Weekly video-production quotas (168-hour rolling window), final owner config:
-    // Scene-Based (customize_video) = 4/wk (owner Sep 18), Faceless = 10/wk, Neural Twin (neural_twin) = 5/wk.
+    // Scene-Based (customize_video) = 2/wk (owner Sep 24 rebalance), Faceless = 12/wk, Neural Twin (neural_twin) = 5/wk.
     const weeklySceneLimit = WEEKLY_SCENE_LIMIT;      // customize_video
     const weeklyFacelessLimit = WEEKLY_FACELESS_LIMIT;
     const weeklyTwinLimit = WEEKLY_TWIN_LIMIT;        // neural_twin
@@ -157,7 +157,7 @@ export class UsageService {
       } catch {
         periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       }
-      // Final per-type weekly limits: customize_video=4, faceless=10, neural_twin=5 (owner Sep 18).
+      // Final per-type weekly limits: customize_video=2, faceless=12, neural_twin=5 (owner Sep 24 rebalance).
       if (type === 'customize_video') limit = weeklySceneLimit;
       else if (type === 'faceless') limit = weeklyFacelessLimit;
       else limit = weeklyTwinLimit; // neural_twin
@@ -227,16 +227,16 @@ export class UsageService {
 
       if (type === 'high_res_design') {
         period = 'month';
-        limit = 50;
+        limit = MONTHLY_DESIGN_LIMIT;
       } else if (type === 'customize_video') {
         period = 'week';
-        limit = 3;
+        limit = WEEKLY_SCENE_LIMIT;
       } else if (type === 'faceless') {
         period = 'week';
-        limit = 10;
+        limit = WEEKLY_FACELESS_LIMIT;
       } else if (type === 'neural_twin') {
         period = 'week';
-        limit = 5;
+        limit = WEEKLY_TWIN_LIMIT;
       }
 
       throw new Error(`Usage limit reached. You can generate up to ${limit} ${type.replace(/_/g, ' ')}s per ${period}.`);
