@@ -323,7 +323,13 @@ export const saveToLibrary = async (req: Request, res: Response) => {
 
       const videoUrl: string | undefined = creation.fileUrl || undefined;
       const title: string = creation.title || 'Generated Video';
-      const assetType = creation.type === 'enhanced_video' ? 'video' :
+      // Library box routing (owner Sep 29): derive the Library type from the
+      // creation's engine family too, not just generic video. Twins are
+      // persisted as creations.type 'neural_twin' (cinemaController); they
+      // must land in the Neural Twins Library box (type 'twin_video').
+      const assetType = creation.type === 'neural_twin' ? 'twin_video' :
+        creation.type === 'faceless' ? 'faceless' :
+        creation.type === 'enhanced_video' ? 'video' :
         creation.type === 'design' ? 'design' : 'video';
       const brandId = userId;
 
@@ -393,7 +399,15 @@ export const saveToLibrary = async (req: Request, res: Response) => {
     const videoUrl: string | undefined = payload?.videoUrl;
     const imageUrl: string | undefined = payload?.imageUrl;
     const title: string = payload?.title || 'Untitled Asset';
-    const assetType = approval.type === 'video' ? 'video' :
+    // Library box routing (owner Sep 29): scene/faceless/twin drafts are all
+    // persisted as approval.type 'video' but carry payload.mode — 'scene',
+    // 'faceless' (scene pipeline buildDraftBase) or 'twin' (cinemaController).
+    // Derive the Library type from the mode so each lands in its own box:
+    // twin → 'twin_video' (Neural Twins), faceless → 'faceless' (Videos box),
+    // everything else keeps the old approval.type mapping.
+    const draftMode = String(payload?.mode || '').toLowerCase();
+    const assetType = draftMode === 'twin' ? 'twin_video' :
+      draftMode === 'faceless' ? 'faceless' :
       approval.type === 'edit' ? 'edit' :
       approval.type === 'design' ? 'design' : 'video';
     const brandId = userId; // Use userId as fallback brand
