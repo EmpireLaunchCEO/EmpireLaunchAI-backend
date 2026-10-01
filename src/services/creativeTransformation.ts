@@ -42,6 +42,9 @@ export interface CreativeEssence {
   raw: string;
   /** True when the brief was internal-sounding and needed rewriting. */
   internal: boolean;
+  /** True when the DEGENERATE-OUTPUT guard fired and the subject was replaced
+   *  by the compact rewrite fallback (raw brief echoed verbatim). */
+  degenerateFallback?: boolean;
 }
 
 /** Internal-sounding brief markers: recruiting testers, list structure, CTA
@@ -117,6 +120,117 @@ function normalize(text: unknown): string {
 }
 
 /** Earliest index of ANY internal marker in `text`, or -1 when none match. */
+/** Instruction/consultant residue that can leak into the TAIL of a typed brief
+ *  ('Ok CTA- Get EmpireLaunch AI today and start creating more for less You
+ *  choose Use a energetic mood across every scene and the narration.' — the
+ *  EXACT residue the owner's Sep 30 brief carried, owner launch-gate task
+ *  316d1a2f). Cut from the EARLIEST residue marker to the end so the residue
+ *  can NEVER become the subject, a visual prompt, or narration. */
+const INSTRUCTION_RESIDUE_PATTERNS: RegExp[] = [
+  /\buse\s+a\s+[a-z]+(?:\s+mood)?\s+across\s+every\s+scene\b/i, // moodHintToString output
+  /\b(?:cta|call\s+to\s+action)\b/i,                                // "CTA- Get ... today"
+  /\byou\s+choose\b/i,                                                // "You choose"
+  /(?:^|[.!?]\s+)ok\b/i,                                               // " Ok ..." sentence-start filler
+];
+/** Strip trailing instruction/consultant residue from a raw brief (see the
+ *  patterns above). Pure, deterministic — no LLM. */
+export function stripInstructionResidue(raw: string): string {
+  const t = normalize(raw);
+  let cut = -1;
+  for (const re of INSTRUCTION_RESIDUE_PATTERNS) {
+    const m = t.match(re);
+    if (m && m.index !== undefined && m.index >= 0) {
+      // Keep a sentence separator the match consumed (e.g. ". Ok"): cut AFTER
+      // the '.' / '!' / '?' so "Love this idea. Ok ..." keeps its period.
+      const first = t[m.index] ?? '';
+      const adj = first === '.' || first === '!' || first === '?' ? 1 : 0;
+      cut = cut === -1 ? m.index + adj : Math.min(cut, m.index + adj);
+    }
+  }
+  return cut === -1 ? t : t.slice(0, Math.max(0, cut)).trim();
+}
+/** Residue markers that indicate a DEGENERATE (untransformed) essence — the
+ *  raw brief echoed verbatim rather than a compact finished subject. */
+const DEGENERATE_ESSENCE_RESIDUE = /(?:^|\W)(?:cta|call\s+to\s+action)(?:\W|$)|(?:^|[.!?]\s+)ok\b|\bmood\s+across\s+every\s+scene\b|\byou\s+choose\b|\buse\s+a\s+[a-z]+\s+mood\b/i;
+/** A subject (or product) longer than this is raw-brief residue, never a
+ *  finished subject (task 316d1a2f: subject > ~200 chars => degenerate). */
+export const ESSENCE_MAX_CHARS = 200;
+/** True when the extracted subject/product is NOT compact — the raw brief was
+ *  echoed verbatim (whole-brief subject, or residue markers like "CTA-"/"Ok"/
+ *  "mood" leaked through). Triggers the compact rewrite fallback. */
+export function isDegenerateEssenceOutput(subject: string, product?: string): boolean {
+  const s = String(subject || '');
+  const p = String(product || '');
+  if (s.length > ESSENCE_MAX_CHARS) return true;
+  if (DEGENERATE_ESSENCE_RESIDUE.test(s)) return true;
+  if (p.length > ESSENCE_MAX_CHARS) return true;
+  if (p && DEGENERATE_ESSENCE_RESIDUE.test(p)) return true;
+  return false;
+}
+/** Count only real content tokens (ignores punctuation-only tokens like an
+ *  em-dash surrounded by spaces). */
+function contentTokens(s: string): number {
+  return s.split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w)).length;
+}
+/** Genuinely compact rewrite (≤ ~10 content words) — the degenerate-echo
+ *  fallback. Deterministic: takes the brand from 'Meet/Introducing/This is/
+ *  Say hello to <Brand>' plus the short product clause after it; when no brand
+ *  is found, keeps the leading noun phrase of the first sentence; last resort
+ *  the neutral 'this all-in-one platform'. Never echoes the raw brief verbatim
+ *  — bounded to ≤160 chars by construction. */
+export function buildCompactSubject(raw: string): string {
+  const t = stripInstructionResidue(normalize(raw));
+  const brandMatch = t.match(/(?:^|[.!?]\s+)(?:meet|introducing|presenting|this\s+is|say\s+hello\s+to)\s+([A-Z][A-Za-z0-9'&+\-]*(?:\s+[A-Za-z0-9'&+\-]+){0,5})(?=[\s—–.,;:!?\-]|$)/i);
+  if (brandMatch && brandMatch[1]) {
+    const brand = brandMatch[1].trim().replace(/[—–\-]+$/g, '').trim();
+    if (contentTokens(brand) <= 6) {
+      const tail = t.slice((brandMatch.index ?? 0) + brandMatch[0].length);
+      const prodMatch = tail.match(/[—–\-]?\s*(?:the\s+)?([a-z][a-z0-9'&.,\- ]{2,80}?)(?=\s+(?:built|for|designed|that|to|making|so|which)|\s*[.!?]|$)/i);
+      if (prodMatch && prodMatch[1]) {
+        const prod = prodMatch[1].trim();
+        const subject = `${brand} — the ${prod}`;
+        if (contentTokens(subject) <= 12 && subject.length <= 160) return subject;
+      }
+      if (brand.length <= 60) return brand;
+    }
+  }
+  const firstSentence = (t.split(/(?<=[.!?])\s+/)[0] || t).trim();
+  const lead = firstSentence.split(/\s+/).slice(0, 8).join(' ');
+  if (lead.length >= 4 && lead.length <= 80 && contentTokens(lead) <= 8 && !/^(?:the|a|an|this|that|it|we|i|you|they)\s*$/i.test(lead)) return lead;
+  return 'this all-in-one platform';
+}
+/** HARD NARRATION LENGTH CAP (task 316d1a2f): a ~6s scene slot can carry only
+ *  ~15 words / ~120 chars of TTS. Scales down with the scene duration; floors
+ *  at 8 words / 48 chars so micro-scenes still read as real copy. Word-boundary
+ *  truncation — never mid-word. Applied at the last-mile planning sites so
+ *  Scene 1 can NEVER be a 215-char brief dump. */
+export const NARRATION_MAX_CHARS = 120;
+export const NARRATION_MAX_WORDS = 15;
+export function capNarrationForScene(text: string, durationSec = 6): string {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return t;
+  const dur = Math.max(2, Number(durationSec) || 6);
+  const maxWords = Math.max(8, Math.min(NARRATION_MAX_WORDS, Math.round(dur * 2.5)));
+  const maxChars = Math.max(48, Math.min(NARRATION_MAX_CHARS, Math.round(dur * 20)));
+  // Count CONTENT tokens only (an em-dash or comma surrounded by spaces is
+  // punctuation, not a word, so it never consumes a speech slot).
+  const tokens = t.split(' ');
+  let keep = tokens.length;
+  let content = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (/[A-Za-z0-9]/.test(tokens[i])) content++;
+    if (content > maxWords) { keep = i; break; }
+  }
+  let out = tokens.slice(0, keep).join(' ')
+    .replace(/(?:\s+[—–-])+$/g, '')
+    .trim();
+  if (out.length > maxChars) {
+    const cut = out.slice(0, maxChars);
+    const lastSpace = cut.lastIndexOf(' ');
+    out = lastSpace > Math.floor(maxChars * 0.5) ? cut.slice(0, lastSpace) : cut;
+  }
+  return out.trim();
+}
 export function firstInternalMarkerIndex(text: string): number {
   const t = normalize(text);
   let found = -1;
@@ -237,7 +351,11 @@ function tailScanProduct(raw: string): string | undefined {
  *  internal-sounding we REWRITE it (never the raw fragment); when it is not we
  *  keep the first sentence (existing compactCreativeSubject behavior). */
 export function extractCreativeEssence(rawBrief: string): CreativeEssence {
-  const t = normalize(rawBrief);
+  const full = normalize(rawBrief);
+  // Strip instruction/consultant residue ('Ok CTA- Get …today…', mood hints)
+  // FIRST so it can never be cut into the product head and echoed as the
+  // finished subject (the owner's Sep 30 degenerate extraction).
+  const t = stripInstructionResidue(full);
   const consultantIdx = firstConsultantMarkerIndex(t);
   const internalIdx = firstInternalMarkerIndex(t);
   const internal = internalIdx !== -1;
@@ -273,7 +391,18 @@ export function extractCreativeEssence(rawBrief: string): CreativeEssence {
     subject = firstSentence || 'this upgrade';
   }
 
-  return { subject, product: hasProduct ? product : undefined, audience, offer, raw: t, internal };
+  // DEGENERATE-OUTPUT GUARD (task 316d1a2f): if the finished subject/product
+  // is not compact (whole-brief echo, residue markers), fall back to a
+  // genuinely compact rewrite (≤ ~10 words, essence of product/audience/offer).
+  // The raw brief must NEVER flow into visual prompts or narration.
+  let degenerateFallback = false;
+  if (isDegenerateEssenceOutput(subject, product)) {
+    const compact = buildCompactSubject(full);
+    subject = compact;
+    product = compact;
+    degenerateFallback = true;
+  }
+  return { subject, product: hasProduct ? product : undefined, audience, offer, raw: full, internal, degenerateFallback };
 }
 
 /** Finished-subject view used by compactCreativeSubject (respects maxChars). */
