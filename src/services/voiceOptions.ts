@@ -86,6 +86,18 @@ export function resolveVoice(gender?: VoiceGender, tone?: VoiceTone): GptAudioVo
 
 /** Default gpt-audio voice (used when no gender/tone supplied). */
 export const DEFAULT_VOICE: GptAudioVoice = 'nova';
+/** Spoken-delivery direction passed into the TTS models (task 316d1a2f — the
+ *  owner's launch-gate failure heard a flat "recording" read of the raw brief).
+ *  'enthusiastic' (and the auto default) get an upbeat, energetic delivery;
+ *  calm/serious/warm map to their own directions. Used as the gpt-audio chat
+ *  system message and the gpt-4o-mini-tts `instructions` field. */
+export function ttsToneInstruction(tone?: VoiceTone): string {
+  if (tone === 'calm') return 'Speak in a calm, steady, reassuring tone.';
+  if (tone === 'serious') return 'Speak in a serious, confident, professional tone.';
+  if (tone === 'warm') return 'Speak in a warm, friendly, inviting tone.';
+  if (tone === 'enthusiastic') return 'Speak with bright, energetic enthusiasm — upbeat, lively, and engaging.';
+  return 'Speak naturally with a lively, engaging delivery.';
+}
 /**
  * Owner-LOCKED Faceless mood starter set (do not add/remove — owner-approved
  * 2026-08-24). Feed `mood` into the per-scene prompt so the video's tone

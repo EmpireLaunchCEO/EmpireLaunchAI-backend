@@ -11,8 +11,8 @@ import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
-import { resolveVoice } from './voiceOptions.js';
-import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, buildTransformationPlannerRule } from './creativeTransformation.js';
+import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -397,6 +397,11 @@ export function renderClip(input: string, output: string, duration: number, audi
     inputs.push('-t',String(duration));
     inputs.push('-c:v','libx264','-pix_fmt','yuv420p');
     if (audio) inputs.push('-c:a','aac');
+    // AUDIO FITTING at the SOURCE (task 316d1a2f): the narration track is fitted
+    // to EXACTLY this clip's video window — atrim longer TTS audio down to the
+    // scene duration and apad (silence) shorter TTS up to it. A voice can never
+    // outlive its own scene, so the assembler cannot bleed it over the next one.
+    if (audio) inputs.push('-af', `atrim=0:${String(duration)},asetpts=N/SR/TB,apad=whole_dur=${String(duration)}`);
     inputs.push('-y',output);
     execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
       if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
@@ -469,17 +474,25 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     // single-input re-encode carries all streams (incl. audio) through by default
     return void cmd.save(output).on('end',()=>resolve()).on('error',reject);
   }
-  const probe = (f: string): { seconds: number; hasAudio: boolean } => {
+  const probe = (f: string): { seconds: number; hasAudio: boolean; audioSeconds: number } => {
     try {
       const dur = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
       const seconds = Number.isFinite(parseFloat(dur)) ? parseFloat(dur) : 3;
       let hasAudio = false;
+      let audioSeconds = 0;
       try {
         const a = execFileSync('ffprobe',['-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0',f],{maxBuffer:1024*1024}).toString().trim();
         hasAudio = a.length > 0;
+        if (hasAudio) {
+          // Duration of the FIRST audio stream (the narration track); falls back
+          // to the container duration when the stream duration is unavailable.
+          const ad = execFileSync('ffprobe',['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
+          const aDur = parseFloat(ad);
+          audioSeconds = Number.isFinite(aDur) && aDur > 0 ? aDur : seconds;
+        }
       } catch { hasAudio = false; }
-      return { seconds, hasAudio };
-    } catch { return { seconds: 3, hasAudio: false }; }
+      return { seconds, hasAudio, audioSeconds };
+    } catch { return { seconds: 3, hasAudio: false, audioSeconds: 0 }; }
   };
   try {
     // First pass: probe each clip's duration + whether it has an audio track so
@@ -522,14 +535,23 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     const audioFilter: string[] = [];
     let audioMap: string | null = null;
     if (anyAudio) {
+      // AUDIO FITTING (task 316d1a2f — owner launch-gate failure): per-scene
+      // narration must NEVER bleed into the next scene's slot. Every audio-
+      // bearing clip's track is fitted to EXACTLY its own video window: atrim
+      // audio longer than the clip's video duration down to it, apad (silence)
+      // audio shorter up to it. The acrossfade chain then starts each voice
+      // exactly when its own scene starts — no scene N voice leaks over N+1,
+      // and no short voice leaves a gap that misaligns the next one.
       let aIdx = 0;
       let audioLast: string | null = null;
       for (let i = 0; i < inputs.length; i++) {
         if (!probes[i].hasAudio) continue;
-        const tag = `[${i}:a]`;
-        if (audioLast === null) { audioLast = tag; }
+        const fit = Math.max(0.05, Math.min(probes[i].audioSeconds, probes[i].seconds)).toFixed(3);
+        const fitted = `[a${i}f]`;
+        audioFilter.push(`${`[${i}:a]`}atrim=0:${fit},asetpts=N/SR/TB,apad=whole_dur=${fit}${fitted}`);
+        if (audioLast === null) { audioLast = fitted; }
         else {
-          audioFilter.push(`${audioLast}${tag}acrossfade=d=${tr}[amix${aIdx}]`);
+          audioFilter.push(`${audioLast}${fitted}acrossfade=d=${tr}[amix${aIdx}]`);
           audioLast = `[amix${aIdx}]`;
           aIdx++;
         }
@@ -650,7 +672,7 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
       // ZERO Sora calls instead of N. Motion (the ONE important block) only comes
       // from the hybrid plan path or an explicit GPT visualType in parseScenes.
       visualType: 'still' as const,
-      narration,
+      narration: capNarrationForScene(narration, base + (i < rem ? 1 : 0)),
       visualPrompt,
     };
   });
@@ -750,15 +772,15 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
           const chosen = sceneCopyOrFallback(s?.narration, a.narration, a.duration, true);
           // Plan-speak echo guard (owner Sep 28): if GPT's line is plan-speak /
           // prompt echo, swap to the finished-copy arc line for the SAME beat.
-          if (isPlanSpeakNarration(chosen)) return a.narration;
+          if (isPlanSpeakNarration(chosen)) return capNarrationForScene(a.narration, a.duration);
           // CREATIVE TRANSFORMATION (owner Sep 28): near-verbatim INTERNAL-BRIEF
           // echoes (recruiting testers, "5 compelling reasons", "CTA" labels, "the
           // making of", meta talk) are NEVER client copy — swap to the finished
           // arc line, which is built from the TRANSFORMED subject (never the raw
           // typed fragment). Deliberate user LINE_CHANGE edits bypass this guard
           // upstream via allowPlanSpeak and stay voiced verbatim.
-          if (isInternalBriefEcho(chosen)) return a.narration;
-          return chosen;
+          if (isInternalBriefEcho(chosen)) return capNarrationForScene(a.narration, a.duration);
+          return capNarrationForScene(chosen, a.duration);
         })(),
         ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
         visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
@@ -1142,7 +1164,10 @@ function sceneCopyOrFallback(value: unknown, fallback: string, duration: number,
   // generic arc copy while metadata.componentsMissing listed every relayed
   // component: red, lavender, TikTok, 50% off, Comment, ...).
   if (!text || CONSULTANT_META_PATTERN.test(text)) return fallback;
-  const maxWords = narration ? Math.max(14, Math.round(duration * 2.75)) : 90;
+  // NARRATION LENGTH CAP (task 316d1a2f): a ~6s scene slot carries at most
+  // ~15 words / ~120 chars — word-boundary truncation, never mid-word.
+  if (narration) return capNarrationForScene(text, duration);
+  const maxWords = 90;
   if (text.split(/\s+/).length > maxWords) {
     return text.split(/\s+/).slice(0, maxWords).join(' ');
   }
@@ -1540,7 +1565,7 @@ function buildPlannerRequest(params: {
   // CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY and
   // visualPrompts are IMAGERY ONLY. Shared by the Scene + Faceless planner so
   // both shapes carry the same anti-plan-speak directive.
-  const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.' + buildTransformationPlannerRule();
+  const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every narration value must be SHORT \u2014 at most ~15 words / ~120 characters, because each reads aloud in a ~6-second scene; never a multi-sentence paragraph. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.' + buildTransformationPlannerRule();
   const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection } = params;
   return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (total summing to ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.`;
 }
@@ -1603,10 +1628,15 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const avatarSection = buildPlannerAvatarSection();
         // CREATIVE TRANSFORMATION (owner Sep 28): the planner ingests the brief as
         // its creative subject. When the brief is INTERNAL-sounding (recruiting
-        // testers / list-structure / CTA labels / meta talk), feed the planner the
-        // FINISHED client-facing subject derived from the product the brief
-        // describes — never the raw fragment it would otherwise echo.
-        const plannerBrief = extractCreativeEssence(cleanIdea).internal ? extractCreativeEssence(cleanIdea).subject : cleanIdea;
+        // testers / list-structure / CTA labels / meta talk) OR the degenerate-
+        // output guard fired (raw brief echoed verbatim — task 316d1a2f), feed
+        // the planner the FINISHED compact subject — never the raw fragment.
+        // Clean briefs have any trailing instruction residue ('CTA- Get …', mood
+        // hints) stripped so it can never be quoted into a scene.
+        const plannerEssence = extractCreativeEssence(cleanIdea);
+        const plannerBrief = (plannerEssence.internal || plannerEssence.degenerateFallback)
+          ? plannerEssence.subject
+          : stripInstructionResidue(cleanIdea);
         const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection });
         const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
         generatedScript = decision.script || decision.parameters?.script;
@@ -2482,7 +2512,13 @@ export async function generateSceneAudio(
       body: JSON.stringify({
         model: 'gpt-audio', modalities: ['text', 'audio'],
         audio: { voice: resolveVoice(g, tone), format: 'mp3' },
-        messages: [{ role: 'user', content: text }],
+        messages: [
+          // TONE DIRECTION (task 316d1a2f): the gpt-audio chat model speaks the
+          // user content in the style the system message sets — an energetic,
+          // lively read, never a flat 'recording' monotone.
+          { role: 'system', content: ttsToneInstruction(tone) },
+          { role: 'user', content: text },
+        ],
       }),
       signal: AbortSignal.timeout(90000),
     });
@@ -2515,7 +2551,11 @@ export async function generateSceneAudio(
     response = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3' }),
+      body: JSON.stringify({
+        model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3',
+        // gpt-4o-mini-tts supports spoken-delivery instructions (tts-1/tts-1-hd ignore extras).
+        ...(model === 'gpt-4o-mini-tts' ? { instructions: ttsToneInstruction(tone) } : {}),
+      }),
       signal: AbortSignal.timeout(60000),
     });
     if (response.ok) break;
