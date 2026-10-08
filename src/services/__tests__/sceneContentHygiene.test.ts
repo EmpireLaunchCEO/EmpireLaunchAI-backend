@@ -63,7 +63,7 @@ test('parseScenes: plan-speak GPT candidate narration is swapped to the finished
     })),
   };
   const plan = parseScenePlan(raw as any, 'a clean brief subject', 30, 'scene');
-  assert.equal(plan[0].narration, "Say hello to a clean brief subject — it's about to make things a lot easier.");
+  assert.equal(plan[0].narration, "Say hello to a clean brief subject. It's about to make things a lot easier.");
   assert.equal(isPlanSpeakNarration(plan[0].narration), false);
 });
 

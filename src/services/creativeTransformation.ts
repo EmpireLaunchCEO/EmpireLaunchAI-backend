@@ -229,6 +229,34 @@ export function capNarrationForScene(text: string, durationSec = 6): string {
     const lastSpace = cut.lastIndexOf(' ');
     out = lastSpace > Math.floor(maxChars * 0.5) ? cut.slice(0, lastSpace) : cut;
   }
+  // SENTENCE-COMPLETENESS (owner Oct 8 — FAILED 5th re-test): the word/char cap
+  // used to slice mid-thought, leaving dangling fragments like "Say hello to
+  // Introducing EmpireLaunch AI, the platform for all you need. — it's" spoken
+  // and painted in the video. When the capped text contains a completed sentence
+  // before its truncation point, cut back to the LAST sentence boundary inside
+  // the limit so the delivered line is a complete, natural sentence — never a
+  // mid-sentence fragment with a trailing dash/wrap. Only when NO punctuation
+  // boundary exists (a single overlong run-on) do we keep the raw word-cut.
+  const boundary = /[.!?](?:['”’"])?\s*$/;
+  if (!boundary.test(out) && t.length > out.length) {
+    const prefix = out.replace(/[—–\-]+$/g, '').trim();
+    const m = prefix.match(/[.!?](?:['”’"])?\s+(?=\S)/g);
+    const last = prefix.lastIndexOf(' ');
+    // Find the last sentence end strictly inside the capped prefix.
+    let cutAt = -1;
+    let re = /[.!?](?:['”’"])?\s+/g;
+    let mm;
+    while ((mm = re.exec(prefix)) !== null) {
+      if (mm.index + mm[0].length <= prefix.length) cutAt = mm.index + mm[0].length;
+    }
+    if (cutAt > Math.floor(prefix.length * 0.35)) {
+      out = prefix.slice(0, cutAt).trim();
+    } else if (m && last > 0) {
+      // No early boundary — keep the word-cut (unavoidable run-on), but never
+      // end on a trailing dash or orphan wrap token.
+      out = out.replace(/\s+[—–]?\s*$/g, '').trim();
+    }
+  }
   return out.trim();
 }
 export function firstInternalMarkerIndex(text: string): number {
@@ -463,6 +491,40 @@ export function isInternalTalkPoint(item: string): boolean {
   return isInternalBriefEcho(t);
 }
 
+/** CHAT/INSTRUCTION RESIDUE GUARD (owner launch-gate Oct 8 — FAILED 5th re-test):
+ *  True when a candidate component/narration is chat-tone or an internal
+ *  instruction that must NEVER be voiced or painted: conversational filler
+ *  ("Yes Make sure it's cohesive..."), mood/stage instructions ("Use a energetic
+ *  mood across every scene and the narration."), and assistant chat replies
+ *  ("I love the energy, but I'm here to chat with anything you need..."). These
+ *  are the exact residue chunks that leaked into metadata.components and were
+ *  injected VERBATIM into scene visualPrompts on Oct 8 (project abca11ed). */
+export function isChatResidueText(item: string | null | undefined): boolean {
+  const t = String(item || '').replace(/\u2019/g, "'").replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (/(?:^|[.!?]\s+)(?:yes|ok|okay|no problem|sure|great|awesome|perfect)\b/i.test(t)) return true;
+  if (/\bmake\s+sure\s+it'?s\s+(?:cohesive|coherent|consistent|polished|look\s+good)\b/i.test(t)) return true;
+  if (/\buse\s+a\s+[a-z]+\s+mood\s+across\s+every\s+scene\b/i.test(t)) return true;
+  if (/\bacross\s+every\s+scene\s+and\s+the\s+narration\b/i.test(t)) return true;
+  if (/\b(?:i\s+love|love\s+the)\s+energy\b/i.test(t)) return true;
+  if (/\bi'?m\s+here\s+to\s+chat\b/i.test(t)) return true;
+  if (/\byou\s+choose\b/i.test(t)) return true;
+  if (/\b(?:cta|call\s+to\s+action)\b/i.test(t)) return true;
+  return false;
+}
+/** VERBATIM READ-BACK instruction for gpt-audio (a CHAT model). Without it the
+ *  model treats the narration line as a conversation prompt and can reply with
+ *  its own chat-tone words ("I love the energy, but I'm here to chat with
+ *  anything you need to chat about" — the second voice the owner heard on the
+ *  Oct 8 re-test). This command forces it to speak ONLY the provided script. */
+export function ttsReadAloudInstruction(tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'): string {
+  const toneDir = tone === 'calm' ? 'a calm, steady, reassuring delivery'
+    : tone === 'serious' ? 'a serious, confident, professional delivery'
+    : tone === 'warm' ? 'a warm, friendly, inviting delivery'
+    : tone === 'enthusiastic' ? 'bright, energetic enthusiasm'
+    : 'a natural, lively, engaging delivery';
+  return `You are a text-to-speech narrator. Read the user's text EXACTLY as written, word for word. Do not add, remove, rephrase, expand, explain, or respond conversationally — never speak anything beyond the provided text. Use ${toneDir}.`;
+}
 /** Rewrite an INTERNAL-sounding twin script into a finished client-directed
  *  pitch built from the essence. Finished copy (no internal markers) is kept
  *  verbatim — a user's own authored script is authoritative (mirrors the

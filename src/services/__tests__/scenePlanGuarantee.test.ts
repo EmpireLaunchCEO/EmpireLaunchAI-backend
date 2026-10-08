@@ -175,7 +175,7 @@ test('verifyArcCoverage: the no-plan fallback arc satisfies all three stages (re
   // Mirror buildArcScenes wording (the deterministic fallback every plan degrades to).
   const subject = 'Beadwick & Co';
   const script = [
-    scene(1, 6, `Cinematic establishing shot: hook intro of ${subject}`, `Say hello to ${subject} — it's about to make things a lot easier.`),
+    scene(1, 6, `Cinematic establishing shot: hook intro of ${subject}`, `Say hello to ${subject}. It's about to make things a lot easier.`),
     scene(2, 6, `Cinematic medium shot: setting up ${subject}`, `The essentials come together fast, and the process is simpler than it looks.`),
     scene(3, 6, `Cinematic wide shot: ${subject} delivering its key benefit`, `And this is where it clicks — the transformation you came for.`),
     scene(4, 6, `Cinematic close-up: the payoff result of ${subject}`, "That's the payoff — real results, right in front of you."),

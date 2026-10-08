@@ -11,8 +11,8 @@ import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
-import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
-import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue } from './creativeTransformation.js';
+import { resolveVoice, ttsToneInstruction, ttsReadAloudInstruction } from './voiceOptions.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -623,7 +623,15 @@ function compactCreativeSubject(idea: string, maxChars = 160): string {
   // internal fragment ("…need 5 client beta testers." voiced verbatim was the
   // owner's live-test defect). Clean briefs pass through untouched.
   const essence = extractCreativeEssence(subject);
-  if (essence.internal) {
+  // CREATIVE TRANSFORMATION (owner Oct 8 - FAILED 5th re-test): the arc subject
+  // must honor the DEGENERATE-ECHO fallback too - the owner's typed brief came
+  // back internal:false BUT degenerateFallback:true (raw brief echoed into the
+  // subject), and the old internal-only check let the RAW first sentence become
+  // scene 1's subject ("Introducing EmpireLaunch AI, the platform for all you
+  // need.") which was then spoken/painted verbatim. A degenerate echo is as
+  // much an internal fragment as an explicit recruiting note - swap to the
+  // compact finished subject in BOTH cases.
+  if (essence.internal || essence.degenerateFallback) {
     const finished = essence.subject;
     if (finished.length <= maxChars) return finished;
     return `${finished.slice(0, maxChars - 1).trimEnd()}…`;
@@ -649,7 +657,14 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
     // own structure). The visualPrompt (internal) still carries the arc stage
     // wording so the planner coverage checks stay deterministic.
     if (f < 0.25) {
-      narration = `Say hello to ${subject} — it's about to make things a lot easier.`;
+      // OWNER-OCT-8: the hook is TWO short sentences so capNarrationForScene's
+      // sentence-boundary logic can always deliver a COMPLETE sentence within a
+      // 5s/6s window (the old single long sentence truncated to dangling
+      // fragments like "Say hello to ... — it's" — the exact defect in the
+      // Oct 8 production video). Long subjects are still handled: the cap cut
+      // back to the first sentence's period keeps "Say hello to <subject>."
+      // complete even when the second sentence can't fit.
+      narration = `Say hello to ${subject}. It's about to make things a lot easier.`;
       visualPrompt = `Cinematic establishing shot: hook intro of ${subject}, the subject shown clearly for the first time`;
     } else if (f < 0.5) {
       narration = 'The essentials come together fast, and the process is simpler than it looks.';
@@ -780,6 +795,11 @@ function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[]
           // typed fragment). Deliberate user LINE_CHANGE edits bypass this guard
           // upstream via allowPlanSpeak and stay voiced verbatim.
           if (isInternalBriefEcho(chosen)) return capNarrationForScene(a.narration, a.duration);
+          // OWNER-OCT-8 GUARD: chat-tone / instruction residue lines ("Yes Make
+          // sure it's cohesive...", "Use a energetic mood across every scene and
+          // the narration.", "I love the energy, but I'm here to chat...") are
+          // NEVER narrated — swap to the finished arc line for the same beat.
+          if (isChatResidueText(chosen)) return capNarrationForScene(a.narration, a.duration);
           return capNarrationForScene(chosen, a.duration);
         })(),
         ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
@@ -1256,6 +1276,11 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   const push = (raw: string) => {
     const v = normalizeComponent(raw);
     if (!v || v.length < 3 || v.length > COMPONENT_MAX_CHARS) return;
+    // OWNER-OCT-8 GUARD: NEVER inventory chat-tone / instruction residue ("Yes
+    // Make sure it's cohesive...", "Use a energetic mood across every scene and
+    // the narration.", assistant chat replies). These leaked verbatim into
+    // metadata.components and were injected into visualPrompts (abca11ed).
+    if (isChatResidueText(v)) return;
     if (out.some(o => o.toLowerCase() === v.toLowerCase())) return;
     out.push(v);
   };
@@ -1274,14 +1299,25 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   for (const m of combined.match(PRICE_RE) ?? []) push(m);
   for (const m of combined.match(PCT_OFF_RE) ?? []) push(m.charAt(0).toUpperCase() + m.slice(1).toLowerCase());
   for (const re of CTA_PATTERNS) { const m = combined.match(re); if (m && m[0]) push(m[0].charAt(0).toUpperCase() + m[0].slice(1)); }
-  // (c) brief chunks, then user-turn chunks (carry the subject/concept itself).
-  for (const c of chunkText(input.cleanBrief)) push(c);
-  for (const c of chunkText(userText)) push(c);
+  // (c1) TRANSFORMED brief chunks — NEVER the raw typed brief. The raw brief is
+  //      RAW MATERIAL: its sentence chunks echo the owner's typing verbatim
+  //      (the Oct 8 defect). Derive the component set from the FINISHED subject
+  //      when the essence layer flagged internal/degenerate; otherwise carry the
+  //      residue-stripped brief's chunks (clean briefs are already client copy).
+  const essence = extractCreativeEssence(input.cleanBrief);
+  const briefSource = (essence.internal || essence.degenerateFallback)
+    ? essence.subject
+    : stripInstructionResidue(input.cleanBrief);
+  // (c2) user-turn chunks (carry the subject/concept itself) — residue-stripped.
+  for (const c of chunkText(briefSource)) push(c);
+  for (const c of chunkText(stripInstructionResidue(userText))) push(c);
   // CREATIVE TRANSFORMATION (owner Sep 28): the conversation component inventory
   // must NEVER force INTERNAL talk-points into scenes ("need 5 client beta
   // testers", "5 compelling reasons", "CTA" as a label, "the making of") — those
   // are the brief's meta-structure, not relayed client components, and forcing
   // them in is exactly how the owner's video rendered "5 reasons"/"CTA" cards.
+  // OWNER-OCT-8: `isChatResidueText` already blocks chat/instruction residue;
+  // keep the internal-talk filter for structural meta items.
   return out.filter((c) => !isInternalTalkPoint(c)).slice(0, INVENTORY_CAP);
 }
 /** Every component must appear (case-insensitive substring) in ≥1 scene's text. */
@@ -1289,7 +1325,9 @@ export function verifyComponentsInScript(script: SceneScript[], components: stri
   const haystack = script.map(s => `${s.visualPrompt || ''} ${s.narration || ''}`).join(' ').toLowerCase();
   const missing = (components ?? [])
     .map(normalizeComponent)
-    .filter(c => c.length > 0 && !haystack.includes(c.toLowerCase()));
+    // OWNER-OCT-8 GUARD: chat/instruction residue is NEVER a required component —
+    // it must not appear in the video at all, so it can never be 'missing'.
+    .filter(c => c.length > 0 && !isChatResidueText(c) && !haystack.includes(c.toLowerCase()));
   return { missing };
 }
 /** Deterministic COMPONENT INJECTION backstop (owner: EVERY relayed component must
@@ -1306,6 +1344,7 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   const missing = verifyComponentsInScript(next, inventory).missing;
   if (!missing.length) return { script: next, injected: [], stillMissing: [] };
   const injected: string[] = [];
+  const skippedResidue: string[] = [];
   const last = next.length - 1;
   const mid = Math.floor(next.length / 2);
   const isCtaish = (c: string) => {
@@ -1316,6 +1355,13 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   const isPlatformish = (c: string) => PLATFORM_PATTERNS.some(p => p.name.toLowerCase() === normalizeComponent(c).toLowerCase());
   const isOfferish = (c: string) => /%\s*off|\$\s?\d/i.test(c);
   for (const c of missing) {
+    // OWNER-OCT-8 GUARD: NEVER inject chat-tone / instruction residue into a
+    // visualPrompt ("Yes Make sure it's cohesive...", "Use a energetic mood across
+    // every scene and the narration.", assistant chat replies). The Oct 8 video
+    // (abca11ed) painted the owner's entire typed brief because this backstop
+    // appended the raw chunks verbatim. Residue items are skipped (reported as
+    // dropped, never painted); clean inventory items still inject.
+    if (isChatResidueText(c)) { skippedResidue.push(c); continue; }
     let target: number;
     if (isCtaish(c)) target = last;
     else if (isColorish(c) || isPlatformish(c) || isOfferish(c)) target = mid === last ? Math.max(0, mid - 1) : mid;
@@ -1324,7 +1370,7 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
     s.visualPrompt = `${s.visualPrompt || ''}${s.visualPrompt ? ' — ' : ''}${c}`.trim();
     injected.push(c);
   }
-  return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory).missing };
+  return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory).missing, skippedResidue };
 }
 /** Structural story-arc check: hook in the first ~25% of scenes, 'what it's
  *  about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
@@ -1546,7 +1592,7 @@ function buildPlannerComponentsSection(inventory: string[], voice?: 'female' | '
   const narrationRule = voice === 'none'
     ? ' There is NO voiceover (silent video), so every component MUST appear in a scene\'s visualPrompt — the narration field will NOT be spoken.'
     : ' Every component MUST appear in at least one scene — in its visualPrompt or its narration.';
-  return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. The full conversation was also read to build this list — do not drop any item.\n${list}\n`;
+  return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. OWNER-OCT-8: these items are ALREADY FINISHED client-facing copy — never quote the user's raw typed brief, never echo chat-tone filler ("Yes Make sure it's cohesive...", "Use a energetic mood across every scene..."), and never render any item as on-screen text; weave each one naturally into a scene's polished narration or visual concept. The full conversation was also read to build this list — do not drop any item.\n${list}\n`;
 }
 /** HARD TIME BUDGET section injected into the planner prompt. */
 function buildPlannerTimeBudgetSection(duration: number): string {
@@ -2516,7 +2562,12 @@ export async function generateSceneAudio(
           // TONE DIRECTION (task 316d1a2f): the gpt-audio chat model speaks the
           // user content in the style the system message sets — an energetic,
           // lively read, never a flat 'recording' monotone.
-          { role: 'system', content: ttsToneInstruction(tone) },
+          // VERBATIM READ-BACK (owner Oct 8 — FAILED 5th re-test): gpt-audio is
+          // a CHAT model; a tone-only system message made it answer conversationally
+          // ("I love the energy, but I'm here to chat with anything you need to
+          // chat about") instead of reading the scene script. Command it to speak
+          // ONLY the provided text, word for word.
+          { role: 'system', content: ttsReadAloudInstruction(tone) },
           { role: 'user', content: text },
         ],
       }),
@@ -2554,7 +2605,7 @@ export async function generateSceneAudio(
       body: JSON.stringify({
         model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3',
         // gpt-4o-mini-tts supports spoken-delivery instructions (tts-1/tts-1-hd ignore extras).
-        ...(model === 'gpt-4o-mini-tts' ? { instructions: ttsToneInstruction(tone) } : {}),
+        ...(model === 'gpt-4o-mini-tts' ? { instructions: ttsReadAloudInstruction(tone) } : {}),
       }),
       signal: AbortSignal.timeout(60000),
     });
