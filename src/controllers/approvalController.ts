@@ -163,8 +163,13 @@ export const createApproval = async (req: Request, res: Response) => {
       enrichedPayload.mood = mood;
       enrichedPayload.duration = duration;
       // Feed mood into the per-scene prompt so the video's tone reflects it.
-      const moodHint = mood ? ` Use a ${mood} mood across every scene and the narration.` : '';
-      const facelessIdea = `${description.trim()}${moodHint}`;
+      // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
+      // appending an instruction sentence to the idea text. The appended hint
+      // ("Use a energetic mood across every scene and the narration.") became a
+      // raw-brief chunk that was echoed into metadata.components and injected
+      // VERBATIM into visualPrompts (project abca11ed). The pipeline adds the
+      // mood hint to the planner prompt from input.mood — no text append needed.
+      const facelessIdea = description.trim();
       try {
         facelessProjectId = await sceneVideoPipelineService.createProject({
           userId,
@@ -172,6 +177,7 @@ export const createApproval = async (req: Request, res: Response) => {
           idea: facelessIdea,
           durationTarget: duration,
           style: mood ?? '',
+          mood,
           platforms: [],
           voice: enrichedPayload.voice,
           tone: enrichedPayload.tone,

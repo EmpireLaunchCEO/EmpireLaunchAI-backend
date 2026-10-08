@@ -30,7 +30,9 @@ import {
   applySceneMotionFloor,
   verifyComponentsInScript,
   injectMissingComponents,
+  buildComponentInventory,
   type SceneScript,
+  type ComponentInventoryInput,
 } from '../sceneVideoPipelineService.js';
 import { consultGenerateReply } from '../aiRouter.js';
 
@@ -138,7 +140,7 @@ test('applySceneMotionFloor: promoted scene pairs with soraContent[0] (block pro
 test('injectMissingComponents: every relayed component flows verbatim into the final plan', () => {
   // The owner\'s live project: generic 5-scene plan (exact prod shape) + relayed inventory.
   const generic = [
-    still(1, 'Cinematic establishing shot: hook intro of the subject', "Say hello to the subject — it's about to make things a lot easier."),
+    still(1, 'Cinematic establishing shot: hook intro of the subject', "Say hello to the subject. It's about to make things a lot easier."),
     still(2, 'Cinematic medium shot: setting up the fundamentals', 'The essentials come together fast, and the process is simpler than it looks.'),
     still(3, 'Cinematic wide shot: the transformation in progress', 'And this is where it clicks — the transformation you came for.'),
     still(4, 'Cinematic close-up: the payoff result', "That's the payoff — real results, right in front of you."),
@@ -214,4 +216,66 @@ test('consultGenerateReply: wand default when no actionHint, real button when su
   assert.equal(consultGenerateReply(''), 'Great, tap the wand to generate!');
   assert.equal(consultGenerateReply('   '), 'Great, tap the wand to generate!');
   assert.equal(consultGenerateReply('press Launch Project to generate your video'), 'press Launch Project to generate your video');
+});
+
+// ─── (f) OWNER-OCT-8 THREE-FLOW ZERO-RESIDUE (Scene + Faceless + Twin) ───────
+// Lead directive (Oct 8): the anti-leak guarantees apply to ALL THREE video
+// flows — Scene, Faceless, AND Twin. Scene and Faceless share this exact
+// pipeline (sceneVideoPipelineService.createProject with mode 'scene' | 'faceless'):
+// the same buildComponentInventory feeds both, so these assertions gate both.
+// The Twin flow's separate guard (transformTwinScriptToPitch) is pinned in
+// ownerOct8ThreeFlowZeroResidue.test.ts (sandbox-runnable).
+const OWNER_OCT8_BRIEF =
+  'Introducing EmpireLaunch AI, the platform for all you need. Stop paying for credits. ' +
+  'With this platform you get 96 videos a month, unlimited video edits and designs for those ' +
+  'that sell. Get ahead of the game. Get started today for the Introductory price! ' +
+  'Yes Make sure it\'s cohesive and makes customers want to get this app. ' +
+  'Use a energetic mood across every scene and the narration.';
+const OWNER_OCT8_RAW_CHUNKS = [
+  'Introducing EmpireLaunch AI, the platform for all you need.',
+  'Stop paying for credits.',
+  'With this platform you get 96 videos a month, unlimited video edits and designs for those that sell.',
+  'Get ahead of the game.',
+  'Get started today for the Introductory price!',
+  'Yes Make sure it\'s cohesive and makes customers want to get this app.',
+  'Use a energetic mood across every scene and the narration.',
+];
+test('buildComponentInventory: owner Oct 8 brief -> ZERO raw-brief/chat-residue components (Scene AND Faceless share this builder)', () => {
+  // The real approval route (approvalController, OWNER-OCT-8 fix) passes NO
+  // explicit components — it forwards `idea` (the raw brief) + the optional
+  // conversation, and buildComponentInventory chunks it. Explicit client-relayed
+  // components DO pass verbatim by design (owner: every relayed component must
+  // appear), so the owner's typed brief here is the `cleanBrief` source, exactly
+  // as in production.
+  const input: ComponentInventoryInput = {
+    cleanBrief: OWNER_OCT8_BRIEF,
+    conversation: [{ role: 'user', content: "Yes Make sure it's cohesive and makes customers want to get this app." }],
+  };
+  const inv = buildComponentInventory(input);
+  const hay = inv.join(' | ').toLowerCase();
+  for (const c of OWNER_OCT8_RAW_CHUNKS.slice(0, 5)) {
+    assert.ok(!hay.includes(c.toLowerCase()), `no raw chunk: "${c.slice(0, 40)}..."`);
+  }
+  for (const n of ['yes make', 'cohesive', 'energetic mood', 'across every scene', 'chat']) {
+    assert.ok(!hay.includes(n), `no chat/instruction residue marker: "${n}"`);
+  }
+  // The FINISHED subject survives as the component source (product essence).
+  assert.ok(inv.some(c => /EmpireLaunch AI|all one|platform/i.test(c)), 'essence-derived components present');
+});
+test('injectMissingComponents: chat/instruction residue is SKIPPED (skippedResidue audit), never painted on a visualPrompt', () => {
+  const plan = [
+    still(1, 'Cinematic establishing shot of the platform', 'The all-in-one platform for your video content.'),
+    still(2, 'Cinematic close-up of the payoff result', 'Real results, ready when you are.'),
+    still(3, 'Cinematic closing CTA shot', 'Get started today at the introductory price.'),
+  ];
+  // A dirty inventory that includes the owner's exact chat + mood residue.
+  const dirtyInventory = ['EmpireLaunch AI', 'Red', ...OWNER_OCT8_RAW_CHUNKS.slice(5, 7)];
+  const { script: out, injected, skippedResidue } = injectMissingComponents(plan, dirtyInventory);
+  assert.ok(skippedResidue.length >= 2, `residue items reported as dropped: ${JSON.stringify(skippedResidue)}`);
+  const allVisual = out.map(s => s.visualPrompt).join(' ');
+  for (const c of skippedResidue) {
+    assert.ok(!allVisual.includes(c), `residue NEVER painted: "${c.slice(0, 40)}..."`);
+  }
+  assert.ok(allVisual.includes('EmpireLaunch AI') || allVisual.includes('Red'), 'clean inventory still injects');
+  assert.equal(verifyComponentsInScript(out, dirtyInventory).missing.filter(c => !/make sure|mood|cohesive|yes/i.test(c)).length, 0, 'only residue can remain unmaterialized');
 });
