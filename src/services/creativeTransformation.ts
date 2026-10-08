@@ -131,6 +131,17 @@ const INSTRUCTION_RESIDUE_PATTERNS: RegExp[] = [
   /\b(?:cta|call\s+to\s+action)\b/i,                                // "CTA- Get ... today"
   /\byou\s+choose\b/i,                                                // "You choose"
   /(?:^|[.!?]\s+)ok\b/i,                                               // " Ok ..." sentence-start filler
+  // OWNER-OCT-8 (5th failure, abca11ed): chat-REPLY residue — her typed brief
+  // ended "...Introductory price! Yes Make sure it's cohesive and makes
+  // customers want to get this app. Use a energetic mood across every scene and
+  // the narration." The mood pattern alone fired LATER than the "Yes Make ..."
+  // acknowledgment, so the recognizer's min-index cut kept the chat reply.
+  // "Yes Make sure ..." / "Make sure it's cohesive" / "makes customers want"
+  // are the owner's conversational directives, never client copy — cut at the
+  // acknowledgment so the whole chat tail (incl. the mood sentence) is dropped.
+  /\b(?:yes|yeah|sure|okay?)\s+make\s+sure\b/i,
+  /\bmake\s+sure\s+it'?s\s+cohesive\b/i,
+  /\bmakes\s+customers\s+want\s+to\s+get\b/i,
 ];
 /** Strip trailing instruction/consultant residue from a raw brief (see the
  *  patterns above). Pure, deterministic — no LLM. */
@@ -238,23 +249,28 @@ export function capNarrationForScene(text: string, durationSec = 6): string {
   // mid-sentence fragment with a trailing dash/wrap. Only when NO punctuation
   // boundary exists (a single overlong run-on) do we keep the raw word-cut.
   const boundary = /[.!?](?:['”’"])?\s*$/;
-  if (!boundary.test(out) && t.length > out.length) {
+  // OWNER-OCT-8 HARDENING: this correction previously only ran when the line
+  // was actually truncated (t.length > out.length), so a SHORT in-cap dangling
+  // line (prod: "Say hello to Introducing EmpireLaunch AI, the platform for
+  // all you need. — it's" = 13 words in a 6s scene) passed uncorrected.
+  // The completeness fix now applies to EVERY narration line that does not
+  // already end on a sentence boundary.
+  if (!boundary.test(out)) {
     const prefix = out.replace(/[—–\-]+$/g, '').trim();
-    const m = prefix.match(/[.!?](?:['”’"])?\s+(?=\S)/g);
-    const last = prefix.lastIndexOf(' ');
-    // Find the last sentence end strictly inside the capped prefix.
+    // Find the last sentence end strictly inside the (dash-trimmed) prefix.
+    // `\s+|$` also matches a boundary at the very end (no trailing space).
     let cutAt = -1;
-    let re = /[.!?](?:['”’"])?\s+/g;
+    const re = /[.!?](?:['”’"])?(?:\s+|$)/g;
     let mm;
     while ((mm = re.exec(prefix)) !== null) {
       if (mm.index + mm[0].length <= prefix.length) cutAt = mm.index + mm[0].length;
     }
     if (cutAt > Math.floor(prefix.length * 0.35)) {
       out = prefix.slice(0, cutAt).trim();
-    } else if (m && last > 0) {
+    } else {
       // No early boundary — keep the word-cut (unavoidable run-on), but never
       // end on a trailing dash or orphan wrap token.
-      out = out.replace(/\s+[—–]?\s*$/g, '').trim();
+      out = out.replace(/[—–\-]+$/g, '').trim();
     }
   }
   return out.trim();
@@ -531,7 +547,15 @@ export function ttsReadAloudInstruction(tone?: 'enthusiastic' | 'calm' | 'seriou
  *  LINE_CHANGE carve-out). */
 export function transformTwinScriptToPitch(script: string): string {
   const essence = extractCreativeEssence(script);
-  if (!essence.internal) return normalize(script);
+  // OWNER-OCT-8 (5th failure, extended to Twin by lead scope): the typed brief
+  // is RAW MATERIAL — rewrite not only INTERNAL-sounding scripts but also
+  // DEGENERATE whole-brief echoes (internal:false + degenerateFallback:true,
+  // the exact classification of the owner's Oct 8 brief) and any script that
+  // still carries chat/instruction residue. Otherwise Twin voiced/painted her
+  // typed brief verbatim. Finished user scripts (clean, non-degenerate, no
+  // residue) stay verbatim.
+  const t = String(script || '').replace(/\s+/g, ' ').trim();
+  if (!essence.internal && !essence.degenerateFallback && !isChatResidueText(t)) return normalize(script);
   const parts: string[] = [`This is ${essence.subject}.`];
   if (essence.offer) {
     parts.push(`${cap(essence.offer)} — right now.`);
