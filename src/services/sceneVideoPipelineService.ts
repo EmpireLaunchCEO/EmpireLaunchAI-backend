@@ -1339,11 +1339,11 @@ export function verifyComponentsInScript(script: SceneScript[], components: stri
  *  platforms / offers → the MIDDLE (transformation) scene, subject chunks → the
  *  hook (scene 1). Pure + cheap (no GPT, no paid render); returns the injected
  *  list for audit + the re-verified missing list (empty on a successful pass). */
-export function injectMissingComponents(script: SceneScript[], inventory: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[] } {
+export function injectMissingComponents(script: SceneScript[], inventory: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[]; skippedResidue: string[] } {
   const next = script.map(s => ({ ...s }));
-  if (!inventory.length || !next.length) return { script: next, injected: [], stillMissing: verifyComponentsInScript(next, inventory).missing };
+  if (!inventory.length || !next.length) return { script: next, injected: [], stillMissing: verifyComponentsInScript(next, inventory).missing, skippedResidue: [] };
   const missing = verifyComponentsInScript(next, inventory).missing;
-  if (!missing.length) return { script: next, injected: [], stillMissing: [] };
+  if (!missing.length) return { script: next, injected: [], stillMissing: [], skippedResidue: [] };
   const injected: string[] = [];
   // OWNER-OCT-8 audit: every inventory item that is chat/instruction residue is
   // refused (verifyComponentsInScript already excludes residue from `missing`,
