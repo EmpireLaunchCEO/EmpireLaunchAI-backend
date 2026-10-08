@@ -11,7 +11,8 @@ import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
-import { resolveVoice, ttsToneInstruction, ttsReadAloudInstruction } from './voiceOptions.js';
+import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
+import { ttsReadAloudInstruction } from './creativeTransformation.js';
 import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
@@ -1344,7 +1345,11 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   const missing = verifyComponentsInScript(next, inventory).missing;
   if (!missing.length) return { script: next, injected: [], stillMissing: [] };
   const injected: string[] = [];
-  const skippedResidue: string[] = [];
+  // OWNER-OCT-8 audit: every inventory item that is chat/instruction residue is
+  // refused (verifyComponentsInScript already excludes residue from `missing`,
+  // so the per-item guard below never fires for them) — seed the audit from the
+  // inventory itself so production logs PROVE residue was dropped, never painted.
+  const skippedResidue: string[] = (inventory ?? []).filter((c) => isChatResidueText(c));
   const last = next.length - 1;
   const mid = Math.floor(next.length / 2);
   const isCtaish = (c: string) => {
