@@ -536,31 +536,34 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     const audioFilter: string[] = [];
     let audioMap: string | null = null;
     if (anyAudio) {
-      // AUDIO FITTING (task 316d1a2f — owner launch-gate failure): per-scene
-      // narration must NEVER bleed into the next scene's slot. Every audio-
-      // bearing clip's track is fitted to EXACTLY its own video window: atrim
-      // audio longer than the clip's video duration down to it, apad (silence)
-      // audio shorter up to it. The acrossfade chain then starts each voice
-      // exactly when its own scene starts — no scene N voice leaks over N+1,
-      // and no short voice leaves a gap that misaligns the next one.
+      // AUDIO FIT + BOUNDARY PLACEMENT (owner Oct 9 — F2 "last words cut short"):
+      // acrossfading consecutive tracks with the video-xfade overlap (tr=800ms)
+      // faded the FIRST ~0.8s of every narration after scene 1 in from silence
+      // (heard as the previous line being swallowed). Fix: place each narration
+      // at its OWN scene's global start (same offset math as the video xfade),
+      // fit it to its own window, hard-concat with 30ms edge fades (click guard)
+      // and trim to the exact video total — full loudness at the scene boundary,
+      // zero bleed either direction.
       let aIdx = 0;
-      let audioLast: string | null = null;
+      const aParts: string[] = [];
+      const aIns: string[] = [];
+      let sumPrev = 0;
       for (let i = 0; i < inputs.length; i++) {
-        if (!probes[i].hasAudio) continue;
-        const fit = Math.max(0.05, Math.min(probes[i].audioSeconds, probes[i].seconds)).toFixed(3);
-        const fitted = `[a${i}f]`;
-        audioFilter.push(`${`[${i}:a]`}atrim=0:${fit},asetpts=N/SR/TB,apad=whole_dur=${fit}${fitted}`);
-        if (audioLast === null) { audioLast = fitted; }
-        else {
-          audioFilter.push(`${audioLast}${fitted}acrossfade=d=${tr}[amix${aIdx}]`);
-          audioLast = `[amix${aIdx}]`;
-          aIdx++;
-        }
+        if (!probes[i].hasAudio) { sumPrev += probes[i].seconds; continue; }
+        const startMs = Math.max(0, Math.round((sumPrev - tr * i) * 1000));
+        const win = probes[i].seconds;
+        const fit = Math.max(0.05, Math.min(probes[i].audioSeconds, win)).toFixed(3);
+        const fadeOut = Math.max(0, parseFloat(fit) - 0.05).toFixed(3);
+        aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,apad=whole_dur=${fit},afade=t=in:d=0.03,afade=t=out:st=${fadeOut}:d=0.03,adelay=${startMs}:all=1[ad${aIdx}]`);
+        aIns.push(`[ad${aIdx}]`);
+        aIdx++;
+        sumPrev += win;
       }
-      if (audioLast) {
-        // filter-output labels stay bracketed for -map ([amixN]); a lone input
-        // stream (only one clip has audio) must map bare (e.g. 0:a).
-        audioMap = aIdx > 0 ? audioLast : audioLast.replace(/^\[|\]$/g, '');
+      if (aIns.length === 1) {
+        audioMap = aIns[0].replace(/^\[|\]$/g, '');
+      } else if (aIns.length > 1) {
+        audioFilter.push(`${aIns.join('')}concat=n=${aIns.length}:v=0:a=1,atrim=0:${totalSec}[aout]`);
+        audioMap = '[aout]';
       }
     }
     return void (async()=>{
@@ -2126,7 +2129,7 @@ if (!skipGeneration) {
         // `fs.copyFileSync('<url>', '<url>.r2-upload')` threw ENOENT. The scene
         // upload branch uploads exactly once (provider 'gpt-image-2'). ensureLocalFile
         // is a defense-in-depth guard for any caller path that still lands a URL.
-        const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
+        const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
         if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
         localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
         mime='image/png';

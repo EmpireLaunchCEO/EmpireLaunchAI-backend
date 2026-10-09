@@ -194,20 +194,38 @@ export function buildCompactSubject(raw: string): string {
   const brandMatch = t.match(/(?:^|[.!?]\s+)(?:meet|introducing|presenting|this\s+is|say\s+hello\s+to)\s+([A-Z][A-Za-z0-9'&+\-]*(?:\s+[A-Za-z0-9'&+\-]+){0,5})(?=[\s—–.,;:!?\-]|$)/i);
   if (brandMatch && brandMatch[1]) {
     const brand = brandMatch[1].trim().replace(/[—–\-]+$/g, '').trim();
-    if (contentTokens(brand) <= 6) {
+    // OWNER OCT 9 subject bug: the brand regex used to swallow lowercase words
+    // ("EmpireLaunch AI your go to platform") or capitalized possessive fragments
+    // ("Your Go To platform") into the brand. Cut the brand at the first
+    // possessive/stopword so the brand is the proper name only.
+    const BRAND_STOP = /^(?:your|our|my|their|go|to|the|a|an|and|for|is|are|was|were|platform|app|tool|service|suite)$/i;
+    const brandC = brand.split(/\s+/).filter((w) => !BRAND_STOP.test(w)).join(' ');
+    const brandFinal = brandC || brand;
+    if (contentTokens(brandFinal) <= 6 && brandFinal.length <= 60) {
       const tail = t.slice((brandMatch.index ?? 0) + brandMatch[0].length);
-      const prodMatch = tail.match(/[—–\-]?\s*(?:the\s+)?([a-z][a-z0-9'&.,\- ]{2,80}?)(?=\s+(?:built|for|designed|that|to|making|so|which)|\s*[.!?]|$)/i);
+      const prodMatch = tail.match(/[—–\-]?\s*(?:the\s+)?(?!(?:your|our|my|their)\b)([a-z][a-z0-9'&.,\- ]{2,80}?)(?=\s+(?:built|for|designed|that|to|making|so|which)|\s*[.!?]|$)/i);
       if (prodMatch && prodMatch[1]) {
-        const prod = prodMatch[1].trim();
-        const subject = `${brand} — the ${prod}`;
-        if (contentTokens(subject) <= 12 && subject.length <= 160) return subject;
+        // OWNER OCT 9 subject bug ("EmpireLaunch AI — the Your Go"): the capture
+        // used to start on the lowercase inside a possessive ("Your" -> "our ..."),
+        // swallowing a bullet fragment. Sanitize the finished subject here:
+        // drop a leading possessive, normalize "go to"/"Go To" -> "go-to", and
+        // refuse the subject if any bullet-fragment artifact survives.
+        let prod = prodMatch[1].trim();
+        prod = prod.replace(/^(?:your|our|my|their)\s+/i, '').trim();
+        prod = prod.replace(/\bgo(?:\s+|-|—)*to\b/i, 'go-to').trim();
+        if (/(?:^|\s)(?:your|our|my|their)\s+go\b/i.test(prod)) prod = prod.replace(/(?:^|\s)(?:your|our|my|their)\s+/i, ' ').trim();
+        if (/^for\s+/i.test(prod)) prod = prod.replace(/^for\s+/i, 'platform for ').trim();
+        prod = prod.replace(/[—–\-]+$/g, '').trim();
+        if (prod.length < 4 || /^go\b/i.test(prod)) return brand.length <= 60 ? brand : 'this all-in-one platform';
+        const subject = `${brandFinal} — the ${prod}`;
+        if (contentTokens(subject) <= 12 && subject.length <= 160 && !/(?:— the )(?:your|our|my|their)\b/i.test(subject)) return subject;
       }
-      if (brand.length <= 60) return brand;
+      if (brandFinal.length <= 60) return brandFinal;
     }
   }
   const firstSentence = (t.split(/(?<=[.!?])\s+/)[0] || t).trim();
-  const lead = firstSentence.split(/\s+/).slice(0, 8).join(' ');
-  if (lead.length >= 4 && lead.length <= 80 && contentTokens(lead) <= 8 && !/^(?:the|a|an|this|that|it|we|i|you|they)\s*$/i.test(lead)) return lead;
+  const lead = firstSentence.split(/\s+/).slice(0, 8).join(' ').replace(/\bgo(?:\s+|-)*to\b/i, 'go-to');
+  if (lead.length >= 4 && lead.length <= 80 && contentTokens(lead) <= 8 && !/^(?:the|a|an|this|that|it|we|i|you|they)\s*$/i.test(lead) && !/\b(?:your|our|my|their)\s+[a-z]/i.test(lead)) return lead;
   return 'this all-in-one platform';
 }
 /** HARD NARRATION LENGTH CAP (task 316d1a2f): a ~6s scene slot can carry only
@@ -574,7 +592,7 @@ export function transformTwinScriptToPitch(script: string): string {
 /** Build the planner prompt HARD-RULE section: the brief is raw material, the
  *  video is a FINISHED PITCH derived from the client-facing essence. */
 export function buildTransformationPlannerRule(): string {
-  return "\n\nCREATIVE TRANSFORMATION (mandatory): the user's typed brief is RAW MATERIAL — do NOT quote it verbatim anywhere, and NEVER depict its structure or 'the making of' (no '5 compelling reasons' list graphics, no 'CTA' cards, no recitals of what the user typed, no step-by-step of the planning or chat breakdown). Derive the client-facing essence — the PRODUCT (what it is), the AUDIENCE (who it's for), the OFFER/OUTCOME (what it does for them) — from the brief and conversation, then plan every scene as a FINISHED PITCH to that audience: audience problem → product solving it → outcome. If the raw brief is internal-sounding ('need beta testers', '5 compelling reasons', 'CTA', 'I want a video that…', 'we're looking for'), ignore it as a script and pitch the finished product instead.";
+  return "\n\nCREATIVE TRANSFORMATION (mandatory): the user's typed brief is RAW MATERIAL — do NOT quote it verbatim anywhere, and NEVER depict its structure or 'the making of' (no '5 compelling reasons' list graphics, no 'CTA' cards, no recitals of what the user typed, no step-by-step of the planning or chat breakdown). Derive the client-facing essence — the PRODUCT (what it is), the AUDIENCE (who it's for), the OFFER/OUTCOME (what it does for them) — from the brief and conversation, then plan every scene as a FINISHED PITCH to that audience: audience problem → product solving it → outcome. RELAY THE BRIEF'S CONCRETE BENEFITS as polished client copy in the narration — e.g. 'all-in-one creation, editing and design', 'stop paying for single-purpose apps', 'save time and money', 'build and scale your brand', 'introductory price' — do NOT drop or abstract them away; rewrite them as customer-facing sentences (never quote the typed brief verbatim). If the raw brief is internal-sounding ('need beta testers', '5 compelling reasons', 'CTA', 'I want a video that…', 'we're looking for'), ignore it as a script and pitch the finished product instead.";
 }
 
 function cap(s: string): string {
