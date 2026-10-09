@@ -1,17 +1,22 @@
 /**
  * SORA 2 OWNER-RATIFIED SPEC unit tests — NO paid renders (fetch fully mocked).
  *
- * Covers the four ratified contract points:
+ * CORE-ONLY (lead split directive 2026-09-13): the extensions API surface is
+ * parked behind the owner's Sora-retention decision (openai-node deprecates the
+ * whole /v1/videos resource, shutdown 2026-09-24). This suite covers the three
+ * transferable, live-safe contract points:
  *  (1) 16|20 GATE — the create POST body's `seconds` is NEVER a short enum tier:
- *      snapSora16or20(needSeconds) → "16" when the block needs ≤16s, else "20".
- *  (2) EXACTLY-ONCE CREATE — generateVideo(existingVideoId) SKIPS the create POST
+ *      snapSora16or20(needSeconds) → "16" when the block needs ≤16s, else "20";
+ *      explicit short tiers THROW (fail-fast); absent defaults to "20" (never
+ *      the API default "4", which would silently bill a shorter length).
+ *  (2) EXPLICIT SIZE — every create body carries size:'720x1280' regardless of
+ *      options (no reliance on the API default).
+ *  (3) EXACTLY-ONCE CREATE — generateVideo(existingVideoId) SKIPS the create POST
  *      and polls that id to terminal; a failed/timed-out poll returns `videoId`
  *      so callers can persist it and resume — never re-POST the same block.
- *  (3) EXTENSIONS — needSeconds > 20 → POST /v1/videos/{id}/extensions (+20s per
- *      call, ≤ SORA_MAX_EXTENSIONS, hard cap SORA_MAX_TOTAL_SECONDS=120s); the
- *      final content is downloaded from the LAST successful extension id.
- *  (4) EXPLICIT SIZE — every create body carries size:'720x1280' regardless of
- *      options (no reliance on the API default).
+ *      onVideoCreated fires with the id BEFORE polling (durable persistence).
+ * Also covers the ~12-min poll window (120 sanity-cap @ 10s→20s backoff, no
+ * elapsed-time abandonment of in_progress jobs).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,10 +26,6 @@ import {
   SoraVideoService,
   snapSora16or20,
   sanitizeNeedSeconds,
-  buildSoraExtensionBody,
-  SORA_MAX_EXTENSIONS,
-  SORA_MAX_TOTAL_SECONDS,
-  SORA_EXTENSION_SECONDS,
   SORA_SCENE_SIZE,
   SORA_POLL_MAX_ATTEMPTS,
   resolveGateSeconds,
@@ -45,7 +46,6 @@ function installMock(opts: { failPollId?: string; inProgressPolls?: number } = {
   const calls: CapturedCall[] = [];
   const pollCounts: Record<string, number> = {};
   let createN = 0;
-  let extN = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input);
@@ -56,11 +56,6 @@ function installMock(opts: { failPollId?: string; inProgressPolls?: number } = {
     if (method === 'POST' && /\/v1\/videos$/.test(url)) {
       createN += 1;
       return jsonResp({ id: `vid-create-${createN}`, status: 'queued' });
-    }
-    // EXTENSION: POST https://api.openai.com/v1/videos/{id}/extensions
-    if (method === 'POST' && url.includes('/extensions')) {
-      extN += 1;
-      return jsonResp({ id: `vid-ext-${extN}`, status: 'queued' });
     }
     // CONTENT download (must be checked BEFORE the generic poll branch below)
     if (url.endsWith('/content')) {
@@ -102,8 +97,9 @@ test('GATE: seconds:"16" when block needs ≤16s, "20" otherwise — never 4/8/1
   for (const need of [1, 6, 10, 12, 16]) assert.equal(snapSora16or20(need), '16');
   for (const need of [17, 20, 30, 60, 120, 500]) assert.equal(snapSora16or20(need), '20');
   for (const need of [0, -3, NaN]) assert.ok(['16', '20'].includes(snapSora16or20(need)));
-  assert.equal(sanitizeNeedSeconds(130), SORA_MAX_TOTAL_SECONDS, 'needSeconds clamps to 120');
+  assert.equal(sanitizeNeedSeconds(130), 130, 'core clamp is floor-only (no extension cap in core)');
   assert.equal(sanitizeNeedSeconds(undefined), 20, 'default need = 20s single take');
+  assert.equal(sanitizeNeedSeconds(12), 12);
 });
 
 test('generateVideo with needSeconds=12 POSTs seconds:"16" + explicit size (mocked)', async () => {
@@ -116,7 +112,7 @@ test('generateVideo with needSeconds=12 POSTs seconds:"16" + explicit size (mock
     assert.equal(create!.body.seconds, '16', 'gate: 12s block → seconds:"16"');
     assert.equal(create.body.size, SORA_SCENE_SIZE, 'explicit size always');
     assert.equal('duration' in create.body, false, 'legacy duration never sent');
-    assert.equal(mock.extCount(), 0, '12s block never extends');
+    assert.equal(mock.extCount(), 0, '12s block never touches the extensions endpoint');
     cleanup([result.videoPath]);
   } finally { mock.restore(); }
 });
@@ -134,7 +130,31 @@ test('defaults: no options → seconds:"20" (gate) + explicit size — never API
   } finally { mock.restore(); }
 });
 
-// ─── (2) EXACTLY-ONCE CREATE ──────────────────────────────────────────────────
+test('GATE: resolveGateSeconds default 20, 16|20 pass, short tiers never reach the API', () => {
+  assert.equal(resolveGateSeconds(undefined), '20');
+  assert.equal(resolveGateSeconds('16'), '16');
+  assert.equal(resolveGateSeconds('20'), '20');
+  for (const bad of ['4', '8', '12'] as const) assert.throws(() => resolveGateSeconds(bad), /locked-out/);
+  assert.equal(snapSora16or20(6), '16');
+  assert.equal(snapSora16or20(12), '16');
+  assert.equal(snapSora16or20(18), '20');
+  assert.equal(snapSora16or20(20), '20');
+});
+
+// ─── (2) EXPLICIT SIZE ────────────────────────────────────────────────────────
+test('SIZE: every create body is explicit 720x1280 — never API-default-dependent', async () => {
+  const mock = installMock();
+  try {
+    const result = await svc().generateVideo('size contract', {});
+    assert.ok(result.success, result.error);
+    const create = mock.calls.find(c => /\/v1\/videos$/.test(c.url) && c.method === 'POST');
+    assert.ok(create, 'create POST captured');
+    assert.equal(create!.body.size, '720x1280', 'explicit size with zero options');
+    cleanup([result.videoPath]);
+  } finally { mock.restore(); }
+});
+
+// ─── (3) EXACTLY-ONCE CREATE ──────────────────────────────────────────────────
 test('EXACTLY-ONCE: existingVideoId skips the create POST entirely (mocked)', async () => {
   const mock = installMock();
   try {
@@ -160,103 +180,25 @@ test('EXACTLY-ONCE: failed poll still returns videoId so callers can persist + r
   } finally { mock.restore(); }
 });
 
-// ─── (3) EXTENSIONS for continuity >20s ──────────────────────────────────────
-test('EXTENSIONS: 30s block → 1 create (20s) + exactly 1 extension, download from last id', async () => {
-  const mock = installMock();
-  try {
-    const result = await svc().generateVideo('long continuous block', { needSeconds: 30 });
-    assert.ok(result.success, result.error);
-    assert.equal(mock.createCount(), 1, 'one initial create only');
-    assert.equal(mock.extCount(), 1, 'one extension to reach 30s');
-    const ext = mock.calls.find(c => c.method === 'POST' && c.url.includes('/extensions'));
-    assert.ok(ext, 'extension POST captured');
-    assert.ok(String(ext.url).endsWith('/v1/videos/extensions'), 'POST /v1/videos/extensions — NOT /v1/videos/{id}/extensions');
-    assert.equal(ext.body.video, 'vid-create-1', 'source video id goes in the BODY');
-    assert.equal(ext.body.seconds, '20', 'extension requests the +20s gate-allowed tier');
-    assert.ok(ext.body?.prompt && String(ext.body.prompt).length > 20, 'extension carries a continuity prompt');
-    assert.equal(result.videoId, 'vid-ext-1', 'final id owns the extended content');
-    const content = mock.calls.find(c => c.url.endsWith('/content'));
-    assert.ok(content && content.url.includes('/vid-ext-1/content'), 'download from the LAST (extended) id');
-    cleanup([result.videoPath]);
-  } finally { mock.restore(); }
-});
-
-test('EXTENSIONS cap: needSeconds=130 → 5 extensions (20+5×20=120 max), 6th NEVER sent', async () => {
-  const mock = installMock();
-  try {
-    const result = await svc().generateVideo('absurdly long', { needSeconds: 130 });
-    assert.ok(result.success, result.error);
-    assert.equal(mock.createCount(), 1);
-    assert.equal(mock.extCount(), 5, `${SORA_MAX_EXTENSIONS}-call budget but 120s hard cap wins: 20+6×20=140 > 120 → 5`);
-    assert.equal(result.videoId, 'vid-ext-5');
-    cleanup([result.videoPath]);
-  } finally { mock.restore(); }
-});
-
-test('EXTENSIONS: needSeconds ≤ 20 never triggers an extension (16s gate included)', async () => {
-  for (const need of [16, 18, 20]) {
-    const mock = installMock();
-    try {
-      const result = await svc().generateVideo(`block ${need}s`, { needSeconds: need });
-      assert.ok(result.success, `need=${need}: ${result.error}`);
-      assert.equal(mock.extCount(), 0, `need=${need}: no extensions`);
-      const create = mock.calls.find(c => /\/v1\/videos$/.test(c.url) && c.method === 'POST');
-      assert.ok(create, `create POST captured (need=${need})`);
-      assert.equal(create!.body.seconds, need <= 16 ? '16' : '20');
-      cleanup([result.videoPath]);
-    } finally { mock.restore(); }
-  }
-});
-
-// ─── onVideoCreated durable-persistence callback ──────────────────────────────
-test('onVideoCreated fires in order with ids BEFORE polling (initial + each extension)', async () => {
+test('EXACTLY-ONCE: onVideoCreated fires with the id BEFORE polling (durable persistence point)', async () => {
   const mock = installMock();
   const seen: string[] = [];
-  const stages: string[] = [];
+  const pollUrlsAfterCreate: string[] = [];
   try {
     const result = await svc().generateVideo('continuity block', {
-      needSeconds: 50,
-      onVideoCreated: (id, meta) => { seen.push(id); stages.push(`${meta.stage}:${meta.index}`); },
+      needSeconds: 20,
+      onVideoCreated: (id) => { seen.push(id); },
     });
     assert.ok(result.success, result.error);
-    assert.deepEqual(stages, ['initial:0', 'extension:1', 'extension:2'], 'order: initial then extensions');
-    assert.deepEqual(seen, ['vid-create-1', 'vid-ext-1', 'vid-ext-2'], 'every created id reported for durable persistence');
-    assert.ok(mock.calls.find(c => c.url.includes('/vid-create-1') && !c.url.endsWith('/content')), 'initial id polled');
+    assert.deepEqual(seen, ['vid-create-1'], 'exactly one id reported, before any poll/download');
+    assert.equal(result.videoId, 'vid-create-1');
+    const polls = mock.calls.filter(c => c.method === 'GET' && c.url.includes('/v1/videos/') && !c.url.endsWith('/content'));
+    assert.ok(polls.length >= 1, 'initial id polled after the callback');
     cleanup([result.videoPath]);
   } finally { mock.restore(); }
 });
 
-test('buildSoraExtensionBody ships the SDK shape { prompt, seconds, video } for POST /v1/videos/extensions', () => {
-  const body = buildSoraExtensionBody('keep the same camera move', 'vid-src-1');
-  assert.ok(String(body.prompt).includes('Seamlessly continue'));
-  assert.ok(String(body.prompt).includes('keep the same camera move'));
-  assert.equal(body.seconds, '20', 'extension always requests the +20s gate-allowed tier');
-  assert.equal(body.video, 'vid-src-1', 'source video id in the body (VideoExtendParams contract)');
-  assert.equal('size' in body, false);
-  assert.equal('duration' in body, false);
-});
-
-// ─── output-dir hygiene ───────────────────────────────────────────────────────
-test('SORA_MAX_EXTENSIONS/TOTAL constants match the owner spec', () => {
-  assert.equal(SORA_MAX_EXTENSIONS, 6);
-  assert.equal(SORA_EXTENSION_SECONDS, 20);
-  assert.equal(SORA_MAX_TOTAL_SECONDS, 120);
-  assert.equal(SORA_SCENE_SIZE, '720x1280');
-  assert.equal(SORA_POLL_MAX_ATTEMPTS, 120, 'sanity cap only — never the old 5-min abandon');
-});
-
-test('EXTENSIONS: 60s block → 2 extensions (20+2×20), download from last id', async () => {
-  const mock = installMock();
-  try {
-    const result = await svc().generateVideo('60s continuous block', { needSeconds: 60 });
-    assert.ok(result.success, result.error);
-    assert.equal(mock.createCount(), 1, 'one create only');
-    assert.equal(mock.extCount(), 2, 'two extensions for 60s');
-    assert.equal(result.videoId, 'vid-ext-2', 'download from last extended id');
-    cleanup([result.videoPath]);
-  } finally { mock.restore(); }
-});
-
+// ─── POLL WINDOW (~12-min, no elapsed abandonment) ────────────────────────────
 test('POLL: no elapsed-time abandonment — the ONLY abort is a terminal state', async () => {
   // Lead 2026-09-13: never give up on in_progress because time elapsed (Sora
   // legitimately takes 6–10+ min). The sanity cap is the exported constant
@@ -268,15 +210,15 @@ test('POLL: no elapsed-time abandonment — the ONLY abort is a terminal state',
   assert.equal(snapSora16or20(20), '20');
 });
 
-test('GATE: resolveGateSeconds default 20, 16|20 pass, short tiers never reach the API', () => {
-  assert.equal(resolveGateSeconds(undefined), '20');
-  assert.equal(resolveGateSeconds('16'), '16');
-  assert.equal(resolveGateSeconds('20'), '20');
-  for (const bad of ['4', '8', '12'] as const) assert.throws(() => resolveGateSeconds(bad), /locked-out/);
-  assert.equal(snapSora16or20(6), '16');
-  assert.equal(snapSora16or20(12), '16');
-  assert.equal(snapSora16or20(18), '20');
-  assert.equal(snapSora16or20(20), '20');
+test('POLL: an in_progress job is polled repeatedly and completes (mocked)', async () => {
+  const mock = installMock({ inProgressPolls: 3 });
+  try {
+    const result = await svc().generateVideo('slow job', {});
+    assert.ok(result.success, result.error);
+    const polls = mock.calls.filter(c => c.method === 'GET' && c.url.includes('/v1/videos/') && !c.url.endsWith('/content'));
+    assert.ok(polls.length >= 4, `kept polling while in_progress (${polls.length} polls)`);
+    cleanup([result.videoPath]);
+  } finally { mock.restore(); }
 });
 
 const dir = path.join(process.cwd(), 'public', 'assets', 'cinema', 'sora');
