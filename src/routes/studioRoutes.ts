@@ -3,6 +3,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
+import { collectApprovalSweepIds } from '../services/deleteApprovalSweep.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
@@ -898,11 +899,18 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
       try { await db.delete(schema.videoProjects).where(eq(schema.videoProjects.id, proj.id)); } catch {}
     };
 
-    // Delete all approval rows that reference a given creation id (payload.assetId).
-    const deleteApprovalsFor = async (creationId: string): Promise<void> => {
+    // Delete EVERY approval row referencing this run. Each faceless/twin run
+    // leaves ~5 approvals (1 x type=faceless approved with payload.assetId =
+    // project id + N x type=video completed with scene-level assetIds). Deleting
+    // only the clicked one leaves siblings that resurrect as ghost cards once
+    // their backing rows are gone (owner Oct 9 defect). Sweep by payload.assetId
+    // AND payload.projectId across {creation, project, scene} ids.
+    const deleteApprovalsFor = async (ids: string[]): Promise<void> => {
+      if (!ids.length) return;
       try {
-        await db.delete(schema.approvals)
-          .where(sql`${schema.approvals.payload}->>'assetId' = ${creationId}`);
+        await db.delete(schema.approvals).where(sql`
+          ${schema.approvals.payload}->>'assetId' = ANY(${ids}) OR
+          ${schema.approvals.payload}->>'projectId' = ANY(${ids})`);
       } catch {}
     };
 
@@ -944,6 +952,16 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     }
 
     const projectId = creation?.metadata?.projectId || projectById?.id;
+    // Capture scene ids BEFORE deleteProject cascades the video_scenes away;
+    // their assetIds are what the completed-video approvals reference.
+    let sceneIds: string[] = [];
+    try {
+      if (projectId) {
+        const scenes = await db.select({ id: schema.videoScenes.id })
+          .from(schema.videoScenes).where(eq(schema.videoScenes.projectId, projectId));
+        sceneIds = scenes.map((s) => s.id);
+      }
+    } catch {}
 
     // ── Delete ────────────────────────────────────────────────────────────────
     // An orphaned approval (payload.assetId has no creations row and no video
@@ -970,9 +988,16 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
       await deleteR2(creation.fileUrl);
       await deleteR2(creation.thumbnailUrl);
       await db.delete(schema.creations).where(eq(schema.creations.id, creation.id));
-      await deleteApprovalsFor(creation.id);
     }
-
+    // Sweep EVERY approval row of the run (faceless + completed scene receipts) —
+    // including the orphan-approval click path where only approvalRow resolved.
+    await deleteApprovalsFor(collectApprovalSweepIds({
+      creationId: creation?.id,
+      projectId,
+      sceneIds,
+      approvalAssetId: approvalRow?.payload?.assetId,
+      approvalProjectId: approvalRow?.payload?.projectId,
+    }));
     res.json({ status: 'ok', deleted: approvalRow?.id || id });
   } catch (err: any) {
     console.error('[StudioRoute] Delete failed:', err.message);
