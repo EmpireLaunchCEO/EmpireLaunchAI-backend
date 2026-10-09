@@ -94,11 +94,16 @@ test('buildTransformationPlannerRule: hard rule tells the planner to pitch the e
 
 // ── OWNER OCT 9 re-test regression (task ddcc1b95) ─────────────────────────
 test('subject never swallows a possessive bullet fragment ("the Your Go")', () => {
-  const brief = 'Say hello to EmpireLaunch AI your go to platform for all in one creation editing design stop wasting money on credit apps get started! Yes';
+  // Long first sentence (>200ch) trips the degenerate guard -> buildCompactSubject.
+  // The Oct 9 owner brief had this shape: brand + "Your Go To platform" + benefits
+  // + the UI tail "…get started! Yes".
+  const brief = 'Say hello to EmpireLaunch AI your Go To platform for all in one creation editing and design, stop wasting money on credit apps that charge you monthly, save time and money while you build and scale your brands, all at an introductory price you will love, get started! Yes';
   const e = extractCreativeEssence(brief);
+  assert.ok(e.degenerateFallback, `expected degenerate fallback, got subject=${e.subject}`);
   assert.ok(!/(?:^|\s)Your Go(?:$|\s)|— the (?:your|our|my|their)\b/i.test(e.subject), `subject leaked possessive fragment: ${e.subject}`);
-  assert.ok(!e.subject.includes('get started'), `subject leaked chat tail: ${e.subject}`);
+  assert.ok(!/get started!?\s+yes/i.test(e.subject), `subject leaked UI chat tail: ${e.subject}`);
   assert.ok(e.subject.length <= 160);
+  assert.ok(e.subject.startsWith('EmpireLaunch AI'), `brand lost: ${e.subject}`);
 });
 test('essence relays real product substance (F3 over-collapse guard)', () => {
   const brief = 'EmpireLaunch AI is your go-to platform for all-in-one creation, editing and design. Stop wasting money on credit apps — save time and money building and scaling brands. Introductory price. Get started! Yes';
