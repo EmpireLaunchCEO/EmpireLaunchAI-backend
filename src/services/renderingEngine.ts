@@ -43,6 +43,11 @@ export function isCustomerFacingOverlayText(text: string): boolean {
   return true;
 }
 
+/** Deterministic no-text guard appended to faceless still prompts (F1). */
+export function appendNoTextGuard(prompt: string): string {
+  return `${String(prompt || '').trim()} — IMPORTANT: photography/3D style only. Absolutely NO text, NO words, NO letters, NO numbers, NO logos, NO UI screens, NO bullet points, NO captions, NO labels anywhere in the image. Create the scene as a purely visual cinematic shot (9:16 vertical composition).`;
+}
+
 export class RenderingEngine {
   private tempDir: string;
 
@@ -98,13 +103,13 @@ export class RenderingEngine {
    * Generate a single image using GPT Image 2. For image_creation/image_editing.
    * Returns the local path to the generated PNG.
    */
-  async renderImage(prompt: string, userId?: string, inputImageUrl?: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+  async renderImage(prompt: string, userId?: string, inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
     const taskId = uuidv4().slice(0, 8);
     const workingDir = path.join(this.tempDir, `img_${taskId}`);
     fs.mkdirSync(workingDir, { recursive: true });
 
     try {
-      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high', inputImageUrl);
+      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high', inputImageUrl, opts);
       let finalUrl = localPath;
       if (userId && r2Storage.isAvailable) {
         const r2 = await r2Storage.uploadLocalFile(localPath, userId, 'renders/images', 'image/png');
@@ -123,7 +128,7 @@ export class RenderingEngine {
    * Calls POST /v1/images/generations with quality parameter (required).
    * Response: {data: [{b64_json: '...'}], output_format: 'png', size: '...'}
    */
-  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high', inputImageUrl?: string): Promise<string> {
+  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high', inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<string> {
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
     const apiKey = process.env.OPENAI_API_KEY;
@@ -139,7 +144,7 @@ export class RenderingEngine {
     let b64Json: string | undefined;
     if (inputImageUrl) {
       try {
-        b64Json = await this.generateFromInputImage(inputImageUrl, prompt, quality, apiKey);
+        b64Json = await this.generateFromInputImage(inputImageUrl, opts?.noText ? appendNoTextGuard(prompt) : prompt, quality, apiKey, opts?.size);
         console.log(`[RenderingEngine] Image generated via gpt-image-2 (input-image edit)`);
       } catch (inputErr: any) {
         console.warn(`[RenderingEngine] Input-image edit failed, falling back to text-only: ${inputErr.message}`);
@@ -155,9 +160,10 @@ export class RenderingEngine {
         },
         body: JSON.stringify({
           model: 'gpt-image-2',
-          prompt,
+          prompt: opts?.noText ? appendNoTextGuard(prompt) : prompt,
           n: 1,
           quality,
+          ...(opts?.size ? { size: opts.size } : {}),
         }),
         signal: AbortSignal.timeout(180000)
       });
@@ -185,7 +191,7 @@ if (!b64Json) {
     return outputPath;
   }
   /** Drive gpt-image-2 from a user-uploaded image via the multipart edits endpoint. */
-  private async generateFromInputImage(inputImageUrl: string, prompt: string, quality: string, apiKey: string): Promise<string> {
+  private async generateFromInputImage(inputImageUrl: string, prompt: string, quality: string, apiKey: string, size?: string): Promise<string> {
     const imgRes = await fetch(inputImageUrl, { signal: AbortSignal.timeout(30000) });
     if (!imgRes.ok) throw new Error(`Could not fetch input image (${imgRes.status})`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
@@ -194,6 +200,7 @@ if (!b64Json) {
     form.append('prompt', prompt);
     form.append('n', '1');
     form.append('quality', quality);
+    if (size) form.append('size', size);
     form.append('image', new Blob([buf], { type: 'image/png' }), 'input.png');
     const response = await fetch('https://api.openai.com/v1/images/edits', {
       method: 'POST',
@@ -211,6 +218,15 @@ if (!b64Json) {
     return b64;
   }
 
+  /**
+   * FACELESS STILL GUARD (owner Oct 9 — F1 "still displaying the bullet points"):
+   * gpt-image-2 paints any word-like content a prompt mentions (feature lists,
+   * UI copy, benefit bullets) INTO the image. Appended deterministically at the
+   * call site (never trusted to the LLM): the image must be photography/3D with
+   * ZERO legible text, and 9:16 portrait so the 1080x1920 Ken Burns crop never
+   * slices a horizontal text layout (the landscape stills 1672x941/1921x819
+   * were fragments of painted bullets after portrait cropping).
+   */
   /**
    * Phase 2: Apply text overlays via Sharp (SVG compositing).
    * Pure native rendering — no external design tool needed.

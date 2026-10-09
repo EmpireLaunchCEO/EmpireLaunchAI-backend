@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { extractCreativeEssence, finishedCreativeSubject, isInternalBriefEcho, isInternalSoundingBrief, isInternalTalkPoint, transformTwinScriptToPitch, buildTransformationPlannerRule } from '../creativeTransformation.js';
+import { extractCreativeEssence, finishedCreativeSubject, isInternalBriefEcho, isInternalSoundingBrief, isInternalTalkPoint, transformTwinScriptToPitch, buildTransformationPlannerRule, buildCompactSubject } from '../creativeTransformation.js';
 
 /**
  * CREATIVE TRANSFORMATION LAYER — regression tests (owner Sep 28, task e4fddfab).
@@ -90,4 +90,27 @@ test('buildTransformationPlannerRule: hard rule tells the planner to pitch the e
   assert.ok(/FINISHED PITCH/i.test(rule));
   assert.ok(/internal-sounding/i.test(rule));
   assert.ok(/beta\s+testers/i.test(rule));
+});
+
+// ── OWNER OCT 9 re-test regression (task ddcc1b95) ─────────────────────────
+test('subject never swallows a possessive bullet fragment ("the Your Go")', () => {
+  const brief = 'Say hello to EmpireLaunch AI your go to platform for all in one creation editing design stop wasting money on credit apps get started! Yes';
+  const e = extractCreativeEssence(brief);
+  assert.ok(!/(?:^|\s)Your Go(?:$|\s)|— the (?:your|our|my|their)\b/i.test(e.subject), `subject leaked possessive fragment: ${e.subject}`);
+  assert.ok(!e.subject.includes('get started'), `subject leaked chat tail: ${e.subject}`);
+  assert.ok(e.subject.length <= 160);
+});
+test('essence relays real product substance (F3 over-collapse guard)', () => {
+  const brief = 'EmpireLaunch AI is your go-to platform for all-in-one creation, editing and design. Stop wasting money on credit apps — save time and money building and scaling brands. Introductory price. Get started! Yes';
+  const e = extractCreativeEssence(brief);
+  const all = [e.subject, e.product, e.offer, e.audience].filter(Boolean).join(' ').toLowerCase();
+  assert.ok(/all-in-one|creation|design|editing/.test(all), `substance lost: ${all}`);
+  assert.ok(!/get started|yes/i.test(e.subject), `subject carried chat tail: ${e.subject}`);
+});
+test('compact fallback keeps brand + product and no chat tail', () => {
+  const brief = 'Introducing EmpireLaunch AI your Go To platform for creators. Use a energetic mood across every scene. Yes Make sure it is cohesive.';
+  const c = buildCompactSubject(brief);
+  assert.ok(c.includes('EmpireLaunch AI'), `brand lost: ${c}`);
+  assert.ok(!/make sure|energetic mood|Yes/i.test(c), `chat residue in subject: ${c}`);
+  assert.ok(!c.toLowerCase().includes('your go'), `possessive fragment in subject: ${c}`);
 });

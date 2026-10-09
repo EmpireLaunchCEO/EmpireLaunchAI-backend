@@ -234,7 +234,7 @@ export function startVideoQueueWorker(): void {
         const sourceImage = Array.isArray(meta?.sourceImages) && meta.sourceImages.length > 0
           ? meta.sourceImages[0]
           : undefined;
-        const stillResult = await renderingEngine.renderImage(prompt, undefined, sourceImage);
+        const stillResult = await renderingEngine.renderImage(prompt, undefined, sourceImage, { size: '1024x1792', noText: true });
         if (!stillResult.success || !stillResult.imageUrl) {
           await db.update(schema.creations).set({
             status: 'failed',
