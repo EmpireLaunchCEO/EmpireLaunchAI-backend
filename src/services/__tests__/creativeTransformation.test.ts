@@ -188,3 +188,53 @@ test('REAL ROUTE (Oct 9): planner hard rule names all five benefits for narratio
     assert.ok(lower.includes(b), `rule relays benefit: ${b} — ${rule.slice(0, 300)}`);
   }
 });
+
+// ── OWNER OCT 10 NEW BRIEF — LAUNCH-GATE REAL ROUTE SHAPE (task 7632b56e) ──
+// The owner's FRESH launch-gate brief (verbatim, as submitted via the real
+// POST /api/approval/create — the new 30s faceless render, female enthusiastic
+// voice, mood energetic). This shape was NEVER covered by the Oct 9 tests:
+// an ASCII-dash brand clause ("EmpireLaunch AI - Your go to content creation
+// platform…") that the brand chunk-class swallows WHOLE (its char class
+// includes '-'), leaving a stray '-' in the finished brand → subject
+// "EmpireLaunch AI - — the content creation platform". Plus NEW concrete
+// selling points (76 video creations/mo, 50 designs/mo, no credit purchases,
+// Empirelaunchai.com CTA) that the Oct 9 canonical relay set does NOT cover —
+// they MUST be relayed as finished copy so the planner can voice them.
+// PROVEN DISCRIMINATING: fails on main 75d2a1d (subject "- — the content
+// creation platform", benefits only [save time and money, introductory price]).
+const OCT10_BRIEF = "Introducing EmpireLaunch AI - Your go to content creation platform. Tired of spending hours editing all your videos, taking out word blobs or time gaps, this platform does that to! Make your life easier, save time and money. No more needing to purchase credits. Get started early with our introductory price. You get 76 video creations a month. For those of you that create designs for your business - you get 50 per month- cut you creation time down. Get started today - go to Empirelaunchai.com";
+const OCT10_BENEFITS_EXPECTED = [
+  'save time and money',
+  'introductory price',
+  'no more credit purchases',
+  '76 video creations a month',
+  '50 designs a month',
+  'go to Empirelaunchai.com',
+];
+test('OCT10 NEW BRIEF: subject EXACTLY "EmpireLaunch AI" — no dash, no "— the content creation platform" tail', () => {
+  const e = extractCreativeEssence(OCT10_BRIEF);
+  assert.equal(e.subject, 'EmpireLaunch AI', `subject must be exactly the brand: ${e.subject}`);
+  assert.equal(e.product, 'EmpireLaunch AI', `product clean: ${e.product}`);
+  assert.ok(e.degenerateFallback, `expected degenerate fallback (possessive "Your go" swallowed), got internal=${e.internal}`);
+  assert.ok(!/- —|— the content creation platform/i.test(e.subject), `dash/tail artifact: ${e.subject}`);
+  assert.ok(!/[A-Za-z0-9]\s*-\s*—/i.test(e.subject), `stray dash survived: ${e.subject}`);
+});
+test('OCT10 NEW BRIEF: all SIX selling points relayed as finished copy', () => {
+  const rel = extractRelayedBenefits(OCT10_BRIEF);
+  for (const b of OCT10_BENEFITS_EXPECTED) {
+    assert.ok(rel.some((x) => x.toLowerCase() === b.toLowerCase()), `missing relayed benefit: ${b} — got ${JSON.stringify(rel)}`);
+  }
+  assert.ok(rel.length <= 8, `no over-relay: ${JSON.stringify(rel)}`);
+});
+test('OCT10 NEW BRIEF: planner receives finished essence brief with subject + all selling points', () => {
+  // Mirrors the exact plannerBrief expression in createProject() (line 1706):
+  // degenerate route → finishedEssenceBrief(essence).
+  const e = extractCreativeEssence(OCT10_BRIEF);
+  const plannerBrief = (e.internal || e.degenerateFallback) ? finishedEssenceBrief(e) : '';
+  assert.ok(plannerBrief.startsWith('EmpireLaunch AI.'), `planner brief starts with brand: ${plannerBrief}`);
+  for (const b of OCT10_BENEFITS_EXPECTED) {
+    assert.ok(plannerBrief.toLowerCase().includes(b.toLowerCase()), `planner brief relays benefit: ${b} — got: ${plannerBrief}`);
+  }
+  assert.ok(!/tired of spending|word blobs|take out|make your life easier|cut you/i.test(plannerBrief), `raw-brief fragment in planner brief: ${plannerBrief}`);
+  assert.ok(!/^yes\b|,\s*yes\b/i.test(plannerBrief), `chat tail in planner brief: ${plannerBrief}`);
+});

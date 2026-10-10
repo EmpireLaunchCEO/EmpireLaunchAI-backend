@@ -133,6 +133,19 @@ const BENEFIT_RELAYS: { test: RegExp; relay: string }[] = [
   { test: /\bsave\s+time\s+(?:and|&|,)?\s*(?:money)?\b/i, relay: 'save time and money' },
   { test: /\bbuild(?:ing)?\s+and\s+scale\b/i, relay: 'build and scale your brand' },
   { test: /\bintroduc(?:tory|tion)\s+price\b/i, relay: 'introductory price' },
+  // OWNER OCT 10 NEW BRIEF (task 7632b56e, launch gate): the owner's FRESH
+  // faceless brief is a NEW shape with its own concrete selling points (no more
+  // credit purchases, 76 video creations/month, 50 designs/month, the
+  // Empirelaunchai.com call-to-action, and the content-creation-platform
+  // positioning). Relay them as FINISHED client copy in stable order so the
+  // planner can voice them on the degenerate path. Markers fire ONLY on their
+  // own phrases — the Oct 9 canonical five are untouched (that brief has none
+  // of these markers).
+  { test: /\bno\s+more\s+needing\s+to\s+purchase\s+credits?\b/i, relay: 'no more credit purchases' },
+  { test: /\b(?:you\s+get\s+)?76\s+video\s+creations?\s+(?:a|per)\s+month\b/i, relay: '76 video creations a month' },
+  { test: /\b(?:you\s+get\s+)?50\s+(?:designs?\s+)?(?:a|per)\s+month\b/i, relay: '50 designs a month' },
+  { test: /\bgo\s+to\s+empirelaunchai\.com\b/i, relay: 'go to Empirelaunchai.com' },
+  { test: /\bcontent\s+creation\s+platform\b/i, relay: 'your go-to content creation platform' },
 ];
 
 /** Deterministically extract the brief's concrete benefits as FINISHED client
@@ -246,8 +259,23 @@ export function buildCompactSubject(raw: string): string {
     // ("Your Go To platform") into the brand. Cut the brand at the first
     // possessive/stopword so the brand is the proper name only.
     const BRAND_STOP = /^(?:your|ur|our|my|their|go|to|the|a|an|and|for|is|are|was|were|platform|app|tool|service|suite)$/i;
-    const brandC = brand.split(/\s+/).filter((w) => !BRAND_STOP.test(w)).join(' ');
+    // OWNER OCT 10 (task 7632b56e): the brand chunk-class includes '-', so
+    // "EmpireLaunch AI - Your go to content creation platform" was captured
+    // WHOLE ("EmpireLaunch AI - Your go to") — filtering the words out of the
+    // middle left the stray '-' → subject "EmpireLaunch AI - — the content
+    // creation platform". CUT the brand at the FIRST possessive/stopword OR
+    // pure-dash token so the finished brand is the proper name only.
+    const brandTokens = brand.split(/\s+/);
+    const brandCut = brandTokens.findIndex((w) => BRAND_STOP.test(w) || /^[-–—]+$/.test(w));
+    const brandC = (brandCut === -1 ? brandTokens : brandTokens.slice(0, brandCut)).join(' ');
     const brandFinal = brandC || brand;
+    // OWNER OCT 10: if the brand capture swallowed a possessive opener
+    // ("EmpireLaunch AI - Your go to…"), the finished subject is the BARE brand
+    // — the swallowed possessive clause can never be appended as a product.
+    const swallowedPossessive = /(?:^|[\s\W])(?:your|ur|our|my|their)\b/i.test(brand);
+    if (swallowedPossessive) {
+      return brandFinal.length <= 60 ? brandFinal : 'this all-in-one platform';
+    }
     if (contentTokens(brandFinal) <= 6 && brandFinal.length <= 60) {
       const tail = t.slice((brandMatch.index ?? 0) + brandMatch[0].length);
       // OWNER-OCT-9 FIX: the product capture used to start ANYWHERE — including
