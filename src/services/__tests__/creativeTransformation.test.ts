@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { extractCreativeEssence, finishedCreativeSubject, isInternalBriefEcho, isInternalSoundingBrief, isInternalTalkPoint, transformTwinScriptToPitch, buildTransformationPlannerRule, buildCompactSubject } from '../creativeTransformation.js';
+import { extractCreativeEssence, finishedCreativeSubject, isInternalBriefEcho, isInternalSoundingBrief, isInternalTalkPoint, transformTwinScriptToPitch, buildTransformationPlannerRule, buildCompactSubject, finishedEssenceBrief, extractRelayedBenefits } from '../creativeTransformation.js';
 
 /**
  * CREATIVE TRANSFORMATION LAYER — regression tests (owner Sep 28, task e4fddfab).
@@ -118,4 +118,73 @@ test('compact fallback keeps brand + product and no chat tail', () => {
   assert.ok(c.includes('EmpireLaunch AI'), `brand lost: ${c}`);
   assert.ok(!/make sure|energetic mood|Yes/i.test(c), `chat residue in subject: ${c}`);
   assert.ok(!c.toLowerCase().includes('your go'), `possessive fragment in subject: ${c}`);
+});
+
+// ── OWNER OCT 9 ACCEPTANCE — REAL ROUTE SHAPE (task da4ef0ed) ───────────────
+// The Oct 9 acceptance render (project 7e89b3d4, approval 0af8f15f) ran the
+// FULL reconstructed brief through POST /api/approval/create (type faceless,
+// mood energetic, duration 15, ends "…get started! Yes"). Stored result:
+//   subject = "EmpireLaunch AI — the ur go", degenerateFallback TRUE,
+//   offer = "Save time" ONLY, plan narrations carried ZERO benefits.
+// This test is shaped EXACTLY like that input and FAILS on pre-fix main
+// (subject "EmpireLaunch AI — the ur go" ≠ "EmpireLaunch AI"; benefits missing).
+const OCT9_ACCEPTANCE_BRIEF = "Introducing EmpireLaunch AI, your go to platform for all-in-one creation, editing and design. Stop wasting money on credit apps. Save time and money. Build and scale your brands. Get started today for the introductory price! Yes Make sure it's cohesive and makes customers want to get this app.";
+const OCT9_BENEFITS = [
+  'all-in-one creation, editing and design',
+  'stop paying for single-purpose apps',
+  'save time and money',
+  'build and scale your brand',
+  'introductory price',
+];
+
+test('REAL ROUTE (Oct 9): degenerate fallback subject is EXACTLY "EmpireLaunch AI" — no "ur go" fragment', () => {
+  const e = extractCreativeEssence(OCT9_ACCEPTANCE_BRIEF);
+  assert.equal(e.degenerateFallback, true, `expected degenerate fallback, got subject=${e.subject}`);
+  assert.equal(e.subject, 'EmpireLaunch AI', `subject must be exactly the brand: ${e.subject}`);
+  assert.equal(e.product, 'EmpireLaunch AI', `product must not carry a bullet fragment: ${e.product}`);
+  assert.ok(!/ur\s+go|— the ur|the ur go/i.test(e.subject), `possessive text-speak fragment leaked: ${e.subject}`);
+  assert.ok(!/get started|yes|make sure|cohesive|wants to get/i.test(e.subject), `chat tail leaked: ${e.subject}`);
+});
+
+test('REAL ROUTE (Oct 9): ALL FIVE benefits relayed as finished copy (no over-collapse)', () => {
+  const e = extractCreativeEssence(OCT9_ACCEPTANCE_BRIEF);
+  assert.ok(Array.isArray(e.benefits) && e.benefits.length === 5, `expected 5 relayed benefits, got ${JSON.stringify(e.benefits)}`);
+  for (const b of OCT9_BENEFITS) {
+    assert.ok(e.benefits!.some((x) => x.toLowerCase() === b.toLowerCase()), `missing relayed benefit: ${b} — got ${JSON.stringify(e.benefits)}`);
+  }
+  assert.equal(e.offer, 'Save time and money', `offer must be the FULL phrase, not "Save time": ${e.offer}`);
+  // No raw-brief fragment anywhere in the finished essence fields.
+  const all = [e.subject, e.product, e.offer, ...(e.benefits ?? [])].join(' ').toLowerCase();
+  assert.ok(!/get started|wants to get|cohesive|make sure|^yes\b|\byes\b/i.test(all), `residue in finished essence: ${all}`);
+});
+
+test('REAL ROUTE (Oct 9): planner receives the FINISHED ESSENCE BRIEF (subject + all benefits)', () => {
+  // Mirrors the exact plannerBrief expression in createProject() — the planner
+  // input is the finished essence brief, NEVER the raw brief or a bare subject.
+  const e = extractCreativeEssence(OCT9_ACCEPTANCE_BRIEF);
+  const plannerBrief = (e.internal || e.degenerateFallback) ? finishedEssenceBrief(e) : '';
+  assert.ok(plannerBrief.startsWith('EmpireLaunch AI.'), `planner brief starts with brand: ${plannerBrief}`);
+  for (const b of OCT9_BENEFITS) {
+    assert.ok(plannerBrief.toLowerCase().includes(b), `planner brief relays benefit: ${b} — got: ${plannerBrief}`);
+  }
+  assert.ok(!/ur\s+go|get started|wants to get|cohesive|make sure/i.test(plannerBrief), `residue in planner brief: ${plannerBrief}`);
+  // Every relayed benefit is FINISHED copy — never a raw brief fragment:
+  // subject + the five benefits = 6 finished sentences (audience absent here).
+  const sentences = plannerBrief.split('.').filter((s) => s.trim().length > 0);
+  assert.equal(sentences.length, 6, `finished sentence count (subject+5 benefits): ${plannerBrief}`);
+});
+
+test('REAL ROUTE (Oct 9): extractRelayedBenefits covers the five concrete benefits', () => {
+  const rel = extractRelayedBenefits(OCT9_ACCEPTANCE_BRIEF);
+  assert.equal(rel.length, 5, `got ${JSON.stringify(rel)}`);
+  for (const b of OCT9_BENEFITS) assert.ok(rel.includes(b), `missing ${b}`);
+  assert.ok(rel.every((x) => !/get started|wants to get|yes|cohesive|make sure/i.test(x)), `raw fragment in relay set: ${JSON.stringify(rel)}`);
+});
+
+test('REAL ROUTE (Oct 9): planner hard rule names all five benefits for narration', () => {
+  const rule = buildTransformationPlannerRule();
+  const lower = rule.toLowerCase();
+  for (const b of OCT9_BENEFITS) {
+    assert.ok(lower.includes(b), `rule relays benefit: ${b} — ${rule.slice(0, 300)}`);
+  }
 });

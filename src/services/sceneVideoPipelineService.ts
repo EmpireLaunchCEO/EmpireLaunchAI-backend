@@ -13,7 +13,7 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
-import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue } from './creativeTransformation.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -1325,7 +1325,7 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   //      residue-stripped brief's chunks (clean briefs are already client copy).
   const essence = extractCreativeEssence(input.cleanBrief);
   const briefSource = (essence.internal || essence.degenerateFallback)
-    ? essence.subject
+    ? finishedEssenceBrief(essence)
     : stripInstructionResidue(input.cleanBrief);
   // (c2) user-turn chunks (carry the subject/concept itself) — residue-stripped.
   for (const c of chunkText(briefSource)) push(c);
@@ -1704,7 +1704,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         // hints) stripped so it can never be quoted into a scene.
         const plannerEssence = extractCreativeEssence(cleanIdea);
         const plannerBrief = (plannerEssence.internal || plannerEssence.degenerateFallback)
-          ? plannerEssence.subject
+          ? finishedEssenceBrief(plannerEssence)
           : stripInstructionResidue(cleanIdea);
         const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection });
         const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
