@@ -534,6 +534,12 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     //    audio track (the gpt-audio narration), producing a silent final MP4.
     const anyAudio = probes.some(p => p.hasAudio);
     const audioFilter: string[] = [];
+    // Per-track narration chains ([i:a]aformat/atrim/asetpts/apad/fades/adelay ->
+    // [adN]). Declared OUTSIDE the anyAudio block so the filtergraph below can
+    // always prepend them — the Oct 9 acceptance render proved the graph broke
+    // ("Invalid stream specifier: ad0") because these definitions were never
+    // joined into -filter_complex while the final concat referenced their labels.
+    const aParts: string[] = [];
     let audioMap: string | null = null;
     if (anyAudio) {
       // AUDIO FIT + BOUNDARY PLACEMENT (owner Oct 9 — F2 "last words cut short"):
@@ -541,11 +547,10 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       // faded the FIRST ~0.8s of every narration after scene 1 in from silence
       // (heard as the previous line being swallowed). Fix: place each narration
       // at its OWN scene's global start (same offset math as the video xfade),
-      // fit it to its own window, hard-concat with 30ms edge fades (click guard)
-      // and trim to the exact video total — full loudness at the scene boundary,
-      // zero bleed either direction.
+      // fit it to its own window with 30ms edge fades (click guard), pad each
+      // track out to the video total and amix them on the shared timeline —
+      // full loudness at the scene boundary, zero bleed either direction.
       let aIdx = 0;
-      const aParts: string[] = [];
       const aIns: string[] = [];
       let sumPrev = 0;
       for (let i = 0; i < inputs.length; i++) {
@@ -554,7 +559,17 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
         const win = probes[i].seconds;
         const fit = Math.max(0.05, Math.min(probes[i].audioSeconds, win)).toFixed(3);
         const fadeOut = Math.max(0, parseFloat(fit) - 0.05).toFixed(3);
-        aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,apad=whole_dur=${fit},afade=t=in:d=0.03,afade=t=out:st=${fadeOut}:d=0.03,adelay=${startMs}:all=1[ad${aIdx}]`);
+        // Each narration is edited to fit its own window, padded with silence out
+        // to EXACTLY the video total (apad whole_dur = totalSec - start), then
+        // adelay'd to its own scene's global start. The tracks are then mixed on
+        // the shared timeline with amix (NOT concat): concat re-anchors every
+        // stream at sample 0 of its concat slot, which silently cancels the
+        // adelay shifts and stacks all narrations at 0/N/2N — the F2 defect
+        // reproduced by the real ffmpeg fixture. amix preserves each track's
+        // real timeline position; normalize=0 keeps full loudness (default
+        // normalizes by 1/inputs, which would attenuate single-voice passages).
+        const padTo = Math.max(0.05, parseFloat(totalSec) - startMs / 1000).toFixed(3);
+        aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,afade=t=in:d=0.03,afade=t=out:st=${fadeOut}:d=0.03,apad=whole_dur=${padTo},adelay=${startMs}:all=1[ad${aIdx}]`);
         aIns.push(`[ad${aIdx}]`);
         aIdx++;
         sumPrev += win;
@@ -562,12 +577,12 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       if (aIns.length === 1) {
         audioMap = aIns[0].replace(/^\[|\]$/g, '');
       } else if (aIns.length > 1) {
-        audioFilter.push(`${aIns.join('')}concat=n=${aIns.length}:v=0:a=1,atrim=0:${totalSec}[aout]`);
+        audioFilter.push(`${aIns.join('')}amix=inputs=${aIns.length}:duration=longest:normalize=0,atrim=0:${totalSec}[aout]`);
         audioMap = '[aout]';
       }
     }
     return void (async()=>{
-      const fc = filter.concat(audioFilter).join(';');
+      const fc = [...filter, ...aParts, ...audioFilter].join(';');
       const args:string[] = [];
       inputs.forEach(i=>{ args.push('-i',i); });
       args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']');
