@@ -38,6 +38,11 @@ export interface CreativeEssence {
   audience?: string;
   /** Extracted offer/outcome ("20% off", "5 new templates"...), if found. */
   offer?: string;
+  /** RELAYED BENEFITS (F3, task da4ef0ed): the brief's concrete benefits as
+   *  FINISHED client copy — canonical phrases, never raw-brief bullet
+   *  fragments. Deterministic, stable order, deduped. The planner prompt gets
+   *  this list (via finishedEssenceBrief) so the narration can voice them. */
+  benefits?: string[];
   /** Normalized raw input (whitespace-collapsed). */
   raw: string;
   /** True when the brief was internal-sounding and needed rewriting. */
@@ -100,8 +105,14 @@ const AUDIENCE_MARKERS: RegExp[] = [
 ];
 
 /** Offer/outcome extraction: "20% off", "$15", "5 new templates", "free trial",
- *  "save time", "double your sales", "grow faster". */
+ *  "save time", "double your sales", "grow faster". Full-phrase offers are
+ *  matched FIRST so the stored offer is the COMPLETE phrase ("save time and
+ *  money", not the truncated "Save time" of the Oct 9 acceptance render). */
 const OFFER_MARKERS: RegExp[] = [
+  /\bsave\s+time\s+(?:and|&)\s+money\b/i,
+  /\bbuild\s+and\s+scale\s+(?:your\s+)?brands?\b/i,
+  /\b(?:stop|quit)\s+paying\s+for\s+single[- ]purpose\s+apps\b/i,
+  /\bsingle[- ]purpose\s+apps\b/i,
   /\b\d{1,3}\s?%\s?off\b/i,
   /\$\s?\d+(?:[.,]\d+)?\b/,
   /\bfree\s+(?:trial|consult|demo|template|resources?)\b/i,
@@ -109,6 +120,34 @@ const OFFER_MARKERS: RegExp[] = [
   /\bdouble\s+(?:your\s+)?(?:sales|revenue|growth|conversions?)\b/i,
   /\bgrow(?:ing)?\s+(?:your\s+)?(?:business|brand|audience|following)\b/i,
 ];
+
+/** BENEFIT RELAYS (F3, task da4ef0ed): the brief's concrete benefits relayed as
+ *  FINISHED client copy — canonical phrases, never raw-brief fragments. Each
+ *  entry carries the raw-brief marker(s) and the canonical finished phrase; a
+ *  benefit is relayed ONLY when its marker actually appears in the residue-
+ *  stripped brief. Stable order: creation/design → stop paying → save time →
+ *  build/scale → price. */
+const BENEFIT_RELAYS: { test: RegExp; relay: string }[] = [
+  { test: /\ball[-\s]?in[-\s]?one[^.]{0,60}(?:creation|editing|design)/i, relay: 'all-in-one creation, editing and design' },
+  { test: /\b(single[- ]purpose|credit apps|wasting money on credit)\b/i, relay: 'stop paying for single-purpose apps' },
+  { test: /\bsave\s+time\s+(?:and|&|,)?\s*(?:money)?\b/i, relay: 'save time and money' },
+  { test: /\bbuild(?:ing)?\s+and\s+scale\b/i, relay: 'build and scale your brand' },
+  { test: /\bintroduc(?:tory|tion)\s+price\b/i, relay: 'introductory price' },
+];
+
+/** Deterministically extract the brief's concrete benefits as FINISHED client
+ *  copy (canonical relay phrases). Pure — no LLM. Used to build the finished
+ *  essence brief (created via finishedEssenceBrief) so the planner prompt
+ *  carries the benefits to voice, and the component inventory carries them so
+ *  planning QC forces them into the plan. */
+export function extractRelayedBenefits(raw: string): string[] {
+  const t = normalize(String(raw || ''));
+  const out: string[] = [];
+  for (const { test, relay } of BENEFIT_RELAYS) {
+    if (test.test(t)) out.push(relay);
+  }
+  return out;
+}
 
 /** Collapse whitespace + fold fancy quotes, for matching and for output. */
 function normalize(text: unknown): string {
@@ -166,6 +205,10 @@ const DEGENERATE_ESSENCE_RESIDUE = /(?:^|\W)(?:cta|call\s+to\s+action)(?:\W|$)|(
 /** A subject (or product) longer than this is raw-brief residue, never a
  *  finished subject (task 316d1a2f: subject > ~200 chars => degenerate). */
 export const ESSENCE_MAX_CHARS = 200;
+/** Text-speak "ur" = "your" — a possessive opener that must never start a
+ *  product capture (Oct 9 acceptance: "your go to platform…" was captured
+ *  mid-word as "ur go" → subject "EmpireLaunch AI — the ur go"). */
+const POSSESSIVE_OPENERS = /(?:ur|your|our|my|their)\b/i;
 /** True when the extracted subject/product is NOT compact — the raw brief was
  *  echoed verbatim (whole-brief subject, or residue markers like "CTA-"/"Ok"/
  *  "mood" leaked through). Triggers the compact rewrite fallback. */
@@ -174,6 +217,10 @@ export function isDegenerateEssenceOutput(subject: string, product?: string): bo
   const p = String(product || '');
   if (s.length > ESSENCE_MAX_CHARS) return true;
   if (DEGENERATE_ESSENCE_RESIDUE.test(s)) return true;
+  // OWNER-OCT-9: a subject that STILL carries a possessive-opener fragment
+  // ("— the ur go", "— the Your Go") is degenerate by construction — the
+  // compact rewrite is required.
+  if (/(?:^|\W)(?:ur|your|our|my|their)\s+(?:go|own)\b/i.test(s)) return true;
   if (p.length > ESSENCE_MAX_CHARS) return true;
   if (p && DEGENERATE_ESSENCE_RESIDUE.test(p)) return true;
   return false;
@@ -198,12 +245,17 @@ export function buildCompactSubject(raw: string): string {
     // ("EmpireLaunch AI your go to platform") or capitalized possessive fragments
     // ("Your Go To platform") into the brand. Cut the brand at the first
     // possessive/stopword so the brand is the proper name only.
-    const BRAND_STOP = /^(?:your|our|my|their|go|to|the|a|an|and|for|is|are|was|were|platform|app|tool|service|suite)$/i;
+    const BRAND_STOP = /^(?:your|ur|our|my|their|go|to|the|a|an|and|for|is|are|was|were|platform|app|tool|service|suite)$/i;
     const brandC = brand.split(/\s+/).filter((w) => !BRAND_STOP.test(w)).join(' ');
     const brandFinal = brandC || brand;
     if (contentTokens(brandFinal) <= 6 && brandFinal.length <= 60) {
       const tail = t.slice((brandMatch.index ?? 0) + brandMatch[0].length);
-      const prodMatch = tail.match(/[—–\-]?\s*(?:the\s+)?(?!(?:your|our|my|their)\b)([a-z][a-z0-9'&.,\- ]{2,80}?)(?=\s+(?:built|for|designed|that|to|making|so|which)|\s*[.!?]|$)/i);
+      // OWNER-OCT-9 FIX: the product capture used to start ANYWHERE — including
+      // MID-WORD inside a possessive ("your go to platform…" matched at the "u"
+      // → product "ur go" → subject "EmpireLaunch AI — the ur go"). Require a
+      // NON-word char immediately before the capture start (word boundary), and
+      // block text-speak "ur" alongside your/our/my/their.
+      const prodMatch = tail.match(/[—–\-]?\s*(?:the\s+)?(?<![A-Za-z0-9])(?!(?:ur|your|our|my|their)\b)([a-z][a-z0-9'&.,\- ]{2,80}?)(?=\s+(?:built|for|designed|that|to|making|so|which)|\s*[.!?]|$)/i);
       if (prodMatch && prodMatch[1]) {
         // OWNER OCT 9 subject bug ("EmpireLaunch AI — the Your Go"): the capture
         // used to start on the lowercase inside a possessive ("Your" -> "our ..."),
@@ -211,21 +263,21 @@ export function buildCompactSubject(raw: string): string {
         // drop a leading possessive, normalize "go to"/"Go To" -> "go-to", and
         // refuse the subject if any bullet-fragment artifact survives.
         let prod = prodMatch[1].trim();
-        prod = prod.replace(/^(?:your|our|my|their)\s+/i, '').trim();
+        prod = prod.replace(/^(?:your|ur|our|my|their)\s+/i, '').trim();
         prod = prod.replace(/\bgo(?:\s+|-|—)*to\b/i, 'go-to').trim();
-        if (/(?:^|\s)(?:your|our|my|their)\s+go\b/i.test(prod)) prod = prod.replace(/(?:^|\s)(?:your|our|my|their)\s+/i, ' ').trim();
+        if (/(?:^|\s)(?:your|ur|our|my|their)\s+go\b/i.test(prod)) prod = prod.replace(/(?:^|\s)(?:your|ur|our|my|their)\s+/i, ' ').trim();
         if (/^for\s+/i.test(prod)) prod = prod.replace(/^for\s+/i, 'platform for ').trim();
         prod = prod.replace(/[—–\-]+$/g, '').trim();
         if (prod.length < 4 || /^go\b/i.test(prod)) return brand.length <= 60 ? brand : 'this all-in-one platform';
         const subject = `${brandFinal} — the ${prod}`;
-        if (contentTokens(subject) <= 12 && subject.length <= 160 && !/(?:— the )(?:your|our|my|their)\b/i.test(subject)) return subject;
+        if (contentTokens(subject) <= 12 && subject.length <= 160 && !/(?:— the )(?:ur|your|our|my|their)\b/i.test(subject)) return subject;
       }
       if (brandFinal.length <= 60) return brandFinal;
     }
   }
   const firstSentence = (t.split(/(?<=[.!?])\s+/)[0] || t).trim();
   const lead = firstSentence.split(/\s+/).slice(0, 8).join(' ').replace(/\bgo(?:\s+|-)*to\b/i, 'go-to');
-  if (lead.length >= 4 && lead.length <= 80 && contentTokens(lead) <= 8 && !/^(?:the|a|an|this|that|it|we|i|you|they)\s*$/i.test(lead) && !/\b(?:your|our|my|their)\s+[a-z]/i.test(lead)) return lead;
+  if (lead.length >= 4 && lead.length <= 80 && contentTokens(lead) <= 8 && !/^(?:the|a|an|this|that|it|we|i|you|they)\s*$/i.test(lead) && !/\b(?:your|ur|our|my|their)\s+[a-z]/i.test(lead)) return lead;
   return 'this all-in-one platform';
 }
 /** HARD NARRATION LENGTH CAP (task 316d1a2f): a ~6s scene slot can carry only
@@ -464,7 +516,28 @@ export function extractCreativeEssence(rawBrief: string): CreativeEssence {
     product = compact;
     degenerateFallback = true;
   }
-  return { subject, product: hasProduct ? product : undefined, audience, offer, raw: full, internal, degenerateFallback };
+  // F3 (task da4ef0ed): relay the brief's concrete benefits as FINISHED client
+  // copy (canonical phrases, stable order) so the planner can voice them. Do
+  // NOT mutate `offer` from benefits — `offer` feeds the Twin pitch, where the
+  // owner's hygiene guarantee forbids carrying ANY text the owner typed (Oct 8:
+  // "Introductory price" reached the twin pitch via a benefits->offer fallback).
+  // Full-phrase OFFER_MARKERS already make `offer` rich ("Save time and money").
+  const benefits = extractRelayedBenefits(full);
+  return { subject, product: hasProduct ? product : undefined, audience, offer, benefits, raw: full, internal, degenerateFallback };
+}
+
+/** FINISHED ESSENCE BRIEF (F3, task da4ef0ed): the subject + every relayed
+ *  benefit as polished client copy — the exact text the planner should voice.
+ *  Used as the planner's `cleanIdea` when the typed brief is internal-sounding
+ *  or degenerate (the old code passed ONLY the bare subject, so concrete
+ *  benefits — all-in-one creation/editing/design, stop paying for single-
+ *  purpose apps, save time & money, build & scale your brand, introductory
+ *  price — never reached the narration). Finished sentences only. */
+export function finishedEssenceBrief(essence: CreativeEssence): string {
+  const parts: string[] = [`${cap(essence.subject)}.`];
+  for (const b of essence.benefits ?? []) parts.push(cap(b) + '.');
+  if (essence.audience) parts.push(`It's built for ${essence.audience}.`);
+  return parts.join(' ');
 }
 
 /** Finished-subject view used by compactCreativeSubject (respects maxChars). */
@@ -575,6 +648,10 @@ export function transformTwinScriptToPitch(script: string): string {
   const t = String(script || '').replace(/\s+/g, ' ').trim();
   if (!essence.internal && !essence.degenerateFallback && !isChatResidueText(t)) return normalize(script);
   const parts: string[] = [`This is ${essence.subject}.`];
+  // TWIN HYGIENE (owner Oct 8): the twin's pitch must NEVER carry text the owner
+  // typed (raw-brief echo). Only the single extracted offer is allowed — it is
+  // the finished client-facing phrase, never a bullet/list recital. The F3
+  // benefit relay lives on the PLANNER route (finishedEssenceBrief), not here.
   if (essence.offer) {
     parts.push(`${cap(essence.offer)} — right now.`);
   } else {
