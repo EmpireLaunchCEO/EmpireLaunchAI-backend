@@ -7,7 +7,14 @@ import { resolveStudioReasoner } from '../utils/resolveModel.js';
 import { usageService } from './usageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
-import { transformTwinScriptToPitch, isInternalBriefEcho } from './creativeTransformation.js';
+import { db, schema } from '../db/index.js';
+import {
+  renderClip, concatClips, normalizePlanTimeBudget, resolveNarrationRoles,
+  enforceAvatarConsistency, verifySellingPointsSpoken, injectSellingPointsIntoNarration,
+  stripBenefitTextFromVisualPrompts, deliveredVideoDuration, deliveredVideoDurationSeconds,
+  generateSceneAudio, type SceneScript,
+} from './sceneVideoPipelineService.js';
+import { transformTwinScriptToPitch, isInternalBriefEcho, extractCreativeEssence, finishedEssenceSentences } from './creativeTransformation.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -22,7 +29,8 @@ export interface TwinCreationRequest {
   voiceStyle?: string; // 'natural' | 'energetic' | 'calm'
   voiceId?: string;
   mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
-  duration?: number;   // requested twin video length (seconds); honored via frame pacing (zero-video-API Faceless-style engine — Twin never uses a video API)
+  voice?: 'female' | 'male' | 'none'; // shared-pipeline voice contract (mode-parity re-plumb): 'none' = silent by design; undefined = auto (nova)
+  duration?: number;   // requested twin video length (seconds); honored via segment planning (zero-video-API Faceless-style engine — Twin never uses a video API)
 }
 
 export interface CinemaAsset {
@@ -48,6 +56,184 @@ export interface FacialDNA {
   distinctiveFeatures: string[];
 }
 
+// ─── Shared-Pipeline Twin Helpers (owner Oct 11 "fix twin" re-plumb) ─────────
+// The Neural Twin now plans through the SAME deterministic gauntlet the
+// faceless/scene path runs in createProject (mode-parity audit d390c9b9): exact
+// dissolve-compensated time budget, F4 narration guarantee (every finished-essence
+// selling point SPOKEN), avatar-role/consistency enforcement, and the F4 visual ban
+// (benefit text never in a visualPrompt). Pure + zero paid calls — tests are the dry-run.
+
+const TWIN_MAX_DURATION = 30;
+const TWIN_MIN_DURATION = 5;
+
+function clampTwin(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/** Every twin segment's CLEAN talking-head visual description (F1 no-text): it
+ *  must never contain narration, benefit or script text — only the avatar + motion.
+ *  No "SHOW THIS BEING DONE" app directive either: a talking head IS the action. */
+export function buildTwinVisualPrompt(emotion: string): string {
+  const e = String(emotion || 'confident').toLowerCase();
+  return `The same talking-head AI avatar built from the user's photo with a ${e} expression, facing the camera and speaking, subtle mouth movement, studio-lit dark background, vertical 9:16 frame — no text, no captions, no on-screen words.`;
+}
+
+/** The ONE stable avatar look shared verbatim by every avatar-dialogue segment. */
+const TWIN_AVATAR_LOOK = "the same talking-head AI avatar built from the user's photo";
+
+/** Split a finished twin script into `k` sentence-aligned narration segments
+ *  (never mid-sentence when avoidable; word-split fallback keeps small scripts
+ *  from collapsing to an empty segment). Deterministic, pure. */
+export function splitTwinScript(script: string, k: number): string[] {
+  const clean = String(script || '').replace(/\s+/g, ' ').trim();
+  const kk = clampTwin(k, 1, 12);
+  const words = clean ? clean.split(' ') : [];
+  if (!words.length) return Array.from({ length: kk }, () => '');
+  const perBucket = Math.max(1, Math.ceil(words.length / kk));
+  // Sentence-aware greedy: walk words, close a bucket at a sentence boundary when it
+  // has >= perBucket words; hard-close at 2x to keep bucket lengths bounded.
+  const buckets: string[][] = [];
+  let cur: string[] = [];
+  const close = () => { if (cur.length) { buckets.push(cur); cur = []; } };
+  for (let i = 0; i < words.length; i++) {
+    cur.push(words[i]);
+    const endsSentence = /\.$/.test(words[i] || '') || /[!?]$/.test(words[i] || '');
+    const wantMore = buckets.length + 1 < kk;
+    if (endsSentence && cur.length >= perBucket && wantMore) close();
+    else if (cur.length >= perBucket * 2 && wantMore) close();
+  }
+  close();
+  // Merge/regrid: too many buckets -> join trailing; use last bucket for the tail.
+  const out: string[] = [];
+  for (const b of buckets) {
+    if (out.length < kk) out.push(b.join(' '));
+    else out[out.length - 1] = [out[out.length - 1], b.join(' ')].filter(Boolean).join(' ');
+  }
+  while (out.length < kk) out.push('');
+  return out.slice(0, kk);
+}
+
+/** TONE for GPT-Audio from the twin's legacy voiceStyle + owner-locked mood. */
+export function toneFromTwinRequest(voiceStyle?: string, mood?: string): 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' {
+  const m = String(mood || '').toLowerCase();
+  if (m === 'serious' || m === 'calm' || m === 'warm') return m as 'serious' | 'calm' | 'warm';
+  if (m === 'energetic') return 'enthusiastic';
+  const v = String(voiceStyle || '').toLowerCase();
+  if (v === 'energetic') return 'enthusiastic';
+  if (v === 'calm') return 'calm';
+  return 'auto';
+}
+
+/** Build the twin's SceneScript[] plan through the SHARED gauntlet — the exact
+ *  sequence createProject applies to faceless/scene (F4 → roles/avatar → visual
+ *  strip), with twin's narration = the transformed finished script's sentences.
+ *  Returns the plan + the auditable F4/avatar/duration artifacts. Pure, zero API. */
+export function buildTwinPlan(
+  safeScript: string,
+  durationTarget: number,
+  voice?: 'female' | 'male' | 'none',
+): {
+  plan: SceneScript[];
+  sellingPoints: string[];
+  f4Injected: string[];
+  f4StillMissing: string[];
+  narrationRoles: string[];
+  avatarLook: string;
+  delivered: number;
+  deliveredSeconds: number;
+} {
+  const duration = clampTwin(Math.round(Number(durationTarget) || 30), TWIN_MIN_DURATION, TWIN_MAX_DURATION);
+  const segmentCount = clampTwin(Math.round(duration / 6), 1, 10); // ~1 segment / 6s (mirrors faceless)
+  const segments = splitTwinScript(safeScript, segmentCount);
+  const voiced = (voice ?? '') !== 'none';
+  const sellingPoints = finishedEssenceSentences(extractCreativeEssence(safeScript)).filter((c) => String(c || '').trim().length > 0);
+  const base: SceneScript[] = segments.map((narration, i) => ({
+    sceneNumber: i + 1,
+    duration: 1,
+    visualType: 'still' as const,
+    narration,
+    visualPrompt: buildTwinVisualPrompt('confident'),
+    narrationRole: 'avatar-dialogue' as const,
+  }));
+  // Time budget FIRST (same order as createProject) so F4 cap math sees final durations.
+  const timed = normalizePlanTimeBudget(base, duration, { dissolveCompensate: true });
+  const plan: SceneScript[] = timed.map((s) => ({ ...s }));
+  // F4: every relayed selling point must be SPOKEN (role-agnostic injector).
+  let f4Injected: string[] = [];
+  let f4StillMissing: string[] = [];
+  if (voiced && sellingPoints.length) {
+    const inj = injectSellingPointsIntoNarration(plan, sellingPoints);
+    f4Injected = inj.injected;
+    f4StillMissing = inj.stillMissing;
+    plan.splice(0, plan.length, ...inj.script);
+  } else {
+    f4StillMissing = verifySellingPointsSpoken(plan, sellingPoints).missing;
+  }
+  // CONTENT DIRECTION: avatar-dialogue role enforcement + SAME-avatar consistency
+  // (owner avatar-voice rule v3 — the twin IS a talking avatar in every segment).
+  const withRoles = resolveNarrationRoles(plan);
+  const avatarPass = enforceAvatarConsistency(withRoles, TWIN_AVATAR_LOOK);
+  plan.splice(0, plan.length, ...avatarPass.script);
+  const narrationRoles = plan.map((s) => s.narrationRole || 'narrator');
+  // F4 VISUAL BAN (F1): benefit/claim text must never survive in any visualPrompt.
+  // (actionBackstop intentionally NOT applied — talking-head frames are the avatar
+  //  speaking on camera; an app-directed action directive would misdescribe frames.)
+  const visual = voiced
+    ? stripBenefitTextFromVisualPrompts(plan, sellingPoints.filter((c) => !/^EmpireLaunch AI\.$/i.test(c)))
+    : { script: plan, strippedScenes: [] };
+  plan.splice(0, plan.length, ...visual.script);
+  return {
+    plan,
+    sellingPoints,
+    f4Injected,
+    f4StillMissing,
+    narrationRoles,
+    avatarLook: avatarPass.avatarLook || '',
+    delivered: deliveredVideoDuration(plan),
+    deliveredSeconds: deliveredVideoDurationSeconds(plan),
+  };
+}
+
+/** F1 NO-TEXT talking-head SVG (owner Oct 11 — closes audit GAP3): the old
+ *  buildTalkingHeadSvg baked the <text> script line AND an emotion label into
+ *  every frame. This frame has NO <text> elements at all — no captions, no
+ *  emotion words. Emotion drives visual styling only (lip color / mouth height). */
+export function buildTwinFrameSvg(dna: FacialDNA, emotion: string, mouthOpen: number): string {
+  const bgColor = '#1a1a2e';
+  const skinColor = twinSkinToneToHex(dna.skinTone);
+  const lipColor = emotion === 'happy' ? '#e74c3c' : '#c0392b';
+  const eyeColor = dna.eyeColor === 'blue' ? '#3498db' : dna.eyeColor === 'green' ? '#27ae60' : '#5d4037';
+  const mouthH = Math.round(10 + mouthOpen * 30);
+
+  return `<svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1080" height="1920" fill="${bgColor}"/>
+      <!-- Head -->
+      <ellipse cx="540" cy="750" rx="200" ry="250" fill="${skinColor}" stroke="#d5a885" stroke-width="2"/>
+      <!-- Hair -->
+      <ellipse cx="540" cy="${dna.hairStyle === 'curly' ? '620' : '600'}" rx="210" ry="${dna.hairStyle === 'curly' ? '180' : '150'}" fill="${dna.hairColor}"/>
+      <!-- Eyes -->
+      <ellipse cx="480" cy="700" rx="25" ry="15" fill="white"/>
+      <ellipse cx="600" cy="700" rx="25" ry="15" fill="white"/>
+      <circle cx="480" cy="700" r="10" fill="${eyeColor}"/>
+      <circle cx="600" cy="700" r="10" fill="${eyeColor}"/>
+      <!-- Eyebrows -->
+      <path d="M455 670 Q480 660 505 670" stroke="${dna.eyebrowShape === 'arched' ? '#333' : '#555'}" stroke-width="3" fill="none"/>
+      <path d="M575 670 Q600 660 625 670" stroke="${dna.eyebrowShape === 'arched' ? '#333' : '#555'}" stroke-width="3" fill="none"/>
+      <!-- Nose -->
+      <path d="M540 715 L530 750 Q540 755 550 750 Z" fill="${skinColor}" stroke="#d5a885" stroke-width="1"/>
+      <!-- Mouth (lip-sync, visual only — NO text anywhere in this frame) -->
+      <ellipse cx="540" cy="810" rx="40" ry="${mouthH}" fill="${lipColor}" stroke="#8e1f1a" stroke-width="1"/>
+    </svg>`;
+}
+
+function twinSkinToneToHex(tone: string): string {
+  const map: Record<string, string> = {
+    fair: '#f5d0c5', medium: '#e8b89a', olive: '#c99a7b',
+    brown: '#8d6e53', dark: '#5c3a2e',
+  };
+  return map[String(tone || '').toLowerCase()] || '#e8b89a';
+}
+
 // ─── Cinema Engine Service ──────────────────────────────────────────────────
 
 export class CinemaEngineService {
@@ -71,7 +257,7 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration, voice } = request;
     // CREATIVE TRANSFORMATION (owner Sep 28): the twin's script must be a FINISHED
     // pitch to potential clients, never a recital of the owner's typed brief or
     // the chat's internal structure. transformTwinScriptToPitch rewrites
@@ -115,20 +301,77 @@ export class CinemaEngineService {
       // zero video API and was the pre-existing fallback. Cost ledger never sees
       // a Sora spend for Twin.
       const lipSyncData = await this.generateLipSyncReasoning(safeScript);
-      const framePaths = await this.generateTalkingFrames(
-        facialDna, lipSyncData, safeScript, this.cinemaDir, assetId, duration
+      // SHARED-PIPELINE RE-PLUMB (owner Oct 11 — "yes, fix twin"): the twin now
+      // runs through the SAME deterministic plan gauntlet + TTS + assembler as
+      // Faceless/Scene (mode-parity audit d390c9b9). GAP2 (zero F4 / zero TTS),
+      // GAP3 (baked <text> frames) and GAP4 (silent compose) are closed here.
+      const twinVoice: 'female' | 'male' | 'none' | undefined =
+        voice === 'female' || voice === 'male' || voice === 'none' ? voice : undefined;
+      const twinTone = toneFromTwinRequest(voiceStyle, mood);
+      const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+        ? Math.min(duration, 30)
+        : Math.max(5, Math.min(30, Math.round(String(safeScript || '').trim().split(/\s+/).filter(Boolean).length / 2.5)));
+      const twinPlan = buildTwinPlan(safeScript, targetDuration, twinVoice);
+      const framePaths = await this.generateTalkingFrames(facialDna, lipSyncData, twinPlan.plan, this.cinemaDir, assetId);
+      const audioPaths: string[] = [];
+      if (twinVoice !== 'none') {
+        for (let i = 0; i < twinPlan.plan.length; i++) {
+          const seg = twinPlan.plan[i];
+          try {
+            const a = await generateSceneAudio(seg.narration, userId, `twin_${assetId}_${i}`, twinVoice, twinTone);
+            audioPaths.push(a.localPath);
+          } catch (audioErr: any) {
+            console.warn(`[CinemaEngine] Twin TTS failed for segment ${i}: ${audioErr?.message}`);
+            audioPaths.push('');
+          }
+        }
+      }
+      await this.composeTwinVideo(
+        twinPlan.plan,
+        framePaths,
+        audioPaths.length === twinPlan.plan.length ? audioPaths : null,
+        outputPath,
       );
-      await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
+      const twinDelivered = twinPlan.delivered;
+      const twinDeliveredSeconds = twinPlan.deliveredSeconds;
 
       await generateTwinVariants();
       // Upload to R2 if available
       const r2Result = await r2Storage.uploadLocalFile(outputPath, userId, 'cinema/twins', 'video/mp4');
 
-      await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'faceless-engine' });
-
-      for (const fp of framePaths) {
-        try { fs.unlinkSync(fp); } catch {}
+      // MODE-PARITY (PR #114 contract): twin now persists a REAL video_projects row
+      // with INTEGER-safe total_duration (deliveredVideoDurationSeconds — 29.8 -> 30)
+      // and the precise delivered length in metadata.deliveredDurationSeconds, the
+      // SAME contract as the faceless/scene shared insert (closes audit GAP1).
+      try {
+        await db.insert(schema.videoProjects).values({
+          id: uuidv4(),
+          userId,
+          title: `Neural Twin - ${path.basename(outputPath)}`,
+          status: 'completed',
+          totalDuration: twinDeliveredSeconds,
+          sceneCount: twinPlan.plan.length,
+          script: twinPlan.plan as any,
+          finalVideoUrl: r2Result.url || `/assets/cinema/renders/twin_${assetId}.mp4`,
+          thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
+          metadata: {
+            mode: 'twin',
+            voice: twinVoice || 'auto',
+            tone: twinTone,
+            deliveredDurationSeconds: twinDelivered,
+            f4: { narrationInjected: twinPlan.f4Injected, narrationStillMissing: twinPlan.f4StillMissing },
+            sellingPoints: twinPlan.sellingPoints,
+            narrationRoles: twinPlan.narrationRoles,
+            avatarLook: twinPlan.avatarLook || undefined,
+            scriptTransformed: isInternalBriefEcho(script),
+            engine: 'faceless-engine (talking-head · shared F4/F1/TTS pipeline)',
+          },
+        });
+      } catch (projectErr: any) {
+        console.warn('[CinemaEngine] Twin video_projects insert failed:', projectErr?.message);
       }
+
+      await usageService.logUsage(userId, 'neural_twin', { assetId, scriptLength: script.length, engine: 'faceless-engine' });
 
       return {
         id: assetId,
@@ -141,7 +384,16 @@ export class CinemaEngineService {
           scriptTransformed: isInternalBriefEcho(script),
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
-          engine: 'faceless-engine (frame pipeline · zero video API, no Sora/Veo)',
+          engine: 'faceless-engine (talking-head · shared F4/F1/TTS pipeline)',
+          mode: 'twin',
+          voice: twinVoice || 'auto',
+          tone: twinTone,
+          durationSeconds: twinDeliveredSeconds,
+          deliveredDurationSeconds: twinDelivered,
+          f4: { narrationInjected: twinPlan.f4Injected, narrationStillMissing: twinPlan.f4StillMissing },
+          sellingPoints: twinPlan.sellingPoints,
+          narrationRoles: twinPlan.narrationRoles,
+          avatarLook: twinPlan.avatarLook || undefined,
         },
         variants: exportVariants,
       };
@@ -314,31 +566,22 @@ export class CinemaEngineService {
   private async generateTalkingFrames(
     facialDna: FacialDNA,
     lipSyncData: any,
-    script: string,
+    plan: SceneScript[],
     outputDir: string,
-    assetId: string,
-    duration?: number
+    assetId: string
   ): Promise<string[]> {
     const framePaths: string[] = [];
-    // When a target duration is requested, derive the frame count at constant 2fps so
-    // the final video reaches ~`duration` seconds. Otherwise keep the original
-    // script-length estimate (~5s).
-    const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-      ? Math.min(duration, 30) // cap at 30s (max allowed Neural Twin duration; bounds render cost)
-      : (lipSyncData.estimatedDuration || 5);
-    const totalFrames = Math.max(4, Math.ceil(targetDuration * 2)); // 2fps
-
-    // Generate frame descriptions for different parts of the script
-    const emotions = lipSyncData.keyEmotions || ['confident'];
-    const scriptParts = this.splitScript(script, totalFrames);
-
-    for (let i = 0; i < totalFrames; i++) {
+    // ONE 1080x1920 frame per PLANNED SEGMENT (plan = shared-pipeline SceneScript[]),
+    // so frame count == narration count == plan duration math. F1 NO-TEXT CONTRACT:
+    // buildTwinFrameSvg has NO <text> elements — no script line, no emotion label,
+    // no captions (audit GAP3 closed). Emotion drives VISUAL styling only (lip
+    // color / mouth height), never text.
+    const emotions = lipSyncData.keyEmotions || ['confident', 'warm'];
+    for (let i = 0; i < plan.length; i++) {
       const emotion = emotions[i % emotions.length];
-      const mouthOpen = 0.1 + (Math.sin(i * 0.5) * 0.3 + 0.3); // Simulate lip movement
-
-      // Create an SVG-based talking head frame
-      const svg = this.buildTalkingHeadSvg(facialDna, emotion, mouthOpen, scriptParts[i] || '');
-      const framePath = path.join(outputDir, `frame_${assetId}_${i.toString().padStart(3, '0')}.png`);
+      const mouthOpen = 0.25 + 0.15 * Math.sin(i * 0.9); // subtle mouth variation (visual only)
+      const svg = buildTwinFrameSvg(facialDna, emotion, mouthOpen);
+      const framePath = path.join(outputDir, `twin_${assetId}_seg${String(i).padStart(2, '0')}.png`);
 
       await sharp(Buffer.from(svg))
         .resize(1080, 1920)
@@ -353,99 +596,36 @@ export class CinemaEngineService {
   /**
    * Compose talking head frames into video using FFmpeg.
    */
-  private async composeNeuralTwinVideo(
+  private async composeTwinVideo(
+    plan: SceneScript[],
     framePaths: string[],
-    outputPath: string,
-    lipSyncData: any,
-    duration?: number
+    audioPaths: string[] | null,
+    outputPath: string
   ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const command = ffmpeg();
-
-      // Add each frame as input with 0.5s duration
-      framePaths.forEach(fp => {
-        command.input(fp).inputOptions(['-framerate', '1/0.5']);
-      });
-
-      // When a target duration is requested, pace output so the composed length is
-      // ~`duration` (frame count already sized for it); otherwise keep the original
-      // script-length estimate.
-      const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-        ? Math.min(duration, 30)
-        : (lipSyncData.estimatedDuration || 5);
-      const fps = Math.max(1, Math.floor(framePaths.length / targetDuration));
-
-      command
-        .outputOptions([
-          '-c:v', 'libx264',
-          '-preset', 'medium',
-          '-crf', '23',
-          '-pix_fmt', 'yuv420p',
-          '-r', `${fps}`,
-        ])
-        .on('end', () => resolve())
-        .on('error', reject)
-        .save(outputPath);
-    });
-  }
-
-  /**
-   * Build an SVG talking head from facial DNA parameters.
-   */
-  private buildTalkingHeadSvg(dna: FacialDNA, emotion: string, mouthOpen: number, scriptLine: string): string {
-    const bgColor = '#1a1a2e';
-    const skinColor = this.skinToneToHex(dna.skinTone);
-    const lipColor = emotion === 'happy' ? '#e74c3c' : '#c0392b';
-    const eyeColor = dna.eyeColor === 'blue' ? '#3498db' : dna.eyeColor === 'green' ? '#27ae60' : '#5d4037';
-    const mouthH = Math.round(10 + mouthOpen * 30);
-
-    return `<svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg">
-      <rect width="1080" height="1920" fill="${bgColor}"/>
-      <!-- Head -->
-      <ellipse cx="540" cy="750" rx="200" ry="250" fill="${skinColor}" stroke="#d5a885" stroke-width="2"/>
-      <!-- Hair -->
-      <ellipse cx="540" cy="${dna.hairStyle === 'curly' ? '620' : '600'}" rx="210" ry="${dna.hairStyle === 'curly' ? '180' : '150'}" fill="${dna.hairColor}"/>
-      <!-- Eyes -->
-      <ellipse cx="480" cy="700" rx="25" ry="15" fill="white"/>
-      <ellipse cx="600" cy="700" rx="25" ry="15" fill="white"/>
-      <circle cx="480" cy="700" r="10" fill="${eyeColor}"/>
-      <circle cx="600" cy="700" r="10" fill="${eyeColor}"/>
-      <!-- Eyebrows -->
-      <path d="M455 670 Q480 660 505 670" stroke="${dna.eyebrowShape === 'arched' ? '#333' : '#555'}" stroke-width="3" fill="none"/>
-      <path d="M575 670 Q600 660 625 670" stroke="${dna.eyebrowShape === 'arched' ? '#333' : '#555'}" stroke-width="3" fill="none"/>
-      <!-- Nose -->
-      <path d="M540 715 L530 750 Q540 755 550 750 Z" fill="${skinColor}" stroke="#d5a885" stroke-width="1"/>
-      <!-- Mouth (lip-sync) -->
-      <ellipse cx="540" cy="810" rx="40" ry="${mouthH}" fill="${lipColor}" stroke="#8e1f1a" stroke-width="1"/>
-      <!-- Emotion label -->
-      <text x="540" y="1050" text-anchor="middle" fill="white" font-size="24" font-family="Arial">${emotion.toUpperCase()}</text>
-      <!-- Script line -->
-      <text x="540" y="1150" text-anchor="middle" fill="#aaa" font-size="20" font-family="Arial" max-width="800">
-        ${this.escapeXml(scriptLine)}
-      </text>
-    </svg>`;
-  }
-
-  private skinToneToHex(tone: string): string {
-    const map: Record<string, string> = {
-      fair: '#f5d0c5', medium: '#e8b89a', olive: '#c99a7b',
-      brown: '#8d6e53', dark: '#5c3a2e',
-    };
-    return map[tone.toLowerCase()] || '#e8b89a';
-  }
-
-  private splitScript(script: string, parts: number): string[] {
-    const words = script.split(' ');
-    const wordsPerPart = Math.max(1, Math.ceil(words.length / parts));
-    const result: string[] = [];
-    for (let i = 0; i < parts; i++) {
-      result.push(words.slice(i * wordsPerPart, (i + 1) * wordsPerPart).join(' '));
+    // SHARED FACELESS ASSEMBLER (audit GAP4 closed): each segment is a still rendered
+    // with its own TTS narration via renderClip (audio fitted to the segment window),
+    // then the segments are dissolved together by concatClips' xfade + aParts/amix
+    // graph — EXACTLY the assembly faceless/scene use (PR #112/#114 duration math).
+    // voice:'none' passes audioPaths=null -> silent-by-design output (parity with
+    // shouldGenerateSceneNarration semantics).
+    const segClips: string[] = [];
+    const stem = path.basename(outputPath, '.mp4');
+    const workDir = path.join(this.cinemaDir, `twin_compose_${stem}`);
+    fs.mkdirSync(workDir, { recursive: true });
+    try {
+      for (let i = 0; i < plan.length; i++) {
+        const seg = plan[i];
+        const segClip = path.join(workDir, `seg${String(i).padStart(2, '0')}.mp4`);
+        const audio = audioPaths && audioPaths[i] ? audioPaths[i] : undefined;
+        await renderClip(framePaths[i], segClip, Math.max(1, seg.duration), audio);
+        segClips.push(segClip);
+      }
+      await concatClips(segClips, outputPath);
+    } finally {
+      for (const c of segClips) { try { fs.unlinkSync(c); } catch {} }
+      for (const p of framePaths) { try { fs.unlinkSync(p); } catch {} }
+      try { fs.rmdirSync(workDir); } catch {}
     }
-    return result;
-  }
-
-  private escapeXml(text: string): string {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   /**
