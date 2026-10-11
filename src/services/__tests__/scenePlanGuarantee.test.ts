@@ -16,6 +16,8 @@ import {
   verifyComponentsInScript,
   verifyArcCoverage,
   normalizePlanTimeBudget,
+  deliveredVideoDuration,
+  dissolveCompensatedSceneSum,
   type SceneScript,
 } from '../sceneVideoPipelineService.js';
 
@@ -182,4 +184,33 @@ test('verifyArcCoverage: the no-plan fallback arc satisfies all three stages (re
     scene(5, 6, `Cinematic closing shot: ${subject} final call-to-action`, `Ready to make the move? Tap the link in bio.`),
   ];
   assert.deepEqual(verifyArcCoverage(script), { hook: true, about: true, cta: true });
+});
+
+// ─── DISSOLVE-COMPENSATED SCENE BUDGET (owner Oct 10 — 26.8s-vs-30s defect) ──
+// Every seam is an 800ms xfade that overlaps adjacent scenes, so the assembled
+// file comes out 0.8*(n-1) seconds SHORT of the scene-sum. createProject now
+// normalizes scene durations to target + 0.8*(n-1) so the DELIVERED file lands
+// at the user's target. Empirically verified (ffmpeg 2x1s+0.8s xfade -> 1.2s).
+test('normalizePlanTimeBudget (dissolve-compensated): 5x6s @30s sums to 33 so the DELIVERED file lands at 29.8s (in 29.5-30.5)', () => {
+  const plan = [scene(1, 6, 'a'), scene(2, 6, 'b'), scene(3, 6, 'c'), scene(4, 6, 'd'), scene(5, 6, 'e')];
+  const out = normalizePlanTimeBudget(plan, 30, { dissolveCompensate: true });
+  assert.equal(out.reduce((a, s) => a + s.duration, 0), 33); // Math.round(30 + 0.8*4) = 33
+  const delivered = deliveredVideoDuration(out);
+  assert.equal(delivered, 29.8); // 33 - 3.2 overlaps; inside the 29.5-30.5 target band
+  assert.ok(delivered >= 29.5 && delivered <= 30.5, 'delivered length must land in the owner target band');
+});
+test('normalizePlanTimeBudget (dissolve-compensated): single scene is NOT compensated', () => {
+  const out = normalizePlanTimeBudget([scene(1, 6, 'a')], 30, { dissolveCompensate: true });
+  assert.equal(out.reduce((a, s) => a + s.duration, 0), 30);
+  assert.equal(deliveredVideoDuration(out), 30);
+});
+test('dissolve math reproduces AND fixes the prod defect: 5x6s un-compensated delivers 26.8s exactly', () => {
+  const plan = [scene(1, 6, 'a'), scene(2, 6, 'b'), scene(3, 6, 'c'), scene(4, 6, 'd'), scene(5, 6, 'e')];
+  // The Oct 10 acceptance re-render: planner summed 5x6s = 30, assembly xfade
+  // compressed by 4 x 0.8s -> measured 26.8s. The helper exposes the same math.
+  assert.equal(deliveredVideoDuration(plan), 26.8);
+  assert.equal(dissolveCompensatedSceneSum(30, 5), 33.2);
+  // Opt-out default keeps historical callers exact (no overlap assumed).
+  const exact = normalizePlanTimeBudget(plan, 30);
+  assert.equal(exact.reduce((a, s) => a + s.duration, 0), 30);
 });
