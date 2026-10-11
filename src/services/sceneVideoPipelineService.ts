@@ -13,7 +13,7 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
-import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief } from './creativeTransformation.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -1395,6 +1395,159 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   }
   return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory).missing, skippedResidue };
 }
+/** F4 LAUNCH-GATE (task 40c58f6a): narration-only verification of the SPOKEN
+ *  mandate. The Oct 10 acceptance render carried ALL 7 owner selling points in the
+ *  components arrays but ZERO of them in scene narrations (generic hook copy only)
+ *  — verifyComponentsInScript counts a phrase in a visualPrompt as "present", so
+ *  the old QC never caught it. This check looks ONLY at narration text: a relayed
+ *  selling point is only "spoken" when its finished sentence appears in ≥1 scene's
+ *  narration. Pure + cheap; never touches visualPrompts. */
+export function verifySellingPointsSpoken(script: SceneScript[], sellingPoints: string[]): { missing: string[] } {
+  const haystack = script.map(s => s.narration || '').join(' ').toLowerCase();
+  const missing = (sellingPoints ?? [])
+    .map(normalizeComponent)
+    .filter(c => c.length > 0 && !isChatResidueText(c) && !haystack.includes(c.toLowerCase()));
+  return { missing };
+}
+/** F4 LAUNCH-GATE (task 40c58f6a): deterministic NARRATION injection backstop —
+ *  the planner GUARANTEE (not just prompt words) that every relayed selling point
+ *  is SPOKEN. Mirrors injectMissingComponents' rotate-to-fit + audit shape, but
+ *  targets scene NARRATION (never a visualPrompt): any finished-essence sentence
+ *  absent from every narration is appended naturally to the right scene — hook/
+ *  subject positioning → scene 1, benefits → a middle scene (round-robin), CTA+
+ *  price → the FINAL scene — truncating the scene's generic narration at the SHORT
+ *  cap if needed but NEVER dropping the phrase, then re-verifying. Zero paid calls. */
+export function injectSellingPointsIntoNarration(script: SceneScript[], sellingPoints: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[] } {
+  const next = script.map(s => ({ ...s }));
+  if (!sellingPoints.length || !next.length) return { script: next, injected: [], stillMissing: verifySellingPointsSpoken(next, sellingPoints).missing };
+  const missing = verifySellingPointsSpoken(next, sellingPoints).missing;
+  if (!missing.length) return { script: next, injected: [], stillMissing: [] };
+  const injected: string[] = [];
+  const count = next.length;
+  const last = count - 1;
+  // Round-robin cursor for middle (benefit) scenes — distribute, never stack.
+  let midCursor = Math.max(1, Math.floor(count / 2));
+  const isHookish = (c: string) => /empirelaunch ai|go-to content creation platform|your go-to|introducing/i.test(c);
+    const isCtaPrice = (c: string) => /go to empirelaunchai|introductory price|\$\s?\d|sign up|link in bio|subscribe|follow|visit|shop now|order now|buy now|learn more|join us/i.test(c);
+  for (const c of missing) {
+    let target: number;
+    if (isCtaPrice(c)) target = last;
+    else if (isHookish(c)) target = 0;
+    else { target = midCursor; midCursor = (midCursor + 1) % Math.max(1, count - 1); if (midCursor === last) midCursor = Math.max(1, last - 1); }
+    const s = next[target];
+    s.narration = composeNarrationWithPhrase(s.narration, c, s.duration);
+    injected.push(c);
+  }
+  // REUSE THE SHORT-NARRATION HARD RULE: re-cap every scene so the cap is enforced
+  // on the post-injection plan (phrases survive because composeNarrationWithPhrase
+  // reserved their room before composing).
+  for (const s of next) s.narration = capNarrationForScene(s.narration, s.duration);
+  return { script: next, injected, stillMissing: verifySellingPointsSpoken(next, sellingPoints).missing };
+}
+/** Reserve room for a short finished sentence inside a scene's SHORT-narration
+ *  budget and append it — the phrase is NEVER dropped: the generic narration is
+ *  trimmed (word-boundary + sentence-boundary aware, mirroring capNarrationForScene)
+ *  only as far as needed so the finished phrase ALWAYS survives in full. */
+function composeNarrationWithPhrase(existing: string, phrase: string, durationSec = 6): string {
+  const p = capSentence(phrase);
+  const existingTrim = String(existing || '').replace(/\s+/g, ' ').trim();
+  if (!existingTrim) return p;
+  const measured = existingTrim + ' ' + p;
+  if (capNarrationForScene(measured, durationSec) === measured) return measured;
+  const dur = Math.max(2, Number(durationSec) || 6);
+  const maxWords = Math.max(8, Math.min(15, Math.round(dur * 2.5)));
+  const maxChars = Math.max(48, Math.min(120, Math.round(dur * 20)));
+  const pWords = countContentTokens(p);
+  const pChars = p.length;
+  // Budget the phrase FIRST -> the existing narration gets the leftover room.
+  const roomWords = Math.max(1, maxWords - pWords - 1);
+  const roomChars = Math.max(8, maxChars - pChars - 1);
+  const fit = capToRoom(existingTrim, roomWords, roomChars);
+  const candidate = fit ? `${fit} ${p}` : p;
+  return capNarrationForScene(candidate, durationSec);
+}
+/** Word-boundary + char-boundary + sentence-completeness trim to a custom room
+ *  (the SHORT rule's own word/char logic, but bounded by `roomWords`/`roomChars`
+ *  instead of the full per-second budget). Never cuts mid-word. */
+function capToRoom(text: string, roomWords: number, roomChars: number): string {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  const tokens = t.split(' ');
+  let keep = tokens.length;
+  let content = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (/[A-Za-z0-9]/.test(tokens[i])) content++;
+    if (content > roomWords) { keep = i; break; }
+  }
+  let out = tokens.slice(0, keep).join(' ').replace(/(?:\s+[—–-])+$/g, '').trim();
+  if (out.length > roomChars) {
+    const cut = out.slice(0, roomChars);
+    const ls = cut.lastIndexOf(' ');
+    out = ls > Math.floor(roomChars * 0.5) ? cut.slice(0, ls) : cut;
+  }
+  // SENTENCE-COMPLETENESS (mirror capNarrationForScene): end on a real boundary.
+  if (!/[.!?](?:['\u201c\u201d\u2019"])?\s*$/.test(out)) {
+    const prefix = out.replace(/[—–\-]+$/g, '').trim();
+    let cutAt = -1;
+    const re = /[.!?](?:['\u201c\u201d\u2019"])?(?=\s+|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(prefix)) !== null) {
+      const end = (m.index ?? 0) + m[0].length;
+      if (end <= prefix.length) cutAt = end;
+    }
+    out = cutAt > 0 ? prefix.slice(0, cutAt).trim() : prefix.trim();
+  }
+  return out;
+}
+function countContentTokens(s: string): number {
+  return String(s || '').split(' ').filter(t => /[A-Za-z0-9]/.test(t)).length;
+}
+function capSentence(s: string): string {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  if (!t) return t;
+  const c = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(c) ? c : `${c}.`;
+}
+/** F4 LAUNCH-GATE (task 40c58f6a): post-plan VISUAL-PROMPT SANITIZER — a HARD BAN
+ *  on benefit/claim phrasing inside visualPrompts, enforced deterministically after
+ *  the planner (and even after injectMissingComponents/action backstops) so NO
+ *  launch-gate render can ever paint the owner's benefit list into stills again
+ *  (the Oct 10 render dumped all 7 verbatim into scene-1's visualPrompt). Strips
+ *  each banned finished phrase (with the surrounding " — " / "-" separators the
+ *  planner used) from every visualPrompt and re-joins cleanly; imagery-only
+ *  prompts (subject/action words) are untouched. Pure + cheap, returns the scenes
+ *  it cleaned for audit. */
+export function stripBenefitTextFromVisualPrompts(script: SceneScript[], bannedPhrases: string[]): { script: SceneScript[]; strippedScenes: number[] } {
+  const next = script.map(s => ({ ...s }));
+  const banned = (bannedPhrases ?? []).map(normalizeComponent).filter(Boolean);
+  if (!banned.length) return { script: next, strippedScenes: [] };
+  const strippedScenes: number[] = [];
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const s of next) {
+    const before = String(s.visualPrompt || '');
+    if (!before.trim()) continue;
+    let v = before;
+    // 1) Bullet form: " — phrase." / " - phrase" (the acceptance failure mode).
+    for (const b of banned) {
+      v = v.replace(new RegExp(`\\s*[—–-]\\s*${esc(b)}(\\.)?(?=\\s*[—–-]|\\s*$|[,;)])`, 'gi'), ' ');
+    }
+    // 2) Bare phrase mid-prose.
+    for (const b of banned) {
+      v = v.replace(new RegExp(`\\b${esc(b)}(\\.)?(?=\\s|\\b|$)`, 'gi'), ' ');
+    }
+    // Cleanup: collapse " — — " seams, double spaces, stray separators, trim.
+    v = v.replace(/\s*[—–-]\s*[—–-]+\s*/g, ' — ')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\s*[—–-]\s*$/g, '')
+      .replace(/^\s*[—–-]\s*/g, '')
+      .replace(/,\s*$/g, '')
+      .trim();
+    if (v !== before) strippedScenes.push(s.sceneNumber);
+    if (!v) v = 'Cinematic establishing shot of the subject, soft natural light, depth of field.';
+    s.visualPrompt = /[.!?]$/.test(v) ? v : `${v}.`;
+  }
+  return { script: next, strippedScenes };
+}
 /** Structural story-arc check: hook in the first ~25% of scenes, 'what it's
  *  about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
 export function verifyArcCoverage(script: SceneScript[]): ArcFlags {
@@ -1590,7 +1743,7 @@ export function buildPlannerAvatarSection(): string {
 export function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFlags, extras: { avatarRoleViolations: number[]; narrationAbstract: number[] } = { avatarRoleViolations: [], narrationAbstract: [] }): string {
   const parts: string[] = [];
   if (missingComponents.length > 0) {
-    parts.push(`MISSING RELAYED COMPONENTS — each of these MUST appear (verbatim, or clearly referencing the same thing) in at least one scene's visualPrompt or narration: ${missingComponents.map(c => `"${c}"`).join(', ')}.`);
+    parts.push(`MISSING SPOKEN COMPONENTS — each of these MUST be HEARD in at least one scene's narration (the voiceover reads it out loud): ${missingComponents.map(c => `"${c}"`).join(', ')}. Never satisfy this by painting them into a visualPrompt.`);
   }
   if (!arcFlags.hook) parts.push('MISSING ARC STAGE — HOOK: the first ~25% of scenes must open with the hook / attention-grabber (wording like "opening", "introducing", establishing shot of the subject).');
   if (!arcFlags.about) parts.push('MISSING ARC STAGE — ABOUT: the middle ~50% must say what the video is about (the essentials / key benefit / how it works of the subject).');
@@ -1609,12 +1762,12 @@ function runPlanQC(script: SceneScript[], inventory: string[]): { missingCompone
   return { missingComponents: verifyComponentsInScript(script, inventory).missing, arcFlags: verifyArcCoverage(script) };
 }
 /** COMPONENTS INVENTORY section injected into the planner prompt. */
-function buildPlannerComponentsSection(inventory: string[], voice?: 'female' | 'male' | 'none'): string {
+export function buildPlannerComponentsSection(inventory: string[], voice?: 'female' | 'male' | 'none'): string {
   if (!inventory.length) return '';
   const list = inventory.map((c, i) => `${i + 1}. "${c}"`).join('\n');
   const narrationRule = voice === 'none'
     ? ' There is NO voiceover (silent video), so every component MUST appear in a scene\'s visualPrompt — the narration field will NOT be spoken.'
-    : ' Every component MUST appear in at least one scene — in its visualPrompt or its narration.';
+    : ' F4 HARD RULE (owner launch-gate): every component MUST be SPOKEN — the viewer must HEAR it, so place the exact finished wording inside at least one scene\'s narration (the voiceover). NEVER put component/benefit/claim text into a visualPrompt — visualPrompts describe IMAGERY ONLY (no bullets, no painted lists, no claim captions in the stills).';
   return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. OWNER-OCT-8: these items are ALREADY FINISHED client-facing copy — never quote the user's raw typed brief, never echo chat-tone filler ("Yes Make sure it's cohesive...", "Use a energetic mood across every scene..."), and never render any item as on-screen text; weave each one naturally into a scene's polished narration or visual concept. The full conversation was also read to build this list — do not drop any item.\n${list}\n`;
 }
 /** HARD TIME BUDGET section injected into the planner prompt. */
@@ -1757,6 +1910,20 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       ? applySceneMotionFloor(timeExact, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
       : timeExact;
     const planned = script;
+    // F4 LAUNCH-GATE (task 40c58f6a): every relayed selling point from the FINISHED
+    // ESSENCE BRIEF must be SPOKEN in the scene narrations — the Oct 10 acceptance
+    // render carried 0/7 (generic hook copy) while dumping all 7 verbatim into
+    // scene-1's visualPrompt. Deterministic verify-and-inject backstop BEFORE QC so
+    // the persisted plan always voices the owner's claims (voice !== 'none' — silent
+    // videos keep their visual-only channel by design). SHORT-narration cap is
+    // re-applied inside the injector (phrases survive; filler is trimmed).
+    const f4SellingPoints = finishedEssenceSentences(extractCreativeEssence(cleanIdea));
+    const f4Voice = (input.voice ?? '') !== 'none';
+    const f4Narr = f4Voice
+      ? injectSellingPointsIntoNarration(planned, f4SellingPoints)
+      : { script: planned, injected: [], stillMissing: verifySellingPointsSpoken(planned, f4SellingPoints).missing };
+    if (f4Narr.script !== planned) planned.splice(0, planned.length, ...f4Narr.script);
+    if (f4Narr.injected.length) trace(`f4_narration_injected project=${projectId} count=${f4Narr.injected.length} injected=[${f4Narr.injected.join(' | ')}] stillMissing=[${f4Narr.stillMissing.join(' | ')}]`);
     // Final auditable QC of the plan we actually persist (components → componentsVerified
     // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
     // the owner can audit that every relayed component was planned in.
@@ -1823,7 +1990,22 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       .map(s => s.sceneNumber);
     const narrationRolesFinal = planned.map(s => s.narrationRole || 'narrator');
     trace(`content_direction project=${projectId} roles=[${narrationRolesFinal.join(',')}] avatarLook=${avatarPass.avatarLook ? 'set' : 'none'} actionInjected=[${actionPass.injectedInto.join(',')}] abstractNarration=[${actionAudit.narrationAbstract.join(',')}]`);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    // F4 LAUNCH-GATE (task 40c58f6a): HARD BAN — post-plan sanitizer strips every
+    // relayed benefit/claim phrase out of ALL visualPrompts (the Oct 10 render
+    // painted the 7 selling points verbatim into scene-1's still prompt; the no-text
+    // stills guarantee from PR #106 must hold for every launch-gate render). Runs
+    // AFTER every backstop (injectMissingComponents / actionPass) so nothing can
+    // re-add benefit text; voiced videos only (silent videos carry components in
+    // visuals by design — not the launch-gate path).
+    const f4Visual = f4Voice
+      ? stripBenefitTextFromVisualPrompts(planned, f4SellingPoints.filter(c => !/^EmpireLaunch AI\.$/i.test(c)))
+      : { script: planned, strippedScenes: [] };
+    if (f4Visual.script !== planned) planned.splice(0, planned.length, ...f4Visual.script);
+    if (f4Visual.strippedScenes.length) trace(`f4_visual_strip project=${projectId} scenes=[${f4Visual.strippedScenes.join(',')}]`);
+    // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
+    // what is actually stored (narration carries the benefits; visuals carry none).
+    qc = runPlanQC(planned, inventory);
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:planned.reduce((a,s)=>a+s.duration,0),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;

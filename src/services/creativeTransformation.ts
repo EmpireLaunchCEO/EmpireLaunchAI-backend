@@ -568,6 +568,18 @@ export function finishedEssenceBrief(essence: CreativeEssence): string {
   return parts.join(' ');
 }
 
+/** FINISHED ESSENCE SENTENCES (F4 launch-gate, task 40c58f6a): the deterministic
+ *  SPOKEN mandate — one finished client-facing sentence per relayed selling point,
+ *  in the exact carrier order the planner receives (finishedEssenceBrief): subject
+ *  sentence first, then each benefit sentence, then the audience sentence when one
+ *  was relayed. Every element here MUST be spoken in some scene narration by the
+ *  time the plan is persisted; a deterministic backstop injects any that aren't. */
+export function finishedEssenceSentences(essence: CreativeEssence): string[] {
+  const out: string[] = [`${cap(essence.subject)}.`];
+  for (const b of essence.benefits ?? []) out.push(cap(b) + '.');
+  if (essence.audience) out.push(`It's built for ${essence.audience}.`);
+  return out;
+}
 /** Finished-subject view used by compactCreativeSubject (respects maxChars). */
 export function finishedCreativeSubject(rawBrief: string, maxChars = 160): string {
   const { subject, internal } = extractCreativeEssence(rawBrief);
