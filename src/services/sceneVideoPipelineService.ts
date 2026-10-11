@@ -1586,6 +1586,14 @@ export function deliveredVideoDuration(sceneDurations: Array<{ duration?: number
   const sum = sceneDurations.reduce((a, s) => a + (Number.isFinite(s.duration) ? (s.duration as number) : 0), 0);
   return Math.round((sum - DISSOLVE_OVERLAP_SECONDS * Math.max(0, sceneDurations.length - 1)) * 10) / 10;
 }
+/** INTEGER-safe variant for DB columns (prod video_projects.total_duration is INTEGER -
+ *  Postgres rejects the precise float; acceptance render #3 (Oct 11) died exactly at the
+ *  insert: 29.8 for integer). Rounds the DELIVERED length to the nearest whole second
+ *  (29.8 -> 30; target is 30 and the assembled file sits inside the owner 29.5-30.5 band).
+ *  The precise value remains available as deliveredDurationSeconds in project metadata. */
+export function deliveredVideoDurationSeconds(sceneDurations: Array<{ duration?: number | null }>): number {
+  return Math.round(deliveredVideoDuration(sceneDurations));
+}
 
 export function normalizePlanTimeBudget(script: SceneScript[], targetDuration: number, opts?: { dissolveCompensate?: boolean }): SceneScript[] {
   if (!script.length) return [];
@@ -2028,7 +2036,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDuration(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -2235,7 +2243,8 @@ if (!skipGeneration) {
       const completeMeta: Record<string, any> = {
         ...mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), {
           sceneCount: complete.length,
-          totalDuration: deliveredVideoDuration(complete),
+          totalDuration: deliveredVideoDurationSeconds(complete),
+          deliveredDurationSeconds: deliveredVideoDuration(complete),
           variantExportCount: variantResults.length,
         }),
       };
