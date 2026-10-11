@@ -17,6 +17,7 @@ import {
   verifyArcCoverage,
   normalizePlanTimeBudget,
   deliveredVideoDuration,
+  deliveredVideoDurationSeconds,
   dissolveCompensatedSceneSum,
   type SceneScript,
 } from '../sceneVideoPipelineService.js';
@@ -213,4 +214,22 @@ test('dissolve math reproduces AND fixes the prod defect: 5x6s un-compensated de
   // Opt-out default keeps historical callers exact (no overlap assumed).
   const exact = normalizePlanTimeBudget(plan, 30);
   assert.equal(exact.reduce((a, s) => a + s.duration, 0), 30);
+});
+test('total_duration DB column (INTEGER): 5-scene 30s plan inserts 30, not float 29.8 (render-3 insert failure)', () => {
+  // Oct 11 acceptance render #3 plan was 7,7,7,6,6 (sum 33 -> delivered 29.8). Prod
+  // video_projects.total_duration is INTEGER; Postgres rejected 29.8 and EVERY render
+  // died at project insert (approval dd73b306, no project row). The insert value must
+  // be the integer-rounded delivered length; the precise float lives in metadata as
+  // deliveredDurationSeconds.
+  const plan = [scene(1, 7, 'a'), scene(2, 7, 'b'), scene(3, 7, 'c'), scene(4, 6, 'd'), scene(5, 6, 'e')];
+  assert.equal(deliveredVideoDuration(plan), 29.8);       // precise delivered length (metadata)
+  assert.equal(deliveredVideoDurationSeconds(plan), 30);  // INTEGER-safe insert value
+});
+test('deliveredVideoDurationSeconds: single scene is not compensated (no overlap)', () => {
+  assert.equal(deliveredVideoDuration([scene(1, 30, 'a')]), 30);
+  assert.equal(deliveredVideoDurationSeconds([scene(1, 30, 'a')]), 30);
+});
+test('deliveredVideoDurationSeconds: empty plan -> 0', () => {
+  assert.equal(deliveredVideoDuration([]), 0);
+  assert.equal(deliveredVideoDurationSeconds([]), 0);
 });
