@@ -659,6 +659,48 @@ export function isChatResidueText(item: string | null | undefined): boolean {
   if (/\b(?:cta|call\s+to\s+action)\b/i.test(t)) return true;
   return false;
 }
+/** LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): "Unless it is
+ *  specified by me or the client, it doesn't need to say click the link in bio."
+ *  Generated narration must NEVER carry link-in-bio phrasing unless the
+ *  owner/client EXPLICITLY requested it. Recognition-only CTA logic
+ *  (isInternalTalkPoint / CTA_PATTERNS) is UNCHANGED — this is an EMISSION ban,
+ *  applied at the transformation output and as the pre-TTS last-mile guard
+ *  (generateSceneAudio), NOT a change to what counts as a real CTA. The owner's
+ *  dictated narration script / a raw brief that literally asks for the phrase
+ *  both count as an explicit request (authoritative copy). */
+export const LINK_IN_BIO_RE = /(?:click|tap|check|see|visit|open|use|find|get)\s+(?:the\s+)?link\s+in\s+(?:my\s+|the\s+)?bio\b|\blink\s+in\s+(?:my\s+|the\s+)?bio\b|\bbio\s*link\b/i;
+/** The canonical phrasings the owner named (for audit strings / tests). */
+export const LINK_IN_BIO_PHRASES: string[] = [
+  'click the link in bio',
+  'link in bio',
+  'link in my bio',
+  'check the link in bio',
+  'bio link',
+];
+/** True when a text carries link-in-bio phrasing. Strong word boundaries so
+ *  "bio link" matches but "biography" never does; "biolink" (the same CTA
+ *  family — a bio/socials link) is treated as the banned family too. */
+export function containsLinkInBio(text: string | null | undefined): boolean {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  return t ? LINK_IN_BIO_RE.test(t) : false;
+}
+/** Deterministically REMOVE link-in-bio phrasing from a text — never a rephrase,
+ *  just cut the residue (mirrors the chat-residue strippers: fold double spaces,
+ *  trailing separators/commas). Pure + cheap; '' means the whole line was residue. */
+export function stripLinkInBioPhrases(text: string | null | undefined): string {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t || !containsLinkInBio(t)) return t;
+  const stripped = t.replace(LINK_IN_BIO_RE, ' ');
+  return stripped
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s*[—–-]\s*$/g, '')
+    .replace(/^\s*[—–-]\s*/g, '')
+    // Join a detached end-punctuation ("the move? .") back onto its sentence —
+    // punctuation that immediately follows a word ("today!") is real copy, kept.
+    .replace(/\s+([.,;:!?])\s*$/g, '$1')
+    .trim();
+}
+
 /** VERBATIM READ-BACK instruction for gpt-audio (a CHAT model). Without it the
  *  model treats the narration line as a conversation prompt and can reply with
  *  its own chat-tone words ("I love the energy, but I'm here to chat with
