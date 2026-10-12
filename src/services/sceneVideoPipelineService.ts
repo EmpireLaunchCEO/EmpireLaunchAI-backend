@@ -13,7 +13,7 @@ import { r2Storage } from './r2StorageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
-import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences } from './creativeTransformation.js';
+import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences, containsLinkInBio, stripLinkInBioPhrases } from './creativeTransformation.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -37,7 +37,7 @@ export interface SoraSpan {
   /** Consolidated continuous-take prompt: all span beats IN ORDER + the block prompt. */
   prompt: string;
 }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; narrationScript?: string[]; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
  *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
@@ -302,7 +302,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Re
   return report;
 }
 
-export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right' }): Promise<void> {
+export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right'; padVideoToAudio?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
@@ -318,6 +318,18 @@ export function renderClip(input: string, output: string, duration: number, audi
     // person in the video talks". Default per owner: source audio REMOVED. We map
     // ONLY the narration track (1:a:0). inputHasAudio() stays for the probe only.
     const srcDur = !isImage ? probeDuration(input) : 0;
+    // RENDER #5 PREP (owner ADJUST — "video cut short at the end"): when the
+    // caller marks the FINAL scene padVideoToAudio, the narration track becomes
+    // the timing authority — the clip's VIDEO is padded (still-hold / tpad
+    // clone-last-frame) to cover the narration's natural end instead of `-t
+    // duration` cutting the final spoken word. `effective` is the window actually
+    // rendered (>= planned duration; +0.05s tail guard so encoder rounding never
+    // clips the last sample). Every other caller is untouched (duration ===
+    // effective). Zero paid calls — the probe is local ffprobe on the TTS file.
+    const padVideoToAudio = Boolean(opts?.padVideoToAudio && audio);
+    const audioDur = padVideoToAudio ? probeDuration(audio as string) : 0;
+    const extending = padVideoToAudio && Number.isFinite(audioDur) && audioDur > 0;
+    const effective = extending ? Math.max(duration, Math.round((audioDur + 0.05) * 100) / 100) : duration;
     // LOOP-PAD POLICY (choppiness fix): unconditional -stream_loop -1 hard-splices at
     // every loop point (visible judder) and also loops embedded audio. New policy:
     //   - source >= 60% of target -> -stream_loop 1 (one splice, then hold) — still
@@ -336,7 +348,7 @@ export function renderClip(input: string, output: string, duration: number, audi
         // clip of exactly the target length (static hold — Scene-Based stills).
         inputs.push('-loop','1','-i',input);
       }
-    } else if (padByLoop) {
+    } else if (padByLoop && !extending) {
       // Sora clip long enough: loop ONCE (2x coverage), then -t caps at target.
       inputs.push('-stream_loop','1','-i',input);
     } else {
@@ -370,7 +382,7 @@ export function renderClip(input: string, output: string, duration: number, audi
     //  3. Direction preserved from the caller (zoom-in default; same dir as the
     //     previous still when threaded) — motion vectors never reverse at a cut.
     //  zoompan's `on` = output-frame counter; smoothstep p = on/(d-1).
-    const kbFrames = Math.max(2, Math.round(duration * 30));
+    const kbFrames = Math.max(2, Math.round(effective * 30));
     const kbZ0 = Number(opts?.kenburnsStartZoom) || 1.0;
     const kbZ1 = Number(opts?.kenburnsEndZoom) || 1.15;
     const kbDir = opts?.kenburnsDir ?? 'zoom-in';
@@ -391,18 +403,18 @@ export function renderClip(input: string, output: string, duration: number, audi
       : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`;
     // tpad clone-fill for the very-short-source case: freeze last frame + 250ms
     // fades (clean, no loop splice). Applied AFTER fps normalization (same cadence).
-    const padFill = (!isImage && !padByLoop && srcDur > 0)
-      ? `,tpad=stop_mode=clone:stop_duration=${Math.max(0, duration - srcDur)},fade=t=in:st=0:d=0.25,fade=t=out:st=${Math.max(0, duration - 0.25)}:d=0.25`
+    const padFill = (!isImage && (!padByLoop || extending) && srcDur > 0)
+      ? `,tpad=stop_mode=clone:stop_duration=${Math.max(0, effective - srcDur)},fade=t=in:st=0:d=0.25,fade=t=out:st=${Math.max(0, effective - 0.25)}:d=0.25`
       : '';
     inputs.push('-vf', kenburnsVf + ',' + fpsNorm + padFill);
-    inputs.push('-t',String(duration));
+    inputs.push('-t',String(effective));
     inputs.push('-c:v','libx264','-pix_fmt','yuv420p');
     if (audio) inputs.push('-c:a','aac');
     // AUDIO FITTING at the SOURCE (task 316d1a2f): the narration track is fitted
     // to EXACTLY this clip's video window — atrim longer TTS audio down to the
     // scene duration and apad (silence) shorter TTS up to it. A voice can never
     // outlive its own scene, so the assembler cannot bleed it over the next one.
-    if (audio) inputs.push('-af', `atrim=0:${String(duration)},asetpts=N/SR/TB,apad=whole_dur=${String(duration)}`);
+    if (audio) inputs.push('-af', `atrim=0:${String(extending ? audioDur : effective)},asetpts=N/SR/TB,apad=whole_dur=${String(effective)}`);
     inputs.push('-y',output);
     execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
       if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
@@ -695,7 +707,7 @@ function buildArcScenes(idea: string, count: number, durationTarget: number): Sc
       narration = "That's the payoff — real results, right in front of you.";
       visualPrompt = `Cinematic close-up: the payoff result of ${subject}, same continuous subject, breakthrough moment`;
     } else {
-      narration = 'Ready to make the move? Tap the link in bio.';
+      narration = 'Ready to make the move? You can get started today.';
       visualPrompt = `Cinematic closing shot: ${subject} final call-to-action, same continuous subject, confident ending`;
     }
     return {
@@ -735,7 +747,7 @@ export function finalCopyFallbackLine(seed: string, beat: number): string {
     "It's simpler than you think — and it works.",
     "Here's the part that makes it all click.",
     "That's the result — real, fast, right in front of you.",
-    "Ready to make the move? Tap the link in bio.",
+    "Ready to make the move? You can get started today.",
   ];
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
@@ -1548,8 +1560,138 @@ export function stripBenefitTextFromVisualPrompts(script: SceneScript[], bannedP
   }
   return { script: next, strippedScenes };
 }
-/** Structural story-arc check: hook in the first ~25% of scenes, 'what it's
- *  about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
+/** ── OWNER-SCRIPT NARRATION OVERRIDE (Render #5 prep — owner dictated the EXACT
+ *  voiceover copy; support an explicit faceless-approval `narrationScript` so her
+ *  lines are spoken VERBATIM, F4's expected-set becomes HER lines, and scenes are
+ *  sized from spoken-length rooms so every line is FULLY spoken — tighten pauses,
+ *  never words). All pure + deterministic; zero paid calls. ────────────────── */
+
+/** Normalize a `narrationScript` payload (array of lines OR a newline/`|`-
+ *  delimited string) into trimmed non-empty lines. Override copy is authoritative
+ *  (owner-dictated) and is NEVER rephrased or capped. null = no override. */
+export function normalizeNarrationScript(raw: unknown): string[] | null {
+  if (Array.isArray(raw)) {
+    const lines = raw.map(l => String(l ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    return lines.length ? lines : null;
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    const lines = raw.split(/\r?\n|\|/).map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    return lines.length ? lines : null;
+  }
+  return null;
+}
+/** Distribute override lines across `sceneCount` scenes IN ORDER — the even
+ *  split: every scene gets floor(L/n), the first L%n scenes get one extra
+ *  (8 lines → 5 scenes = [2,2,2,1,1]). Deterministic, order-preserving. */
+export function mapNarrationLinesToScenes(lines: string[], sceneCount: number): string[][] {
+  const n = Math.max(1, sceneCount);
+  const out: string[][] = Array.from({ length: n }, () => []);
+  if (!lines.length) return out;
+  const base = Math.floor(lines.length / n);
+  const sizes = Array.from({ length: n }, (_, i) => base + (i < lines.length % n ? 1 : 0));
+  let cursor = 0;
+  for (let i = 0; i < n; i++) {
+    out[i] = lines.slice(cursor, cursor + sizes[i]);
+    cursor += sizes[i];
+  }
+  return out;
+}
+/** Conservative spoken-length estimate for one scene's narration lines
+ *  (words × 0.33s @ ~3.0 wps + 0.35s breathing room per line). The planner sizes
+ *  every scene ≥ its room so all lines are fully spoken; the assembler's final-
+ *  scene video pad is the last-mile safety net. */
+export function estimateNarrationRoom(lines: string[], wordsPerSec = 3.0, lineGapSec = 0.35): number {
+  const words = lines.join(' ').split(' ').filter(t => /[A-Za-z0-9]/.test(t)).length;
+  return words / wordsPerSec + lineGapSec * lines.length;
+}
+/** Size scenes so each ≥ its narration room and the durations sum EXACTLY to the
+ *  dissolve-compensated integer target (round(dissolveCompensatedSceneSum) — the
+ *  same target normalizePlanTimeBudget produces). Surplus is distributed last →
+ *  first; a pathological deficit (script longer than the target) keeps every
+ *  scene ≥ its room and lets the assembler's final-scene video pad absorb the
+ *  overshoot (delivered lands just above the band floor — never a cut word). */
+export function sizeScenesToNarration(perSceneLines: string[][], targetDuration: number): number[] {
+  const n = Math.max(1, perSceneLines.length);
+  const target = Math.max(n, Math.round(dissolveCompensatedSceneSum(targetDuration, n)));
+  const roomOf = (i: number) => Math.ceil(estimateNarrationRoom(perSceneLines[i] || []));
+  const sizes = perSceneLines.map((_, i) => Math.max(3, roomOf(i)));
+  let diff = target - sizes.reduce((a, b) => a + b, 0);
+  let guard = 0;
+  while (diff !== 0 && guard < 10000) {
+    guard++;
+    let moved = false;
+    for (let i = n - 1; i >= 0 && diff !== 0; i--) {
+      if (diff > 0) { sizes[i] += 1; diff -= 1; moved = true; }
+      else if (sizes[i] > Math.max(3, roomOf(i))) { sizes[i] -= 1; diff += 1; moved = true; }
+    }
+    if (!moved) break;
+  }
+  return sizes;
+}
+/** Apply the override to a parsed plan (FACELESS): narrations replaced VERBATIM
+ *  (lines joined with a space, in order), durations resized from the spoken rooms
+ *  (still summing EXACTLY to the dissolve-compensated target). Visuals / roles /
+ *  types untouched (subject-exact + no-text stills come from the brief path).
+ *  Returns the line→scene mapping for the F4 audit. Pure. */
+export function applyNarrationOverride(script: SceneScript[], lines: string[], targetDuration: number): { script: SceneScript[]; mapping: string[][] } {
+  if (!lines.length || !script.length) return { script, mapping: [] };
+  const mapping = mapNarrationLinesToScenes(lines, script.length);
+  const sizes = sizeScenesToNarration(mapping, targetDuration);
+  const next = script.map((s, i) => ({ ...s, narration: mapping[i].join(' '), duration: sizes[i] ?? s.duration }));
+  return { script: next, mapping };
+}
+/** LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): "Unless it is specified
+ *  by me or the client, it doesn't need to say click the link in bio." — a
+ *  deterministic emission guard at the transformation output: link-in-bio
+ *  phrasing is stripped from narrations UNLESS the owner/client explicitly
+ *  requested it (owner script / a raw brief that literally asks for the phrase)
+ *  and from EVERY visualPrompt (F1 no-text stills must never paint the phrase).
+ *  Mirrors stripBenefitTextFromVisualPrompts: never a rephrase, just cut the
+ *  residue; an emptied narration gets the safe finished-copy CTA. Returns the
+ *  audit for the persisted metadata. */
+export function applyLinkInBioBan(script: SceneScript[], opts?: { allowLinkInBio?: boolean }): { script: SceneScript[]; strippedNarrationScenes: number[]; strippedVisualScenes: number[] } {
+  const allow = Boolean(opts?.allowLinkInBio);
+  const strippedNarrationScenes: number[] = [];
+  const strippedVisualScenes: number[] = [];
+  const next = script.map(s => {
+    let n = String(s.narration || '');
+    let v = String(s.visualPrompt || '');
+    let nChanged = false;
+    let vChanged = false;
+    if (!allow && containsLinkInBio(n)) { const c = stripLinkInBioPhrases(n); nChanged = c !== n; n = c; }
+    if (containsLinkInBio(v)) { const c = stripLinkInBioPhrases(v); vChanged = c !== v; v = c; }
+    if (nChanged) strippedNarrationScenes.push(s.sceneNumber);
+    if (vChanged) strippedVisualScenes.push(s.sceneNumber);
+    if (!String(n || '').trim()) {
+      n = 'Ready to make the move? You can get started today.';
+      if (!strippedNarrationScenes.includes(s.sceneNumber)) strippedNarrationScenes.push(s.sceneNumber);
+    }
+    const visualFallback = 'Cinematic establishing shot of the subject, soft natural light, depth of field.';
+    return { ...s, narration: n.trim(), visualPrompt: (v.trim() || visualFallback) };
+  });
+  return { script: next, strippedNarrationScenes, strippedVisualScenes };
+}
+/** Pre-TTS last-mile sanitizer (Render #5 prep): PLAN-SPEAK/echo replacement
+ *  (allowPlanSpeak = the verbatim carve-outs: LINE_CHANGE edits + the owner's
+ *  dictated script) AND the LINK-IN-BIO DEFAULT BAN (allowLinkInBio = owner/client
+ *  explicitly asked for the phrase). Deterministic, zero paid calls; only ever
+ *  substitutes the caller's text with the finished-copy fallback battery. */
+export function preTtsSanitize(text: string, opts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; sceneId?: string }): { text: string; replaced: boolean; reason?: 'plan-speak' | 'link-in-bio' } {
+  let t = String(text || '');
+  if (!opts?.allowPlanSpeak && (isPlanSpeakNarration(t) || isInternalBriefEcho(t))) {
+    const beat = (t.toLowerCase().includes('bio') || t.toLowerCase().includes('ready')) ? 4 : (t.length % 4);
+    return { text: finalCopyFallbackLine(String(opts?.sceneId || t), beat), replaced: true, reason: 'plan-speak' as const };
+  }
+  if (!opts?.allowLinkInBio && containsLinkInBio(t)) {
+    const clean = stripLinkInBioPhrases(t);
+    // A dangling fragment (<=2 content words left after the phrase was cut) reads
+    // as a glitch — swap it for the safe finished-copy CTA instead of voicing it.
+    const wordsLeft = clean.split(' ').filter(w => /[A-Za-z0-9]/.test(w)).length;
+    return { text: clean && wordsLeft > 2 ? clean : 'Ready to make the move? You can get started today.', replaced: true, reason: 'link-in-bio' as const };
+  }
+  return { text: t, replaced: false };
+}
+/** Structural story-arc check: hook in the first ~25% of scenes, 'what it's about' in the middle ~50%, CTA in the FINAL scene (deterministic heuristics). */
 export function verifyArcCoverage(script: SceneScript[]): ArcFlags {
   if (!script.length) return { hook: false, about: false, cta: false };
   const count = script.length;
@@ -1774,7 +1916,7 @@ export function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFl
   }
   if (!arcFlags.hook) parts.push('MISSING ARC STAGE — HOOK: the first ~25% of scenes must open with the hook / attention-grabber (wording like "opening", "introducing", establishing shot of the subject).');
   if (!arcFlags.about) parts.push('MISSING ARC STAGE — ABOUT: the middle ~50% must say what the video is about (the essentials / key benefit / how it works of the subject).');
-  if (!arcFlags.cta) parts.push('MISSING ARC STAGE — CTA: the FINAL scene must deliver the call-to-action (wording like "follow", "link in bio", "shop now", "call to action").');
+  if (!arcFlags.cta) parts.push('MISSING ARC STAGE — CTA: the FINAL scene must deliver the call-to-action (wording like "follow", "sign up", "get started", "shop now").');
   if (extras.avatarRoleViolations.length > 0) {
     parts.push(`AVATAR-VOICE RULE VIOLATION — scene(s) ${extras.avatarRoleViolations.join(', ')} are avatar-dialogue but their narration reads as a third-person narrator. Rewrite them as the AVATAR'S OWN spoken words, first person, spoken directly to the audience. Do not add a narrator voice to a talking-avatar scene.`);
   }
@@ -1869,7 +2011,7 @@ export class SceneVideoPipelineService {
         const hybridDirective = ` The final video is a HYBRID: Sora motion ONLY where you genuinely elect it — a duration-scaled budget of AT MOST ${budget} Sora call(s), each a ${importantBlock}s single take (continuous, no cuts, no scene changes). ALL other scenes are "gpt-image" stills (animated with slow Ken Burns pan/zoom). Return a JSON object with EXACTLY: a "avatarLook" string — the EXACT shared description of the avatar, included ONLY when any scene has a TALKING avatar (one consistent person/look, reused VERBATIM by every avatar scene); omit it entirely when there is no talking avatar —, a "soraContent" ARRAY of exactly ${budget} objects, each { duration: ${importantBlock}, prompt: ONE consolidated detailed prompt for that specific ${importantBlock}s block } — you decide WHICH ${importantBlock}s blocks are the motion-worthy beats (e.g. hero open, mid transformation, payoff/CTA) and list them in video order${heroComponentHint}, and
  a "scenes" array of exactly ${sceneCount} objects each { sceneNumber, duration (sum exactly ${dissolveCompensatedSceneSum(duration, sceneCount).toFixed(1)} — ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades overlap at every seam, so the DELIVERED file lands at exactly ${duration}s), type: "sora" | "gpt-image" (at most ${budget} type "sora" scenes — you decide how many genuinely need motion, each pairs in order with soraContent[i]; the rest are "gpt-image"), visualPrompt, narration (one complete natural sentence ≤ ${maxNarrationWords} words), narrationRole: "avatar-dialogue" only for scenes whose visual shows a TALKING avatar SPEAKING to camera (lips moving) — narration written as that avatar's own first-person spoken words — else "narrator" (static avatar or no avatar keeps voiceover; never both in one scene) }. Do NOT narrate consultant dialogue, planning notes, questions, UI instructions, or chat history. High quality, coherent single subject, distinct visuals per scene, story arc: hook → important sora beat(s) → payoff/CTA.
 FEW-SHOT EXAMPLE (shape to return EXACTLY — do not copy the topic, only the structure): for a 60-second video with a 2-call budget this is the required JSON:
-{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 16, "prompt": "One continuous ~16s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 16, "prompt": "One continuous ~16s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Watch how this saves your time from day one.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Tap the link in bio.", "narrationRole": "narrator"}]}
+{"avatarLook": "the same friendly female AI host with teal hair and a studio desk, appears in every avatar scene", "soraContent": [{"duration": 16, "prompt": "One continuous ~16s cinematic take of the hero moment showing the product's key benefit in action, no cuts, fluid motion."}, {"duration": 16, "prompt": "One continuous ~16s cinematic take of the payoff: the final result in motion, closing on the call to action, no cuts."}], "scenes": [{"sceneNumber": 1, "duration": 8, "type": "gpt-image", "visualPrompt": "Close-up on the app home screen, finger tapping the upload button, hook intro", "narration": "Watch how this saves your time from day one.", "narrationRole": "narrator"}, {"sceneNumber": 2, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the host demonstrates the step live on camera, same teal-haired host from the other avatar scenes, talking directly to the audience while the app UI follows her taps", "narration": "I'm going to show you the exact steps I use — tap here, drop in your photo, and watch it do the work.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 3, "duration": 7, "type": "gpt-image", "visualPrompt": "Screen recording of the process step being performed: file upload, progress bar filling", "narration": "Step one is the upload — two seconds, and it's already processing.", "narrationRole": "narrator"}, {"sceneNumber": 4, "duration": 7, "type": "gpt-image", "visualPrompt": "Before/after split showing the transformation result side by side", "narration": "Here's the result before and after — unmistakable.", "narrationRole": "narrator"}, {"sceneNumber": 5, "duration": 6, "type": "sora", "visualPrompt": "One continuous take: the final result in motion, then the host (same teal-haired host) closes facing the camera", "narration": "That's the payoff you get in minutes — follow for more.", "narrationRole": "avatar-dialogue"}, {"sceneNumber": 6, "duration": 10, "type": "gpt-image", "visualPrompt": "The sign-up screen with the call-to-action button highlighted", "narration": "Ready to take the next step? Sign up and get started today.", "narrationRole": "narrator"}]}
 Your response must be ONLY that JSON object (no markdown fences, no commentary).`;
         const sceneSumLock = dissolveCompensatedSceneSum(duration, sceneCount);
         const legacyConstrain = mode === 'faceless'
@@ -1941,6 +2083,21 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       ? applySceneMotionFloor(timeExact, extractSoraBlockPrompts(generatedScript || {}, budget), budget)
       : timeExact;
     const planned = script;
+    // ── OWNER-SCRIPT NARRATION OVERRIDE (Render #5 prep — owner dictated the
+    //    EXACT voiceover copy; carry an explicit faceless-approval
+    //    `narrationScript`: her lines are spoken VERBATIM, F4's expected-set
+    //    becomes HER lines (8/8), and scenes are sized from spoken rooms so
+    //    every line is FULLY spoken (tighten pauses, never words). Visuals stay
+    //    brief-derived (subject exact / no-text / portrait) — untouched here. ──
+    const narrationOverride = normalizeNarrationScript(input.narrationScript);
+    // LINK-IN-BIO DEFAULT BAN carve-out: an explicit request in the client's own
+    // raw input (brief/components) or the owner's dictated script counts.
+    const linkInBioAllowed = containsLinkInBio([cleanIdea, ...(Array.isArray(input.components) ? input.components : [])].filter(Boolean).join('\n')) || narrationOverride !== null;
+    const overridePlan = narrationOverride ? applyNarrationOverride(planned, narrationOverride, duration) : null;
+    if (overridePlan) {
+      planned.splice(0, planned.length, ...overridePlan.script);
+      trace(`narration_override project=${projectId} lines=${narrationOverride!.length} mapping=[${overridePlan.mapping.map(m => m.length).join(',')}] sizes=[${overridePlan.script.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(overridePlan.script)}`);
+    }
     // F4 LAUNCH-GATE (task 40c58f6a): every relayed selling point from the FINISHED
     // ESSENCE BRIEF must be SPOKEN in the scene narrations — the Oct 10 acceptance
     // render carried 0/7 (generic hook copy) while dumping all 7 verbatim into
@@ -1948,7 +2105,15 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // the persisted plan always voices the owner's claims (voice !== 'none' — silent
     // videos keep their visual-only channel by design). SHORT-narration cap is
     // re-applied inside the injector (phrases survive; filler is trimmed).
-    const f4SellingPoints = finishedEssenceSentences(extractCreativeEssence(cleanIdea));
+    const f4SellingPoints = (narrationOverride ?? finishedEssenceSentences(extractCreativeEssence(cleanIdea)))
+      .filter(c => {
+        // LINK-IN-BIO DEFAULT BAN (owner product rule): a selling point that IS a
+        // link-in-bio phrase is dropped from the F4 expected-set when not explicitly
+        // requested — the deterministic backstop must never re-inject banned phrasing.
+        if (linkInBioAllowed || !containsLinkInBio(c)) return true;
+        trace(`link_in_bio_f4_dropped project=${projectId} phrase="${String(c).slice(0, 60)}"`);
+        return false;
+      });
     const f4Voice = (input.voice ?? '') !== 'none';
     const f4Narr = f4Voice
       ? injectSellingPointsIntoNarration(planned, f4SellingPoints)
@@ -2033,10 +2198,18 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       : { script: planned, strippedScenes: [] };
     if (f4Visual.script !== planned) planned.splice(0, planned.length, ...f4Visual.script);
     if (f4Visual.strippedScenes.length) trace(`f4_visual_strip project=${projectId} scenes=[${f4Visual.strippedScenes.join(',')}]`);
+    // LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): deterministic emission
+    // guard at the transformation output — any link-in-bio residue in narrations
+    // is stripped when NOT explicitly requested (owner script / client brief) and
+    // visualPrompts are ALWAYS cleaned (F1 no-text stills never paint the phrase).
+    const linkInBioPass = applyLinkInBioBan(planned, { allowLinkInBio: linkInBioAllowed });
+    if (linkInBioPass.script !== planned) planned.splice(0, planned.length, ...linkInBioPass.script);
+    if (linkInBioPass.strippedNarrationScenes.length || linkInBioPass.strippedVisualScenes.length) trace(`link_in_bio_ban project=${projectId} narrationScenes=[${linkInBioPass.strippedNarrationScenes.join(',')}] visualScenes=[${linkInBioPass.strippedVisualScenes.join(',')}]`);
+    const overrideSpoken = narrationOverride ? narrationOverride.length - verifySellingPointsSpoken(planned, narrationOverride).missing.length : 0;
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -2066,6 +2239,12 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
     const heroSource = sourceImages[0];
+    // RENDER #5 PREP (owner script): the owner's dictated narrationScript is
+    // AUTHORITATIVE verbatim copy — never substituted by the hygiene guard
+    // (allowPlanSpeak, mirroring LINE_CHANGE) and read at a naturally brisk pace
+    // (tighten pauses, never words) so all 8 lines land inside the band.
+    const hasNarrationOverride = Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0;
+    const voiceOpts = { allowPlanSpeak: hasNarrationOverride, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: hasNarrationOverride };
 if (!skipGeneration) {
       // VEO SPAN PRE-PASS (owner Sep 18 — Sora → Veo Lite): generate ONE Veo call PER
       // motion WINDOW before the scene loop (Lite caps a call at 6s — enum 4|6|8), then
@@ -2117,7 +2296,7 @@ if (!skipGeneration) {
         if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // window take failed → already marked failed
         try {
           const takePath = takeRegistry.get(scene.sceneNumber);
-          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource, takePath), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource, takePath, voiceOpts), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
           return { status: 'rejected' as const, reason };
@@ -2164,6 +2343,7 @@ if (!skipGeneration) {
     try {
       const dir=path.join(process.cwd(),'temp','scene-projects',projectId); fs.mkdirSync(dir,{recursive:true});
       const clips:string[]=[];
+      const lastSceneNumber = complete.length ? complete[complete.length - 1].sceneNumber : -1;
       // Ken Burns continuity state (threaded across consecutive still scenes; see
       // the renderClip call below — SEAMLESS STITCHING, owner Sep 17).
       let kbCam: number | null = null;
@@ -2197,6 +2377,13 @@ if (!skipGeneration) {
         } else {
           kbCam = null; // Sora motion scene = fresh camera for the next still run
         }
+        // RENDER #5 PREP (owner ADJUST — "video cut short at the end"): the FINAL
+        // scene's video is padded (tpad still-hold) to cover the full narration end
+        // — renderClip extends the window to the TTS audio's natural end, so the
+        // last spoken word is always fully audible. Delivered length stays in the
+        // 29.5–30.5s band because the planner sized scenes ≥ the narration rooms
+        // (tighten pauses, never words).
+        kbOpts.padVideoToAudio = !!sceneAudio && scene.sceneNumber === lastSceneNumber;
         await renderClip(local,clip,scene.duration||3,sceneAudio,kbOpts);
         clips.push(clip);
       }
@@ -2340,7 +2527,7 @@ if (!skipGeneration) {
       await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta),{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraJob?.id ?? (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
@@ -2447,7 +2634,7 @@ else {
           localPath = veoLocalPath;
         }
       }
-      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
+      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone,voiceOpts); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) {
         // HARDENING: never let a URL reach fs.copyFileSync (the owner's live ENOENT).
@@ -2651,11 +2838,11 @@ else {
       trace(`scene_veo_operation_persist_failed scene=${sceneId} error=${err?.message}`);
     }
   }
-  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto'):Promise<{url?:string;localPath:string}> {
-    return generateSceneAudio(text, userId, sceneId, voice, tone);
+  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<{url?:string;localPath:string}> {
+    return generateSceneAudio(text, userId, sceneId, voice, tone, voiceOpts);
   }
   async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
-  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
+  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone,undefined,undefined,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 }); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
   /**
    * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
    * fire-and-forget scene work dies with it and projects can sit in `generating` /
@@ -2752,7 +2939,7 @@ export async function generateSceneAudio(
   sceneId: string,
   voice?: 'female' | 'male' | 'none',
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto',
-  opts?: { allowPlanSpeak?: boolean },
+  opts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean },
 ): Promise<{ url?: string; localPath: string }> {
   // CONTENT HYGIENE (owner Sep 28): NEVER voice plan-speak. The pipeline and
   // auto-fix paths pass finished copy by construction; this is the last-mile
@@ -2760,11 +2947,15 @@ export async function generateSceneAudio(
   // deterministic finished-copy fallback (cheap string check, no paid calls).
   // The LINE_CHANGE path passes allowPlanSpeak:true — the user's edited line is
   // their own authoritative copy and must be voiced verbatim.
-  if (!opts?.allowPlanSpeak && (isPlanSpeakNarration(text) || isInternalBriefEcho(text))) {
-    const beat = (String(text).toLowerCase().includes('bio') || String(text).toLowerCase().includes('ready')) ? 4 : (text.length % 4);
-    const clean = finalCopyFallbackLine(String(sceneId || text), beat);
-    console.warn(`[PIPELINE] narration_hygiene: replaced plan-speak before GPT-Audio (scene ${sceneId}): "${String(text).slice(0, 70)}"`);
-    text = clean;
+  // RENDER #5 PREP: the last-mile hygiene guard is now a single pure sanitizer —
+  // PLAN-SPEAK/echo replacement (allowPlanSpeak = the verbatim carve-outs: the
+  // LINE_CHANGE path AND the owner's dictated narrationScript) PLUS the LINK-IN-
+  // BIO DEFAULT BAN (owner product rule: generated narration never says link-in-
+  // bio unless allowLinkInBio — an explicit owner/client request — is set).
+  const sanitized = preTtsSanitize(text, { allowPlanSpeak: opts?.allowPlanSpeak, allowLinkInBio: opts?.allowLinkInBio, sceneId });
+  if (sanitized.replaced) {
+    console.warn(`[PIPELINE] narration_hygiene: ${sanitized.reason} before GPT-Audio (scene ${sceneId}): "${String(text).slice(0, 70)}"`);
+    text = sanitized.text;
   }
   // voice:'none' is the NO-voiceover sentinel. The caller never reaches here with
   // it (processScene guards with shouldGenerateSceneNarration), but normalize so
@@ -2784,6 +2975,12 @@ export async function generateSceneAudio(
       return undefined;
     }
   };
+  // RENDER #5 PREP (owner script): a brisk-pace helm for the dictated 8-line
+  // script — tighten PAUSES, never words (the planner already sized scenes from
+  // the spoken rooms; this keeps the read inside the 30s band).
+  const readInstr = opts?.brisk
+    ? ttsReadAloudInstruction(tone) + ' Speak at a naturally brisk, energetic pace with minimal pauses — concise and punchy, but never rushed.'
+    : ttsReadAloudInstruction(tone);
   // ---- Attempt 1: gpt-audio (owner's explicitly-enabled model) via Chat Completions ----
   // gpt-audio does NOT map to /v1/audio/speech (404 "Invalid URL"). It is an audio
   // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
@@ -2804,7 +3001,7 @@ export async function generateSceneAudio(
           // ("I love the energy, but I'm here to chat with anything you need to
           // chat about") instead of reading the scene script. Command it to speak
           // ONLY the provided text, word for word.
-          { role: 'system', content: ttsReadAloudInstruction(tone) },
+          { role: 'system', content: readInstr },
           { role: 'user', content: text },
         ],
       }),
@@ -2842,7 +3039,7 @@ export async function generateSceneAudio(
       body: JSON.stringify({
         model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3',
         // gpt-4o-mini-tts supports spoken-delivery instructions (tts-1/tts-1-hd ignore extras).
-        ...(model === 'gpt-4o-mini-tts' ? { instructions: ttsReadAloudInstruction(tone) } : {}),
+        ...(model === 'gpt-4o-mini-tts' ? { instructions: readInstr } : {}),
       }),
       signal: AbortSignal.timeout(60000),
     });

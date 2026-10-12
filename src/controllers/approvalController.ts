@@ -3,7 +3,7 @@ import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { usageService } from '../services/usageService.js';
-import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, normalizeNarrationScript } from '../services/sceneVideoPipelineService.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
 import {
   FACELESS_MOODS,
@@ -162,6 +162,17 @@ export const createApproval = async (req: Request, res: Response) => {
       }
       enrichedPayload.mood = mood;
       enrichedPayload.duration = duration;
+      // RENDER #5 PREP (owner script): optional VERBATIM narration-script override —
+      // an array of lines (or a newline/`|`-delimited string). Her exact voiceover
+      // copy is spoken verbatim (never rephrased by the transformation layer); F4's
+      // expected-set becomes HER lines, and scenes are sized so every line is fully
+      // spoken. Absent / empty = no override (standard pipeline).
+      const narrationScriptRaw = req.body.narrationScript !== undefined ? req.body.narrationScript : (payload as any)?.narrationScript;
+      const narrationScript = normalizeNarrationScript(narrationScriptRaw) ?? undefined;
+      if (narrationScriptRaw !== undefined && !narrationScript) {
+        return res.status(400).json({ error: 'Invalid faceless narrationScript — expected non-empty lines (array or newline/| string)' });
+      }
+      enrichedPayload.narrationScript = narrationScript ?? undefined;
       // Feed mood into the per-scene prompt so the video's tone reflects it.
       // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
       // appending an instruction sentence to the idea text. The appended hint
@@ -185,6 +196,7 @@ export const createApproval = async (req: Request, res: Response) => {
           // Faceless renders scenes as gpt-image-2 stills animated with FFmpeg Ken Burns
           // (zoompan) — never Sora motion — per the owner-approved cost model.
           mode: 'faceless',
+          narrationScript,
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
