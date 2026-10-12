@@ -26,6 +26,7 @@ import paypalRoutes from './routes/paypalRoutes.js';
 import pushRoutes from './routes/pushRoutes.js';
 import empireStudioRoutes from './routes/empireStudioRoutes.js';
 import studioRoutes from './routes/studioRoutes.js';
+import veoTestRoutes from './routes/veoTestRoutes.js';
 import libraryRoutes from './routes/libraryRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
 import vaultRoutes from './routes/vaultRoutes.js';
@@ -162,6 +163,8 @@ app.use('/api/paypal', paypalRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/studio', studioRoutes);
 app.use('/api/studio', empireStudioRoutes);
+// OWNER-DIRECTED Veo 3.1 TEST ONLY — double-gated (mode 'veo-test' + ENABLE_VEO_TEST). Never reachable from production modes.
+app.use('/api/studio', veoTestRoutes);
 app.use('/api/library', libraryRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/vault', vaultRoutes);
