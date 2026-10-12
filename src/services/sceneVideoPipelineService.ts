@@ -1633,7 +1633,7 @@ export function sizeScenesToNarration(perSceneLines: string[][], targetDuration:
  *  (still summing EXACTLY to the dissolve-compensated target). Visuals / roles /
  *  types untouched (subject-exact + no-text stills come from the brief path).
  *  Returns the line→scene mapping for the F4 audit. Pure. */
-export function applyNarrationOverride(script: SceneScript[], lines: string[], targetDuration: number): { script: SceneScript[]; mapping: number[][] } {
+export function applyNarrationOverride(script: SceneScript[], lines: string[], targetDuration: number): { script: SceneScript[]; mapping: string[][] } {
   if (!lines.length || !script.length) return { script, mapping: [] };
   const mapping = mapNarrationLinesToScenes(lines, script.length);
   const sizes = sizeScenesToNarration(mapping, targetDuration);
