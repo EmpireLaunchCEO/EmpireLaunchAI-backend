@@ -395,8 +395,15 @@ export function renderClip(input: string, output: string, duration: number, audi
       : kbDir === 'pan-right'
         ? `x='${kbEase}*(iw-iw/zoom)':y='ih/2-(ih/zoom/2)'`
         : `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
+    // RENDER #5 ADJUST (owner Oct 12 — "transition flash"): the old chain re-fed
+    // the zoompan output through `minterpolate=mi_mode=mci` (motion-compensated
+    // frame interpolation). On every clip START the mci window needs past/future
+    // frames it does not have yet — its warm-up warps/jitters the first frames,
+    // which reads exactly as a "flash" at every cut. zoompan already emits a
+    // smooth eased 30fps zoom (velocity ~0 at both ends via the smoothstep below),
+    // so the extra interpolator adds nothing but the boundary artifact. Dropped.
     const kenburnsVf = kenburns
-      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z=${kbZ}:d=${kbFrames}:${kbXY}:s=1080x1920:fps=30,minterpolate=fps=30:mi_mode=mci`
+      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z=${kbZ}:d=${kbFrames}:${kbXY}:s=1080x1920:fps=30`
       // Contain/refit — NEVER crop — every segment (still AND Sora motion) to the
       // 1080x1920 / 9:16 output contract BEFORE fps normalization, so concatClips'
       // xfade math sees identical cadence AND dimensions.
@@ -476,9 +483,18 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
   // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
   // be crossfaded directly. Each xfade overlaps by TRANSITION_MS.
-  // SEAMLESS STITCHING (owner Sep 17): default dissolve LONGER — 800ms (was
-  // 500ms). A 500ms linear fade between two unrelated stills reads as a flash;
-  // ~800ms + the eased zoom in renderClip reads as a continuous camera move.
+  // SEAMLESS STITCHING (owner Sep 17): default transition 800ms. RENDER #5 ADJUST
+  // (owner Oct 12 — "transition flash"): the old chain used an 800ms full DISSOLVE
+  // — a ~0.4s double-exposure ghost of the PREVIOUS photo bleeding into the next
+  // scene's first moments (what she saw flash at the scene-2 boundary). The fix is
+  // the transition TYPE, not the length: xfade=transition=fadeblack (measured —
+  // xfade 'fade' is a BLEND, min luma = the darker scene, no black dip: the same
+  // ghost as dissolve) dips through BLACK so the prior frame can never linger on
+  // the incoming scene. The 800ms default is preserved on purpose — it is deep-baked in the planner band math
+  // (DISSOLVE_OVERLAP_SECONDS / dissolveCompensatedSceneSum / normalizePlanTimeBudget
+  // and the 29.5–30.5s delivery; an assembly/planner 500/800 mismatch drifted every
+  // duration suite). The tpad clone-tail guard below still prevents any EOF black.
+  // SCENE_TRANSITION_MS env remains the override.
   const DURATION_MS = process.env.SCENE_TRANSITION_MS ? Number(process.env.SCENE_TRANSITION_MS) : 800;
   const TR_MS = Math.min(DURATION_MS, 1000);
   if (inputs.length === 1) {
@@ -521,7 +537,12 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     // =clone) so the fade always completes on real/cloned frames, then trim the
     // output back to the planned total with -t. Pad = tr + 0.15s safety margin.
     const tailPad = (tr + 0.15).toFixed(3);
-    const totalSec = (seconds.reduce((a,b)=>a+b,0) - tr * Math.max(0, inputs.length - 1)).toFixed(3);
+    // videoTotalMs is the FIXED delivery budget (sum - dissolve overlaps). The
+    // narration scheduler below may push tracks later for single-voice, but the
+    // delivered length must stay exactly this budget (29.5-30.5s owner band), so
+    // totalSec stays anchored to it and the audio clamp keeps speech inside it.
+    const videoTotalMs = Math.round((seconds.reduce((a,b)=>a+b,0) - tr * Math.max(0, inputs.length - 1)) * 1000);
+    const totalSec = (videoTotalMs / 1000).toFixed(3);
     const filter = [];
     let offsetAcc = 0;
     // Per-input clone-tail pad (video only; audio handled below by acrossfade):
@@ -534,10 +555,10 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     // ORIGINAL probed durations stay exact AND the fade-out region always has
     // real frames to read — deterministic no-black at the boundary.
     offsetAcc = Math.max(0, seconds[0] - tr);
-    filter.push(`[v0p][v1p]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
+    filter.push(`[v0p][v1p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
     for (let i=2;i<inputs.length;i++){
       offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
-      filter.push(`[v${i-1}][v${i}p]xfade=transition=fade:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
+      filter.push(`[v${i-1}][v${i}p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
     }
     // ── AUDIO: carry each clip's narration through with acrossfade between
     //    consecutive audio-bearing clips (same overlap tr as the video xfade), then
@@ -565,11 +586,76 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       let aIdx = 0;
       const aIns: string[] = [];
       let sumPrev = 0;
+      // SINGLE-VOICE GUARANTEE (RENDER #5 ADJUST — owner Oct 12 "6s voice-overlap"):
+      // every narration after the first is placed at the LATER of (its own scene's
+      // video start) and (the PREVIOUS narration's speech end). With long TTS lines
+      // that run right up to their window (scene 1's 6s/6.1s in render #5), the old
+      // schedule anchored track i+1 at `videoStart - tr`, so track i's still-spoken
+      // tail overlapped the NEXT line's start (audible as two voices talking over
+      // each other at the 6s mark). Sequential placement lets the previous line
+      // FINISH (a natural prosodic carryover — the picture may dissolve while the
+      // voice completes, never two voices at once), then the next line begins.
+      // TRUE SPEECH END per track (RENDER #5 ADJUST, owner Oct 12 "6s voice-overlap"):
+      // renderClip pads EVERY clip's audio out to the full scene window
+      // (apad=whole_dur=effective), so the stream length (probes[i].audioSeconds) is
+      // ~the WINDOW, not the speech. Anchoring sequential placement on the padded
+      // length would make the scheduler think each line fills its whole window (and
+      // the fail-closed invariant below would trip on the filler). Decode each clip's
+      // audio ONCE and back-scan for the first non-silent sample (threshold -44 dBFS;
+      // the AAC apad floor is ~-80 dB) — the TRUE narration end, the same length
+      // renderClip's atrim already preserved. Deterministic, zero paid APIs.
+      const speechEndOf = (f: string): number => {
+        let pcm: Buffer;
+        try {
+          pcm = execFileSync(
+            'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', f, '-map', '0:a:0', '-ac', '1', '-ar', '22050', '-f', 'f32le', '-'],
+            { maxBuffer: 64 * 1024 * 1024 },
+          );
+        } catch { return 0; }
+        const arr = new Float32Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 4));
+        const TH = 0.006; // -44 dBFS
+        for (let i = arr.length - 1; i >= 0; i--) {
+          if (Math.abs(arr[i]) > TH) return (i + 1) / 22050;
+        }
+        return 0;
+      };
+      let prevSpeechEndMs = 0;
       for (let i = 0; i < inputs.length; i++) {
         if (!probes[i].hasAudio) { sumPrev += probes[i].seconds; continue; }
-        const startMs = Math.max(0, Math.round((sumPrev - tr * i) * 1000));
+        const videoStartMs = Math.max(0, Math.round((sumPrev - tr * i) * 1000));
         const win = probes[i].seconds;
-        const fit = Math.max(0.05, Math.min(probes[i].audioSeconds, win)).toFixed(3);
+        const trueSpeech = speechEndOf(inputs[i]);
+        // Fit = the REAL narration end (+50ms sample guard, capped to the stream
+        // length and the window). Never trims speech — renderClip already fitted
+        // the TTS to the window at the source; this only tells the scheduler how
+        // long the voice actually runs.
+        const fitBase = trueSpeech > 0 ? Math.min(trueSpeech + 0.05, probes[i].audioSeconds) : probes[i].audioSeconds;
+        const fit = Math.max(0.05, Math.min(fitBase, win)).toFixed(3);
+        // FINAL-BUDGET CLAMP (single-voice + never cut the last word + never drift
+        // past the planned band): the track starts at the LATER of its own video
+        // start and the previous track's speech end — but never so late that its
+        // speech would run past the video total (100ms rounding guard). Cumulative
+        // overfill (pathological; planner narration-room headroom prevents it) keeps
+        // the previous line's tail completing over the boundary instead of pushing
+        // the delivered length out of band.
+        const fitMs = Math.round(parseFloat(fit) * 1000);
+        const maxStartMs = Math.max(videoStartMs, videoTotalMs - fitMs - 100);
+        const startMs = Math.max(videoStartMs, Math.min(prevSpeechEndMs, maxStartMs));
+        // FAIL-CLOSED SINGLE-VOICE INVARIANT (owner Oct 12 — "lines must never
+        // play on top of each other"): if the final-budget clamp FORCES this
+        // track to start before the previous narration finished (cumulative
+        // overfit beyond the video budget), throw a precise error instead of
+        // shipping overlapping voices. Normal operation never reaches here —
+        // planner narration rooms + the dissolve-compensated band keep cumulative
+        // speech inside the budget; a visible failed render is safer than two
+        // voices at once. This guard is MODE-AGNOSTIC: Scene, Faceless and the
+        // rebuilt Neural Twin (PR #115) all assemble through concatClips and
+        // inherit it.
+        if (startMs < prevSpeechEndMs - 5) {
+          throw new Error(
+            `NARRATION_OVERLAP_INVARIANT track=${aIdx} start=${startMs}ms < prevSpeechEnd=${prevSpeechEndMs}ms — script overfits the ${(videoTotalMs / 1000).toFixed(1)}s budget; shrink narration rooms at the planner`,
+          );
+        }
         const fadeOut = Math.max(0, parseFloat(fit) - 0.05).toFixed(3);
         // Each narration is edited to fit its own window, padded with silence out
         // to EXACTLY the video total (apad whole_dur = totalSec - start), then
@@ -584,6 +670,7 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
         aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,afade=t=in:d=0.03,afade=t=out:st=${fadeOut}:d=0.03,apad=whole_dur=${padTo},adelay=${startMs}:all=1[ad${aIdx}]`);
         aIns.push(`[ad${aIdx}]`);
         aIdx++;
+        prevSpeechEndMs = startMs + fitMs;
         sumPrev += win;
       }
       if (aIns.length === 1) {
@@ -1597,9 +1684,17 @@ export function mapNarrationLinesToScenes(lines: string[], sceneCount: number): 
   return out;
 }
 /** Conservative spoken-length estimate for one scene's narration lines
- *  (words × 0.33s @ ~3.0 wps + 0.35s breathing room per line). The planner sizes
- *  every scene ≥ its room so all lines are fully spoken; the assembler's final-
- *  scene video pad is the last-mile safety net. */
+ *  (words × 0.33s @ ~3.0 wps + 0.35s breathing room per line). This is the
+ *  PLANNER default and is deliberately band-fitted: the 8-line owner script must
+ *  fit the 33s scene-sum (29.8s delivered, inside the owner 29.5–30.5s band), and
+ *  3.0 wps/0.35s keeps the room totals AT/BELOW that dissolve-compensated target.
+ *  Measured gpt-audio reads slower (~2.3–2.6 wps incl. natural trailing silence —
+ *  render #4/#5), so a slow scene may overrun its own window; the ASSEMBLER
+ *  absorbs that variance with sequential single-voice placement (each track
+ *  starts at the previous track's speech end, never on top of it — the owner's
+ *  "6s voice-overlap" ADJUST) plus the final-scene video pad: the last-mile
+ *  safety nets below. Never raise these defaults without keeping the 8-line
+ *  override rooms ≤ the band sum (render5PrepPure pins the 33s target). */
 export function estimateNarrationRoom(lines: string[], wordsPerSec = 3.0, lineGapSec = 0.35): number {
   const words = lines.join(' ').split(' ').filter(t => /[A-Za-z0-9]/.test(t)).length;
   return words / wordsPerSec + lineGapSec * lines.length;
