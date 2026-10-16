@@ -1269,6 +1269,15 @@ function isVideoUrl(url: string): boolean {
   const clean = (url.split('?')[0] || '').toLowerCase();
   return /\.(mp4|mov|webm|m4v|mkv|avi)$/.test(clean);
 }
+/** RENDER #7 (owner ADJUST #2): true when a still scene's (overridden) visualPrompt is a
+ * direct image URL — http(s) and NOT a video URL. Such stills are used AS the scene's
+ * actual still (pixel-exact download via ensureLocalFile; the owner's real onboarding/pay
+ * screenshots). gpt-image is deliberately NEVER asked to redraw these: renderImage's
+ * noText:true would actively STRIP the UI text (her bold name / $50 price). */
+export function isDirectImageUrl(value: string): boolean {
+  const s = String(value || '').trim();
+  return isRemoteUrl(s) && !isVideoUrl(s);
+}
 /** Enrich a per-scene visual prompt so the user's uploaded image becomes the continuous subject. */
 function withSourceSubject(prompt: string, sourceImage?: string): string {
   if (!sourceImage) return prompt;
@@ -2684,9 +2693,20 @@ if (!skipGeneration) {
         // `fs.copyFileSync('<url>', '<url>.r2-upload')` threw ENOENT. The scene
         // upload branch uploads exactly once (provider 'gpt-image-2'). ensureLocalFile
         // is a defense-in-depth guard for any caller path that still lands a URL.
-        const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
-        if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
-        localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
+        if (isDirectImageUrl(scene.visualPrompt)) {
+          // RENDER #7 (owner ADJUST #2 - "I am not a fan of the photos"): a
+          // visualPromptOverrides[i] value that is a direct image URL is the scene's
+          // actual still (owner's real onboarding/pay screenshots, staged pixel-exact
+          // at 1080x1920). Download via ensureLocalFile and proceed through the SAME
+          // Ken Burns/zoompan + assembly path as a gpt-image still. gpt-image is
+          // NEVER called for these - redrawing would strip the UI text she asked for.
+          localPath = await ensureLocalFile(scene.visualPrompt, `direct image scene ${scene.sceneNumber}`);
+          trace(`scene_direct_image id=${scene.id} number=${scene.sceneNumber}`);
+        } else {
+          const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
+          if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
+          localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
+        }
         mime='image/png';
       }
 else {
@@ -2786,7 +2806,7 @@ else {
         assetUrl = uploaded.url || safeLocal;
       }
       const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?'gpt-image-2':motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
