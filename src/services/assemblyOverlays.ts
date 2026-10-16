@@ -21,6 +21,8 @@
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 export interface AssemblyOverlaySpec {
   /** Bullet line groups, one entry per source scene (index-aligned with the concatClips inputs). */
@@ -124,6 +126,15 @@ function probeSeconds(file: string): number {
  * overlay PNG covers the video with opaque black. drawtext + drawbox with
  * enable='between(t,start,end)' needs no alpha at all — text/bars simply exist
  * only inside their scene's dissolve-compensated window.
+ *
+ * Text content is written to temp files and referenced with `textfile=` +
+ * `expansion=none` INSTEAD of inline `text='...'`. Inline text cannot safely
+ * carry apostrophes / quotes: ffmpeg's filtergraph parser treats `'` as the
+ * quoted-section delimiter, so `text='you don\'t pay'` breaks the graph mid-
+ * expression (observed: `Missing ')' or too many args in 'between(t'` — the
+ * next filter's `enable=` commas were consumed as filter separators). The
+ * textfile route bypasses all quoting/escaping of user-visible text.
+ *
  * Single re-encode at CRF 18 preserving the audio stream untouched (-c:a copy).
  * Throws on ffmpeg failure — loud, never silent.
  */
@@ -137,6 +148,16 @@ export function applyAssemblyOverlays(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const font = opts?.fontPath ?? resolveOverlayFont();
+    let textDir: string | null = null;
+    let textCounter = 0;
+    /** Write a user-visible text value to a temp file for `textfile=` (avoids
+     *  all filtergraph quoting issues — apostrophes, quotes, colons, commas). */
+    const writeTextFile = (line: string): string => {
+      if (!textDir) textDir = fs.mkdtempSync(join(tmpdir(), 'empirelaunch-ovlytext-'));
+      const f = join(textDir, `t${textCounter++}.txt`);
+      fs.writeFileSync(f, line, 'utf8');
+      return f;
+    };
     try {
       const total = probeSeconds(inputFile) || (sceneStarts.length > 0 ? sceneStarts[sceneStarts.length - 1] + (sceneSeconds[sceneSeconds.length - 1] || 0) : 0);
       const vf: string[] = [];
@@ -149,20 +170,20 @@ export function applyAssemblyOverlays(
         const enable = `enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'`;
         let y = 340;
         group.lines.forEach((line) => {
-          const safe = escapeDrawtext(line);
+          const tf = writeTextFile(line);
           vf.push(
-            `drawtext=fontfile='${font}':text='${safe}':fontsize=54:fontcolor=white:x=90:y=${y}:line_spacing=8:box=1:boxcolor=black@0.38:boxborderw=28:${enable}`,
+            `drawtext=fontfile='${font}':textfile='${tf}':expansion=none:fontsize=54:fontcolor=white:x=90:y=${y}:line_spacing=8:box=1:boxcolor=black@0.38:boxborderw=28:${enable}`,
           );
           y += 118;
         });
       });
       // Persistent bottom bar (translucent band + centered domain text), whole video.
       if (spec.bottomBar) {
-        const safe = escapeDrawtext(spec.bottomBar);
+        const bf = writeTextFile(spec.bottomBar);
         const enable = `enable='between(t,0,${total.toFixed(3)})'`;
         vf.push(
           `drawbox=x=0:y=1752:w=1080:h=168:color=black@0.72:t=fill:${enable}`,
-          `drawtext=fontfile='${font}':text='${safe}':fontsize=60:fontcolor=white:x=(w-text_w)/2:y=1782:${enable}`,
+          `drawtext=fontfile='${font}':textfile='${bf}':expansion=none:fontsize=60:fontcolor=white:x=(w-text_w)/2:y=1782:${enable}`,
         );
       }
       if (!vf.length) {
@@ -184,6 +205,10 @@ export function applyAssemblyOverlays(
       resolve();
     } catch (e:any) {
       reject(new Error('applyAssemblyOverlays failed: ' + String(e?.message ?? e)));
+    } finally {
+      if (textDir) {
+        try { fs.rmSync(textDir, { recursive: true, force: true }); } catch { /* best effort cleanup */ }
+      }
     }
   });
 }

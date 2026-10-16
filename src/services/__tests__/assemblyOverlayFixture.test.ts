@@ -75,7 +75,11 @@ test('assembly overlays: scene-windowed bullets + persistent bottom bar on the r
 
     const spec = normalizeAssemblyOverlays(
       {
-        perScene: [{ lines: ['Introducing EmpireLaunch AI.', 'Your new go to platform.'] }, { lines: [] }],
+        // Discriminating text: line 2 carries an apostrophe + comma — the exact
+        // case that BROKE the render #7 live fire (inline text='...\'...' splits
+        // ffmpeg's filtergraph at the next enable='between(t,...' comma). Must
+        // render via textfile=. The old inline text='...' path FAILS on this.
+        perScene: [{ lines: ['Introducing EmpireLaunch AI.', "and the best part- you don't pay for credits with this platform."] }, { lines: [] }],
         bottomBar: 'EmpireLaunchAI.com',
       },
       2,
