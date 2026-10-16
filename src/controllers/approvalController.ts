@@ -173,6 +173,30 @@ export const createApproval = async (req: Request, res: Response) => {
         return res.status(400).json({ error: 'Invalid faceless narrationScript — expected non-empty lines (array or newline/| string)' });
       }
       enrichedPayload.narrationScript = narrationScript ?? undefined;
+      // RENDER #7 (owner ADJUST #2): OPT-IN on-screen overlays (per-scene bullet
+      // lines + persistent bottom-bar text) and screenshot/visual prompt overrides,
+      // forwarded to the scene pipeline exactly like narrationScript. Absent /
+      // null = default OFF (pure `-c copy` passthrough assembly, existing prompts).
+      const onScreenOverlaysRaw = req.body.onScreenOverlays !== undefined ? req.body.onScreenOverlays : (payload as any)?.onScreenOverlays;
+      const visualPromptOverridesRaw = req.body.visualPromptOverrides !== undefined ? req.body.visualPromptOverrides : (payload as any)?.visualPromptOverrides;
+      const onScreenOverlays = onScreenOverlaysRaw !== undefined && onScreenOverlaysRaw !== null
+        ? onScreenOverlaysRaw
+        : undefined;
+      if (onScreenOverlays !== undefined && (typeof onScreenOverlays !== 'object' || Array.isArray(onScreenOverlays))) {
+        return res.status(400).json({ error: 'Invalid faceless onScreenOverlays — expected { perScene?: {lines:string[]}[], bottomBar?: string }' });
+      }
+      const visualPromptOverrides = Array.isArray(visualPromptOverridesRaw)
+        ? visualPromptOverridesRaw.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
+        : visualPromptOverridesRaw !== undefined && visualPromptOverridesRaw !== null
+          ? visualPromptOverridesRaw
+          : undefined;
+      if (visualPromptOverrides !== undefined && !Array.isArray(visualPromptOverrides)) {
+        return res.status(400).json({ error: 'Invalid faceless visualPromptOverrides — expected an array of non-empty strings (scene-number-1 aligned)' });
+      }
+      enrichedPayload.onScreenOverlays = onScreenOverlays ?? undefined;
+      enrichedPayload.visualPromptOverrides = Array.isArray(visualPromptOverrides) && visualPromptOverrides.length
+        ? visualPromptOverrides
+        : undefined;
       // Feed mood into the per-scene prompt so the video's tone reflects it.
       // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
       // appending an instruction sentence to the idea text. The appended hint
@@ -197,6 +221,9 @@ export const createApproval = async (req: Request, res: Response) => {
           // (zoompan) — never Sora motion — per the owner-approved cost model.
           mode: 'faceless',
           narrationScript,
+          // RENDER #7 OPT-IN: drawn at assembly only (never baked into AI frames).
+          onScreenOverlays,
+          visualPromptOverrides,
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
