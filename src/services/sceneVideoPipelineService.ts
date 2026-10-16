@@ -14,6 +14,7 @@ import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExpor
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
 import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences, containsLinkInBio, stripLinkInBioPhrases } from './creativeTransformation.js';
+import { normalizeAssemblyOverlays, applyAssemblyOverlays, resolveSceneVideoStarts, probeClipSeconds } from './assemblyOverlays.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -37,7 +38,15 @@ export interface SoraSpan {
   /** Consolidated continuous-take prompt: all span beats IN ORDER + the block prompt. */
   prompt: string;
 }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; narrationScript?: string[]; }
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; narrationScript?: string[];
+  /** RENDER #7 OVERLAYS (owner ADJUST #2 — OPT-IN, default OFF): on-screen bullet
+   *  lines per scene + persistent bottom-bar text, drawn at ASSEMBLY only (never
+   *  baked into AI images). Persisted in metadata as `onScreenOverlays`. */
+  onScreenOverlays?: unknown;
+  /** RENDER #7 SCREENSHOT SOURCING (OPT-IN): replace planned visualPrompts with
+   *  real UI screenshots (onboarding / pay screens) — index-aligned with scenes.
+   *  Persisted in metadata; applied to scene rows at creation. */
+  visualPromptOverrides?: string[]; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
  *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
@@ -2311,14 +2320,21 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (linkInBioPass.script !== planned) planned.splice(0, planned.length, ...linkInBioPass.script);
     if (linkInBioPass.strippedNarrationScenes.length || linkInBioPass.strippedVisualScenes.length) trace(`link_in_bio_ban project=${projectId} narrationScenes=[${linkInBioPass.strippedNarrationScenes.join(',')}] visualScenes=[${linkInBioPass.strippedVisualScenes.join(',')}]`);
     const overrideSpoken = narrationOverride ? narrationOverride.length - verifySellingPointsSpoken(planned, narrationOverride).missing.length : 0;
+    // RENDER #7 OVERLAYS + SCREENSHOT OVERRIDES (owner ADJUST #2 — OPT-IN metadata;
+    // absent = pixel-exact current output). Normalized here so the persisted record
+    // is clean and the worker's assembly pass has a boundary-checked spec.
+    const onScreenOverlaysMeta = normalizeAssemblyOverlays(input.onScreenOverlays, planned.length) ?? undefined;
+    const visualPromptOverridesMeta = Array.isArray(input.visualPromptOverrides)
+      ? (input.visualPromptOverrides as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      : undefined;
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
-      return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:s.visualPrompt,status:'pending',metadata:{
+      return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:(visualPromptOverridesMeta && visualPromptOverridesMeta[s.sceneNumber-1]) || s.visualPrompt,status:'pending',metadata:{
         importantSora:isMotion,
         ...(isMotion && mode === 'scene' ? { veoWindowReady: true } : {}),
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
@@ -2493,7 +2509,25 @@ if (!skipGeneration) {
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
-      const assembled=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled); trace(`ffmpeg_assembly_end project=${projectId}`);
+      const assembled0=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled0); trace(`ffmpeg_assembly_end project=${projectId}`);
+      // RENDER #7 ON-SCREEN OVERLAYS (owner ADJUST #2 — bullet points in writing on
+      // screen + EmpireLaunchAI.com pinned at the bottom). OPT-IN via metadata
+      // `onScreenOverlays` (normalized at creation); absent = concatClips output,
+      // zero re-encode. Applied AFTER assembly so the xfade/fadeblack/scheduler
+      // mathematics stay untouched and the delivered video is THE overlaid file
+      // (downstream QC + variant export + R2 upload all see it).
+      let assembled = assembled0;
+      const overlaySpec = normalizeAssemblyOverlays((pmeta.onScreenOverlays as any), clips.length);
+      if (overlaySpec) {
+        trace(`overlay_start project=${projectId} scenes=${clips.length} bottomBar=${Boolean(overlaySpec.bottomBar)}`);
+        const sceneSeconds = clips.map((c: string) => probeClipSeconds(c));
+        const trSecNow = Math.min(Number(process.env.SCENE_TRANSITION_MS ?? 800), 1000) / 1000;
+        const sceneStarts = resolveSceneVideoStarts(sceneSeconds, trSecNow);
+        const overlaid = path.join(dir, 'final_overlay.mp4');
+        await applyAssemblyOverlays(assembled0, overlaid, overlaySpec, sceneStarts, sceneSeconds);
+        assembled = overlaid;
+        trace(`overlay_end project=${projectId}`);
+      }
       // POST-RENDER SMOOTHNESS QC (deterministic ffprobe; NO AI / NO paid render).
       // Auto-flags choppy/silent/multi-audio renders BEFORE upload and surfaces the
       // report on the draft payload for the GPT-5.2 exception-handler router
