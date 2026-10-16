@@ -47,6 +47,20 @@ export function isCustomerFacingOverlayText(text: string): boolean {
 export function appendNoTextGuard(prompt: string): string {
   return `${String(prompt || '').trim()} — IMPORTANT: photography/3D style only. Absolutely NO text, NO words, NO letters, NO numbers, NO logos, NO UI screens, NO bullet points, NO captions, NO labels anywhere in the image. Create the scene as a purely visual cinematic shot (9:16 vertical composition).`;
 }
+/** RENDER #5 ADJUST (owner Oct 12 — "subject framing"): deterministic portrait-
+ *  composition guidance for scene stills. GPT Image renders 1024x1792 portraits
+ *  that the Ken Burns zoompan then pushes into; without framing instructions the
+ *  subject can sit off-center, too small, or partially cropped out of the frame.
+ *  Purely an IMAGERY/composition instruction (never adds claim/benefit text), so
+ *  the F4 visual-prompt ban is unaffected. Mirrors appendNoTextGuard: idempotent. */
+export function appendFramingGuard(prompt: string): string {
+  const guard = 'Composition: portrait 9:16 — keep the subject fully in frame, centered, with comfortable headroom and margin around the subject; never crop the subject, face, or main product at the frame edge.';
+  return `${String(prompt || '').trim()} — ${guard}`;
+}
+/** Guards applied TOGETHER to faceless scene stills (F1 no-text + owner framing). */
+export function appendSceneStillGuards(prompt: string): string {
+  return appendFramingGuard(appendNoTextGuard(prompt));
+}
 
 export class RenderingEngine {
   private tempDir: string;
@@ -144,7 +158,7 @@ export class RenderingEngine {
     let b64Json: string | undefined;
     if (inputImageUrl) {
       try {
-        b64Json = await this.generateFromInputImage(inputImageUrl, opts?.noText ? appendNoTextGuard(prompt) : prompt, quality, apiKey, opts?.size);
+        b64Json = await this.generateFromInputImage(inputImageUrl, opts?.noText ? appendSceneStillGuards(prompt) : prompt, quality, apiKey, opts?.size);
         console.log(`[RenderingEngine] Image generated via gpt-image-2 (input-image edit)`);
       } catch (inputErr: any) {
         console.warn(`[RenderingEngine] Input-image edit failed, falling back to text-only: ${inputErr.message}`);
@@ -160,7 +174,7 @@ export class RenderingEngine {
         },
         body: JSON.stringify({
           model: 'gpt-image-2',
-          prompt: opts?.noText ? appendNoTextGuard(prompt) : prompt,
+          prompt: opts?.noText ? appendSceneStillGuards(prompt) : prompt,
           n: 1,
           quality,
           ...(opts?.size ? { size: opts.size } : {}),
