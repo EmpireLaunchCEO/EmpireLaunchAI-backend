@@ -183,7 +183,7 @@ test('scene-boundary assembly: single voice (no 6s overlap), placements, tail, n
     const onsetCases: Array<[string, number, number]> = [
       ['tone1 (330 @ 0.0)', 0.0, 330],
       ['tone2 (660 @ 6.0)', 6.0, 660],
-      ['tone3 (990 @ 10.2)', 10.2, 990],
+      ['tone3 (990 @ 9.4)', 9.4, 990],
     ];
     for (const [label, start, freq] of onsetCases) {
       const s = onsetSlices(out, start, freq);
