@@ -50,13 +50,11 @@ function cropLuma(file: string, ss: number, x: number, y: number, w: number, h: 
   return { max, mean: sum / Math.max(1, raw.length) };
 }
 
-// KNOWN ISSUE (Oct 16, budget-cut wrap-up): the overlay ffmpeg graph currently
-// errors when executed (pure helpers all green; the bullet-fade/overlay filter
-// chain needs one focused debug pass). Gated behind RUN_OVERLAY_FIXTURE=1 so the
-// suite stays green; un-gate after the graph fix, then this fixture must pass
-// before the render #7 gate opens.
-const overlayDebugGate = process.env.RUN_OVERLAY_FIXTURE === '1';
-test('assembly overlays: scene-windowed bullets + persistent bottom bar on the real graph', { skip: !HAS_FFMPEG || !overlayDebugGate }, async () => {
+// Heavy-ish ffmpeg fixture executing the REAL overlay graph (renderClip ->
+// concatClips -> applyAssemblyOverlays) with zero paid APIs. Runs by default;
+// skipped only when ffmpeg is unavailable on the host. Keep standalone-style
+// runs (one heavy fixture at a time).
+test('assembly overlays: scene-windowed bullets + persistent bottom bar on the real graph', { skip: !HAS_FFMPEG }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ovlyfix-'));
   try {
     const s1 = join(dir, 's1.png');
