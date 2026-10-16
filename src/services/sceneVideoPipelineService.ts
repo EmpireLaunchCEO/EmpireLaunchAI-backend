@@ -657,6 +657,16 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
           );
         }
         const fadeOut = Math.max(0, parseFloat(fit) - 0.05).toFixed(3);
+        // ONSET-INTEGRITY FADE (RENDER #7 PREP — owner ADJUST #2 "stitch at scene
+        // junctions" / "G of 'Go' truncated"): the old afade=t=in:d=0.03 (30ms) ran
+        // over the first speech phoneme — TTS clips lead with only ~10-60ms of
+        // silence, so 30ms of fade landed ON the onset and swallowed the plosive
+        // burst ("G" of "Go" measured -4dB head dip in render #6) and softened the
+        // first vowel ("and-" at the scene 1→2 junction). The fade exists ONLY as a
+        // click guard at the track head; 5ms is enough to break the sample-boundary
+        // click while ending BEFORE any speech (attack lands at full level, burst
+        // intact — proven by the onset-integrity assertion in the boundary fixture).
+        const headFadeS = 0.005;
         // Each narration is edited to fit its own window, padded with silence out
         // to EXACTLY the video total (apad whole_dur = totalSec - start), then
         // adelay'd to its own scene's global start. The tracks are then mixed on
@@ -667,7 +677,7 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
         // real timeline position; normalize=0 keeps full loudness (default
         // normalizes by 1/inputs, which would attenuate single-voice passages).
         const padTo = Math.max(0.05, parseFloat(totalSec) - startMs / 1000).toFixed(3);
-        aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,afade=t=in:d=0.03,afade=t=out:st=${fadeOut}:d=0.03,apad=whole_dur=${padTo},adelay=${startMs}:all=1[ad${aIdx}]`);
+        aParts.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:${fit},asetpts=N/SR/TB,afade=t=in:d=${headFadeS},afade=t=out:st=${fadeOut}:d=0.03,apad=whole_dur=${padTo},adelay=${startMs}:all=1[ad${aIdx}]`);
         aIns.push(`[ad${aIdx}]`);
         aIdx++;
         prevSpeechEndMs = startMs + fitMs;

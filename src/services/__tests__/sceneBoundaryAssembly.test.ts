@@ -16,6 +16,8 @@
  *     speaking (exact Goertzel bins; ratios immune to AAC harmonic distortion),
  *   - every track is audible inside its OWN speech window (placement intact),
  *   - the last track survives to the very end (no tail clip — PR #116 promise),
+ *   - every narration ONSET lands at full level (no clip-head fade eating
+ *     plosive bursts / first vowels — render #7 owner ADJUST #2),
  *   - per-boundary video luma ramps monotonically (no flash-through-black),
  *   - delivered duration stays on the dissolve-compensated budget (no drift).
  *
@@ -67,6 +69,22 @@ function tonePowerAt(file: string, ss: number, dur: number, freq: number): numbe
   const mag = Math.sqrt(q1 * q1 + q2 * q2 - coeff * q1 * q2);
   const amp = (mag / N) * 2; // amplitude of the sinusoid at freq
   return 20 * Math.log10(amp + 1e-9);
+}
+/** ONSET-INTEGRITY probe (RENDER #7 PREP — owner ADJUST #2 "stitch at scene
+ *  junctions": "G of 'Go' truncated", "and-" at the scene 1→2 junction). The old
+ *  assembler applied afade=t=in:d=0.03 (30ms) to EVERY narration track head; TTS
+ *  clips lead with only ~10-60ms of silence, so the fade landed ON the first
+ *  phoneme and attenuated the onset (render #6's "Go" plosive measured -4dB head
+ *  dip). The fix is a 5ms click-guard that ends BEFORE the speech. Each slice is
+ *  the SAME 50ms Goertzel window (same bin bias for all tones — ratios only, so
+ *  the 330/990 half-bin tones still discriminate). AAC encoder priming (~23ms)
+ *  shifts the whole timeline, so the fade zone is read as min(slices[0..2]) vs
+ *  max(slices[4..7]): a 30ms fade reads ~3.1dB down in the attack slices, a 5ms
+ *  guard reads <1dB down. */
+function onsetSlices(file: string, start: number, freq: number): number[] {
+  const out: number[] = [];
+  for (let k = 0; k < 8; k++) out.push(tonePowerAt(file, start + k * 0.05, 0.05, freq));
+  return out;
 }
 /** Per-0.1s mean luma (0-255) over [ss, ss+dur]. */
 function lumaBuckets(file: string, ss: number, dur: number, w = 135, h = 240): number[] {
@@ -157,7 +175,26 @@ test('scene-boundary assembly: single voice (no 6s overlap), placements, tail, n
     assert.ok(tonePowerAt(out, 10.50, 0.9, 990) > -35, 'tone3 (990) audible in scene 3');
     assert.ok(tonePowerAt(out, 6.40, 1.0, 330) < -48, 'tone1 does not bleed into scene 2 (330 @6.4s)');
 
-    // (4) TAIL INTACT — the last tone must survive to the end (PR #116 promise).
+    // (3.5) ONSET INTEGRITY — every narration must START at full level (no
+    //     clip-head fade eating plosive onsets / first vowels). For each track's
+    //     placed start, the attack slices (0..150ms) must stay within 2dB of the
+    //     steady slices (200..400ms): the old afade=t=in:d=0.03 read ~3.1dB down
+    //     (render #6 "G" of "Go" — owner ADJUST #2), the 5ms guard reads <1dB.
+    const onsetCases: Array<[string, number, number]> = [
+      ['tone1 (330 @ 0.0)', 0.0, 330],
+      ['tone2 (660 @ 6.0)', 6.0, 660],
+      ['tone3 (990 @ 9.4)', 9.4, 990],
+    ];
+    for (const [label, start, freq] of onsetCases) {
+      const s = onsetSlices(out, start, freq);
+      assert.ok(Math.max(...s.slice(4)) > -40, `${label}: tone audible steady (max ${Math.max(...s.slice(4)).toFixed(1)} dB)`);
+      const attack = Math.min(...s.slice(0, 3));
+      const steady = Math.max(...s.slice(4));
+      assert.ok(steady - attack <= 2.0, `${label}: onset at full level (attack ${attack.toFixed(1)} dB vs steady ${steady.toFixed(1)} dB; was ~3.1dB with the 30ms fade)`);
+      assert.ok(attack > -48, `${label}: attack slice audible beyond floor (${attack.toFixed(1)} dB)`);
+    }
+
+// (4) TAIL INTACT — the last tone must survive to the end (PR #116 promise).
     const tail = tonePowerAt(out, dur - 0.70, 0.50, 990);
     assert.ok(tail > -45, `last narration present at the very end (990 @${(dur - 0.70).toFixed(2)}s = ${tail.toFixed(1)} dB)`);
 
