@@ -65,7 +65,7 @@ export class EmpireStudioController {
    */
   async createNeuralTwin(req: Request, res: Response) {
     const userId = (req as any).userId;
-    const { photoUrl, script, voiceId } = req.body;
+    const { photoUrl, script, voiceId, voice, mood, duration, voiceStyle } = req.body;
 
     if (!photoUrl || !script) {
       return res.status(400).json({ error: 'photoUrl and script are required' });
@@ -76,7 +76,11 @@ export class EmpireStudioController {
         userId,
         photoUrl,
         script,
-        voiceId
+        voiceId,
+        voice: ['female', 'male', 'none'].includes(String(voice || '').toLowerCase()) ? String(voice).toLowerCase() as 'female' | 'male' | 'none' : undefined,
+        mood,
+        duration: typeof duration === 'number' ? duration : undefined,
+        voiceStyle
       });
       res.json(asset);
     } catch (error: unknown) {
