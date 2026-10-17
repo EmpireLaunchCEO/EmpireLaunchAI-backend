@@ -1747,6 +1747,55 @@ export function estimateNarrationRoom(lines: string[], wordsPerSec = 3.0, lineGa
   const words = lines.join(' ').split(' ').filter(t => /[A-Za-z0-9]/.test(t)).length;
   return words / wordsPerSec + lineGapSec * lines.length;
 }
+/** RENDER #8 FIRE #2 FIX (Oct 17 — live fire tripped the fail-closed
+ *  NARRATION_OVERLAP_INVARIANT at assembly: track=4 start=25701ms <
+ *  prevSpeechEnd=26926ms — script overfits the 29.8s budget). ROOT CAUSE: the
+ *  estimate-based floors [13,5,4,4,3] UNDER-SIZED the REAL nova TTS spoken
+ *  durations measured from fire #2's actual audio assets (project caa06528,
+ *  scene m4as, 22.05k f32 back-scan @ -44 dBFS — the same algorithm the
+ *  assembly invariant uses; true speech ends = [13.75, 5.499, 3.688, 4.377,
+ *  3.949]s). The word-count estimate assumed ~3.0 words/sec; nova speaks 5 of
+ *  the 8 lines slower, so scene4's narration ran 4.38s in a 4s floor and the
+ *  cumulative speech end (26.9s) exceeded what a 29.8s video can place (max
+ *  track start 25.7s). PLAIN FLOORS WERE NEVER GOING TO FIT THE 30s BAND — the
+ *  script's real narration is 31.5s, so honest middle-scene growth is required.
+ *  FLOORS NOW COME FROM MEASURED TRUTH: the re-mapped scene narration text
+ *  (lines joined with a space, normalized like the persisted DB value) is
+ *  looked up in MEASURED_NARRATION_MS and the floor = ceil(measured + margin);
+ *  the 400ms margin absorbs TTS regeneration variance (same voice/text
+ *  regenerates within ~10-60ms — 6-40x headroom) plus the assembly's +50ms fit
+ *  guard. The owner's 8 lines land as [15,6,5,5,5] — bookends 15s/5s LOCKED
+ *  (scene1 absorbs lines 1-4 incl. the bullet phrases; scene5 holds the CTA +
+ *  flash), middles grow honestly to 6/5/5s -> sum 36 -> delivered ~32.8s (the
+ *  real narration is 31.5s; render #7's 30.8s band was only reachable because
+ *  its TTS ran shorter). UNMEASURED scripts keep the historical estimate floor
+ *  (never less than the old behavior) — the measured registry simply replaces
+ *  the guess for the owner's dictation, where it is provably right. */
+export const MEASURED_NARRATION_MS: Record<string, number> = {
+  'introducing empirelaunch ai. your new go to platform. you get 76 videos a month, and the best part- you don\'t pay for credits with this platform. create your content, edit your personal content,': 13750,
+  'do you create designs? you get 50 a month on this platform!': 5499,
+  'you will save hours of work, and save hundreds monthly.': 3688,
+  'build your brand and business confidently with this platform.': 4377,
+  'go to empirelaunchai.com to get started today!!': 3949,
+};
+/** Safety margin added to the MEASURED narration ms before rounding up to the
+ *  integer-second scene floor (see the fix comment above). */
+export const MEASURED_NARRATION_MARGIN_MS = 400;
+/** Normalize a scene's re-mapped narration lines into the registry key: the
+ *  persisted video_scenes.narration value (lines joined with a single space),
+ *  lowercased + whitespace-collapsed. Mirrors fire #2's DB dump exactly. */
+export function normalizeMeasuredNarrationKey(lines: string[]): string {
+  return lines.join(' ').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+/** Per-scene narration FLOOR for the override balance: MEASURED truth + margin
+ *  when the scene's narration matches the registry, else the historical
+ *  estimate (unmeasured scripts). Deterministic, zero paid calls. */
+export function narrationFloorSeconds(lines: string[]): number {
+  const key = normalizeMeasuredNarrationKey(lines);
+  const measured = MEASURED_NARRATION_MS[key];
+  if (typeof measured === 'number') return Math.max(3, Math.ceil((measured + MEASURED_NARRATION_MARGIN_MS) / 1000));
+  return Math.max(3, Math.ceil(estimateNarrationRoom(lines)));
+}
 /** Size scenes so each ≥ its narration room and the durations sum EXACTLY to the
  *  dissolve-compensated integer target (round(dissolveCompensatedSceneSum) — the
  *  same target normalizePlanTimeBudget produces). Surplus is distributed last →
@@ -2405,7 +2454,12 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         };
         const prelim = planned.map((s, i) => wantedAt(i) ?? s.duration);
         const remapped = remapNarrationToWindows(narrationOverride, prelim);
-        const floors = remapped.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
+        // RENDER #8 FIRE #2 FIX (Oct 17): floors from MEASURED truth (the owner's
+        // dictated lines have real per-scene spoken durations measured from
+        // fire #2's audio assets) + 400ms margin; unmeasured scripts fall back
+        // to the historical estimate. See narrationFloorSeconds for the full
+        // root-cause writeup.
+        const floors = remapped.map((m) => narrationFloorSeconds(m));
         const resized = applySceneDurationOverrides(planned, sceneDurationOverrides, duration, floors);
         overridePlan.mapping = remapped;
         planned.splice(0, planned.length, ...resized.map((s, i) => ({ ...s, duration: resized[i].duration, narration: (remapped[i] || []).join(' ') })));
