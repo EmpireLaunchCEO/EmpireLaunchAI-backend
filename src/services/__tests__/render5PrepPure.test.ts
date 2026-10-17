@@ -31,6 +31,7 @@ import {
   finalCopyFallbackLine,
   normalizeSceneDurationOverrides,
   applySceneDurationOverrides,
+  remapNarrationToWindows,
 } from '../sceneVideoPipelineService.js';
 import {
   containsLinkInBio,
@@ -222,4 +223,41 @@ test('RENDER #8 scene-duration overrides: unequal still layout keeps the exact d
   assert.ok(arrOut[4].duration >= 3, 'flexible scenes never go below the 3s floor');
   // null / undefined / empty = no-op (current pixel-exact behavior)
   assert.equal(applySceneDurationOverrides(scenes, null, 30), scenes);
+});
+
+// RENDER #8 LIVE-FIRE REGRESSION (Oct 17 — NARRATION_OVERLAP_INVARIANT): the
+// first fire's even mapping [2,2,2,1,1] needed rooms ~[6,8,10,5,4] but the
+// override balance shrank scenes to [15,4,6,3,5], overfilling the band. FIX =
+// re-map the 8 verbatim lines onto the override windows ([4,1,1,1,1]) and floor
+// every flexible scene at its narration speech room.
+test('RENDER #8 override regression: re-map + narration floors keep every scene >= its speech room (owner script)', () => {
+  const script = [
+    { sceneNumber: 1, duration: 6, narration: 'a1', visualType: 'still' as const, visualPrompt: 'p1' },
+    { sceneNumber: 2, duration: 8, narration: 'a2', visualType: 'still' as const, visualPrompt: 'p2' },
+    { sceneNumber: 3, duration: 10, narration: 'a3', visualType: 'still' as const, visualPrompt: 'p3' },
+    { sceneNumber: 4, duration: 5, narration: 'a4', visualType: 'still' as const, visualPrompt: 'p4' },
+    { sceneNumber: 5, duration: 4, narration: 'a5', visualType: 'still' as const, visualPrompt: 'p5' },
+  ];
+  const overrides = normalizeSceneDurationOverrides({ 1: 15, 5: 5 }, 5);
+  const prelim = script.map((s, i) => (i === 0 ? 15 : i === 4 ? 5 : s.duration));
+  const mapping = remapNarrationToWindows(OWNER_SCRIPT, prelim);
+  // [4,1,1,1,1]: scene1 hangs its 15s window taking lines 1-4 (the three bullet
+  // phrases live inside them), scenes 2-5 one line each, order preserved, 8/8.
+  assert.deepEqual(mapping.map((m) => m.length), [4, 1, 1, 1, 1], 'ordered window re-map');
+  assert.deepEqual(mapping.flat(), OWNER_SCRIPT, 'all 8 lines spoken exactly once in order');
+  const floors = mapping.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
+  assert.deepEqual(floors, [13, 5, 4, 4, 3], 'narration floors from the re-mapped windows');
+  const out = applySceneDurationOverrides(script as any, overrides, 30, floors);
+  assert.deepEqual(out.map((s) => s.duration), [15, 5, 4, 4, 5], 'locked bookends kept; flexible scenes floored at speech rooms');
+  const sum = out.reduce((a: number, s: any) => a + s.duration, 0);
+  assert.equal(sum, 33, `exact 30s band kept: re-map + floors fit the plan with NO length overrun (sum=${sum})`);
+  assert.equal(deliveredVideoDuration(out), 29.8, 'delivered 29.8s — the original ~30s agreed band, every word spoken');
+  out.forEach((s: any, i: number) => {
+    assert.ok(s.duration >= floors[i], `scene ${i + 1} ${s.duration}s >= narration floor ${floors[i]}s`);
+  });
+  // Guard: WITHOUT floors the balance still over-shrinks (the pre-fix failure);
+  // the floors parameter is what stops the invariant trip.
+  const noFloors = applySceneDurationOverrides(script as any, overrides, 30);
+  assert.ok(noFloors.map((s) => s.duration).join(',') !== out.map((s) => s.duration).join(','), 'floors change the outcome (pre-fix behavior differs)');
+  assert.ok(Math.max(...noFloors.map((s) => s.duration)) >= 15, 'lock bookends hold either way');
 });
