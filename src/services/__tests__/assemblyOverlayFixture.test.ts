@@ -341,7 +341,8 @@ test('RENDER #8: {1:15,5:5} overrides (30s delivered) + autofit bullets on panel
     const mA = (t: number) => zoneMean(out, 300, 400, 480, 600, t);
     assert.ok(Math.abs(mA(15.6) - 145) < 16, `scene2 (Y≈145) present at 15.6 (got ${mA(15.6).toFixed(0)})`);
     assert.ok(Math.abs(mA(18.3) - 85) < 16, `scene3 (Y≈85) present at 18.3 (got ${mA(18.3).toFixed(0)})`);
-    assert.ok(Math.abs(mA(21.3) - 196) < 16, `scene4 (Y≈196) present at 21.3 (got ${mA(21.3).toFixed(0)})`);
+    // scene4 dissolves in over [20.6, 21.4] — probe POST-dissolve (22.2) at full luma
+    assert.ok(Math.abs(mA(22.2) - 196) < 16, `scene4 (Y≈196) present at 22.2 (got ${mA(22.2).toFixed(0)})`);
     assert.ok(Math.abs(mA(23.4) - 196) < 16, `scene4 still at 23.4 before scene5 dissolve (got ${mA(23.4).toFixed(0)})`);
 
     // (8) END FLASH — window [29.8-1.2, 29.8]; full-frame white covers bar/panel
