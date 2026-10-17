@@ -43,7 +43,7 @@ test('normalizeAssemblyOverlays: clean spec / malformed dropped / null when empt
   );
   assert.ok(spec, 'spec present');
   assert.equal(spec?.perScene?.length, 3, 'empty/malformed groups dropped');
-  assert.equal(spec?.perScene?.[0]?.lines.length, 2);
+  assert.equal(spec?.perScene?.[0]?.lines?.length, 2);
   assert.equal(spec?.bottomBar, 'EmpireLaunchAI.com');
 
   // absent / empty → null (today's pixel-exact output, zero re-encode)

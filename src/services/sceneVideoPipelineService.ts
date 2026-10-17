@@ -46,7 +46,17 @@ export interface VideoProjectInput { userId: string; title: string; idea: string
   /** RENDER #7 SCREENSHOT SOURCING (OPT-IN): replace planned visualPrompts with
    *  real UI screenshots (onboarding / pay screens) — index-aligned with scenes.
    *  Persisted in metadata; applied to scene rows at creation. */
-  visualPromptOverrides?: string[]; }
+  visualPromptOverrides?: string[];
+  /** RENDER #8 (owner ADJUST #3, OPT-IN): EXPLICIT per-scene durations, e.g.
+   *  { 1: 15, 5: 5 } (sceneNumber -> seconds) for the launch video's unequal
+   *  still layout. Honored by applySceneDurationOverrides AFTER narration sizing;
+   *  middle scenes absorb the remaining dissolve-compensated budget. */
+  sceneDurationOverrides?: Record<string, number> | number[];
+  /** RENDER #8 SCREEN-FIT (owner ADJUST #3, OPT-IN): scale a direct-image/
+   *  screenshot still to COVER the 1080x1920 frame (center-crop overflow edges)
+   *  instead of contain+letterbox — "photos more screen-fitting". Our exact
+   *  1080x1920 sources are a no-op; non-9:16 sources fill the frame. */
+  stillCoverFit?: boolean; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
  *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
@@ -311,7 +321,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Re
   return report;
 }
 
-export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right'; padVideoToAudio?: boolean }): Promise<void> {
+export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right'; padVideoToAudio?: boolean; stillCoverFit?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
@@ -411,12 +421,22 @@ export function renderClip(input: string, output: string, duration: number, audi
     // which reads exactly as a "flash" at every cut. zoompan already emits a
     // smooth eased 30fps zoom (velocity ~0 at both ends via the smoothstep below),
     // so the extra interpolator adds nothing but the boundary artifact. Dropped.
+    // RENDER #8 (owner ADJUST #3 — "photos more screen-fitting"): stillCoverFit
+    // scales a still to COVER the 1080x1920 frame (center-crop the overflow)
+    // instead of contain+letterbox. Exact 1080x1920 screenshots are a no-op;
+    // non-9:16 sources fill the frame edge-to-edge ("nothing cut off" of the
+    // frame IS what cover-fit guarantees — every pixel of the output is the
+    // photo, the crop only trims the source's short axis overflow symmetrically).
+    const fitChain = opts?.stillCoverFit
+      ? `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`
+      : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`;
     const kenburnsVf = kenburns
-      ? `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,zoompan=z=${kbZ}:d=${kbFrames}:${kbXY}:s=1080x1920:fps=30`
+      ? `${fitChain},zoompan=z=${kbZ}:d=${kbFrames}:${kbXY}:s=1080x1920:fps=30`
       // Contain/refit — NEVER crop — every segment (still AND Sora motion) to the
       // 1080x1920 / 9:16 output contract BEFORE fps normalization, so concatClips'
-      // xfade math sees identical cadence AND dimensions.
-      : `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2`;
+      // xfade math sees identical cadence AND dimensions. (stillCoverFit swaps to
+      // cover-fit above for screenshot stills.)
+      : fitChain;
     // tpad clone-fill for the very-short-source case: freeze last frame + 250ms
     // fades (clean, no loop splice). Applied AFTER fps normalization (same cadence).
     const padFill = (!isImage && (!padByLoop || extending) && srcDur > 0)
@@ -1763,6 +1783,99 @@ export function applyNarrationOverride(script: SceneScript[], lines: string[], t
   const next = script.map((s, i) => ({ ...s, narration: mapping[i].join(' '), duration: sizes[i] ?? s.duration }));
   return { script: next, mapping };
 }
+/** RENDER #8 (owner ADJUST #3 — scene1 ~15s + scene5 ~5s, unequal still layout):
+ *  APPLY EXPLICIT per-scene durations to a plan while keeping the scene-sum
+ *  EXACTLY at the dissolve-compensated integer target (round(dissolveCompensated
+ *  SceneSum(target, n)) = 33 for a 30s/5-scene launch video, so the delivered
+ *  file lands at 30s). Pure + deterministic:
+ *   - `overrides` = { sceneNumber: seconds } (1-based, matches SceneScript)
+ *     OR a 0-based number[] aligned with script order. Malformed/non-finite
+ *     entries are DROPPED, never thrown.
+ *   - Overridden scenes get their explicit duration (>= 3s floor). Non-overridden
+ *     scenes keep their current duration, then a last->first balance pass re-sizes
+ *     so the TOTAL equals the target: surplus is taken from the largest flexible
+ *     scenes, deficit added to the smallest (never below 3s), mirroring
+ *     sizeScenesToNarration's greedy pass — so the middle scenes absorb the
+ *     remaining budget around the owner's locked 15s/5s bookends.
+ *   - Returns the re-balanced script; when no usable overrides, script unchanged.
+ */
+/** RENDER #8 input sanitizer: accept {sceneNumber: seconds} (1-based) or a
+ *  number[] (0-based, aligned with script order) and return a CLEAN payload in
+ *  the SAME shape (or null when nothing usable remains). Invalid entries are
+ *  dropped — never thrown. applySceneDurationOverrides consumes the result. */
+export function normalizeSceneDurationOverrides(
+  overrides: Record<string, number> | number[] | null | undefined,
+  sceneCount: number,
+): Record<string, number> | number[] | null {
+  if (overrides == null || sceneCount < 1) return null;
+  const clean = (v: unknown): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 2 && n <= 60 ? Math.max(3, Math.round(n)) : null;
+  };
+  if (Array.isArray(overrides)) {
+    const out: number[] = [];
+    for (let i = 0; i < Math.min(overrides.length, sceneCount); i++) {
+      const c = clean(overrides[i]);
+      if (c !== null) out.push(c);
+    }
+    return out.length > 0 ? out : null;
+  }
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(overrides)) {
+    const idx = Number(k) - 1;
+    if (Number.isInteger(idx) && idx >= 0 && idx < sceneCount) {
+      const c = clean(v);
+      if (c !== null) out[String(idx + 1)] = c;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+export function applySceneDurationOverrides(
+  script: SceneScript[],
+  overrides: Record<string, number> | number[] | null | undefined,
+  targetDuration: number,
+): SceneScript[] {
+  if (!script.length || overrides == null) return script;
+  const n = script.length;
+  const toSeconds = (v: unknown): number | null => {
+    const num = Number(v);
+    return Number.isFinite(num) && num >= 3 ? Math.max(3, Math.round(num)) : null;
+  };
+  const wanted: (number | null)[] = new Array(n).fill(null);
+  if (Array.isArray(overrides)) {
+    for (let i = 0; i < Math.min(overrides.length, n); i++) {
+      const sec = toSeconds(overrides[i]);
+      if (sec !== null) wanted[i] = sec;
+    }
+  } else {
+    for (const [k, v] of Object.entries(overrides)) {
+      const idx = Number(k) - 1;
+      if (Number.isInteger(idx) && idx >= 0 && idx < n) {
+        const sec = toSeconds(v);
+        if (sec !== null) wanted[idx] = sec;
+      }
+    }
+  }
+  if (wanted.every((w) => w === null)) return script;
+  const target = Math.max(n, Math.round(dissolveCompensatedSceneSum(targetDuration, n)));
+  const sizes = script.map((s, i) => wanted[i] ?? Math.max(3, Math.round(Number(s.duration) || 3)));
+  let diff = target - sizes.reduce((a, b) => a + b, 0);
+  // Balance pass (last -> first, mirroring sizeScenesToNarration): add/remove 1s
+  // from FLEXIBLE scenes (no explicit override) until the total === target.
+  let guard = 0;
+  while (diff !== 0 && guard < 20000) {
+    guard++;
+    let moved = false;
+    for (let i = n - 1; i >= 0 && diff !== 0; i--) {
+      if (wanted[i] !== null) continue; // locked bookends never resized
+      if (diff > 0) { sizes[i] += 1; diff -= 1; moved = true; }
+      else if (sizes[i] > 3) { sizes[i] -= 1; diff += 1; moved = true; }
+    }
+    if (!moved) break;
+  }
+  return script.map((s, i) => ({ ...s, duration: sizes[i] }));
+}
 /** LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): "Unless it is specified
  *  by me or the client, it doesn't need to say click the link in bio." — a
  *  deterministic emission guard at the transformation output: link-in-bio
@@ -2221,6 +2334,17 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       planned.splice(0, planned.length, ...overridePlan.script);
       trace(`narration_override project=${projectId} lines=${narrationOverride!.length} mapping=[${overridePlan.mapping.map(m => m.length).join(',')}] sizes=[${overridePlan.script.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(overridePlan.script)}`);
     }
+    // RENDER #8 (owner ADJUST #3 — scene1 ~15s + scene5 ~5s, unequal stills):
+    // explicit per-scene durations override the narration-sized plan and the
+    // non-overridden middle scenes absorb the remaining dissolve-compensated
+    // budget. Sum stays EXACTLY at the integer target (33 → delivered 30s).
+    const sceneDurationOverrides = normalizeSceneDurationOverrides(input.sceneDurationOverrides, planned.length);
+    if (sceneDurationOverrides) {
+      const before = planned.map(s => s.duration);
+      const resized = applySceneDurationOverrides(planned, sceneDurationOverrides, duration);
+      planned.splice(0, planned.length, ...resized);
+      trace(`scene_duration_override project=${projectId} before=[${before.join(',')}] after=[${resized.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(resized)}`);
+    }
     // F4 LAUNCH-GATE (task 40c58f6a): every relayed selling point from the FINISHED
     // ESSENCE BRIEF must be SPOKEN in the scene narrations — the Oct 10 acceptance
     // render carried 0/7 (generic hook copy) while dumping all 7 verbatim into
@@ -2339,7 +2463,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -2497,6 +2621,11 @@ if (!skipGeneration) {
         // resets the camera (new shot, no continuity to preserve).
         const sceneAudio = audioLocal && fs.existsSync(audioLocal) ? audioLocal : undefined;
         const kbOpts: any = { kenburns: scene.visualType === 'still' };
+        // RENDER #8 SCREEN-FIT (owner ADJUST #3): real screenshot stills (direct
+        // image URL visualPrompt) fill the frame (cover) instead of letterboxing.
+        if (scene.visualType === 'still' && pmeta.stillCoverFit && isDirectImageUrl(String(scene.visualPrompt || ''))) {
+          kbOpts.stillCoverFit = true;
+        }
         if (scene.visualType === 'still') {
           const nextStart = kbCam === null ? 1.0 : Math.min(kbCam, 1.30);
           const nextEnd = Math.min(1.30, nextStart + 0.10);
