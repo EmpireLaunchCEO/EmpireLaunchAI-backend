@@ -32,7 +32,6 @@ import {
   normalizeSceneDurationOverrides,
   applySceneDurationOverrides,
   remapNarrationToWindows,
-  estimateNarrationRoom,
 } from '../sceneVideoPipelineService.js';
 import {
   containsLinkInBio,
