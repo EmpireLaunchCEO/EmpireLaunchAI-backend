@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import {
   renderClip, concatClips, normalizeSceneDurationOverrides, applySceneDurationOverrides,
   deliveredVideoDuration, normalizeNarrationScript, applyNarrationOverride,
-  remapNarrationToWindows, estimateNarrationRoom, type SceneScript,
+  remapNarrationToWindows, estimateNarrationRoom, narrationFloorSeconds, type SceneScript,
 } from '../sceneVideoPipelineService.js';
 import {
   applyAssemblyOverlays, resolveSceneVideoStarts, normalizeAssemblyOverlays, fitBulletFontSize,
@@ -425,15 +425,15 @@ test('RENDER #8 FIX: {1:15,5:5} + 8-line narrationOverride — re-map + floors m
     const remapped = remapNarrationToWindows(lines, prelim);
     assert.deepEqual(remapped.map((m) => m.length), [4, 1, 1, 1, 1], 're-map: scene1 15s absorbs lines 1-4 (bullet phrases), scenes 2-5 one line each');
     assert.deepEqual(remapped.flat(), OWNER_SCRIPT, 'all 8 lines spoken exactly once, in order');
-    const floors = remapped.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
-    assert.deepEqual(floors, [13, 5, 4, 4, 3], 'narration floors (speech rooms, worst-case)');
+    const floors = remapped.map((m) => narrationFloorSeconds(m));
+    assert.deepEqual(floors, [15, 6, 5, 5, 5], 'narration floors from MEASURED truth (fire #2 real nova speech [13.75,5.499,3.688,4.377,3.949] + 400ms margin)');
     const resized = applySceneDurationOverrides(overridePlan.script, overrides, 30, floors);
     const plan = resized.map((s, i) => ({ ...s, duration: resized[i].duration, narration: (remapped[i] || []).join(' ') }));
-    assert.deepEqual(plan.map((s) => s.duration), [15, 5, 4, 4, 5], 'locked 15/5 bookends; flexible scenes floored at speech rooms');
-    assert.equal(deliveredVideoDuration(plan), 29.8, 'delivered 29.8s — original ~30s band (see PR note: honest floors, NOT the 30.8 estimate)');
+    assert.deepEqual(plan.map((s) => s.duration), [15, 6, 5, 5, 5], 'locked 15/5 bookends; flexible scenes floored at MEASURED speech rooms');
+    assert.equal(deliveredVideoDuration(plan), 32.8, 'delivered 32.8s — real narration is 31.5s so honest middle growth is required');
     const seconds = plan.map((s) => s.duration);
     const starts = resolveSceneVideoStarts(seconds, 0.8);
-    assert.deepEqual(starts, [0, 14.2, 18.4, 21.6, 24.8], 'dissolve-compensated starts for [15,5,4,4,5]');
+    assert.deepEqual(starts, [0, 14.2, 19.4, 23.6, 27.8], 'dissolve-compensated starts for [15,6,5,5,5]');
 
     // (2) INVARIANT-IMPOSSIBLE (plan-level, the fail-closed single-voice math):
     // per-scene worst case: speech room must fit the scene's OWN window — THE
@@ -442,17 +442,27 @@ test('RENDER #8 FIX: {1:15,5:5} + 8-line narrationOverride — re-map + floors m
     plan.forEach((s, i) => {
       assert.ok(floors[i] <= s.duration, `scene ${i + 1}: speech room ${floors[i]}s <= scene duration ${s.duration}s`);
     });
-    // ... the aggregate estimate budget fits the delivered tail ...
-    const totalRooms = floors.reduce((a, b) => a + b, 0);
-    assert.ok(totalRooms <= deliveredVideoDuration(plan), `aggregate speech budget ${totalRooms}s <= delivered ${deliveredVideoDuration(plan)}s`);
+    // NOTE: no AGGREGATE "sum of floors <= delivered" invariant is asserted
+    // here BY DESIGN — 4 junctions x 0.8s fadeblack makes delivered strictly
+    // less than sum(scene floors) (36s of floors => 32.8s delivered), so an
+    // aggregate fit check is mathematically impossible once floors are
+    // MEASURED truth (it only 'passed' pre-fix because the estimate floors
+    // under-priced real TTS — the exact bug being fixed). The real invariants
+    // are per-scene (each floor <= its own scene duration, asserted above)
+    // and sequential (next track at max(videoStart, prevSpeechEnd) — replayed
+    // below with fire #2 measured speech; that is precisely the check the
+    // live fire violated and that the discriminator re-verifies).
     // ... and sequential placement at REALISTIC speech (real nova runs ~0.85x
     // the words/3 estimate — render #7's production 8-line total was 25.9s vs
     // 33s of estimate room) fits the video tail with no clipping.
+    // REAL measured speech ends (fire #2 m4as) drive the placement — identical
+    // to the assembly single-voice scheduler (next track at max(videoStart, prev end)).
+    const REAL_SPEECH = [13.75, 5.499, 3.688, 4.377, 3.949];
     let prevEnd = 0;
     plan.forEach((s, i) => {
       const sp = Math.max(starts[i], prevEnd);
-      const end = sp + floors[i] * 0.85;
-      assert.ok(end <= deliveredVideoDuration(plan) + 0.01, `scene ${i + 1}: realistic sequential speech end ${end.toFixed(2)}s <= delivered ${deliveredVideoDuration(plan)}s`);
+      const end = sp + Math.min(REAL_SPEECH[i] + 0.05, s.duration);
+      assert.ok(end <= deliveredVideoDuration(plan) + 0.01, `scene ${i + 1}: measured sequential speech end ${end.toFixed(2)}s <= delivered ${deliveredVideoDuration(plan)}s`);
       prevEnd = end;
     });
     // DISCRIMINATOR: the PRE-FIX balance (no floors) still over-shrinks a scene
@@ -495,7 +505,7 @@ test('RENDER #8 FIX: {1:15,5:5} + 8-line narrationOverride — re-map + floors m
     }
     const plain = join(dir, 'plain.mp4');
     await concatClips(clips, plain);
-    assert.ok(Math.abs(parseFloat(probe(['-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', plain])) - 29.8) < 0.4, 'plain concat ≈ 29.8s');
+    assert.ok(Math.abs(parseFloat(probe(['-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', plain])) - 32.8) < 0.4, 'plain concat ≈ 32.8s');
     const bullets = [
       { marker: '•', text: '76 videos a month!', at: 1.5 },
       { marker: '•', text: 'NO buying Credits!', at: 4.5 },
@@ -511,7 +521,7 @@ test('RENDER #8 FIX: {1:15,5:5} + 8-line narrationOverride — re-map + floors m
     const out = join(dir, 'final.mp4');
     await applyAssemblyOverlays(plain, out, spec!, starts, seconds);
     const dur = parseFloat(probe(['-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', out]));
-    assert.ok(Math.abs(dur - 29.8) < 0.4, `delivered ${dur}s ≈ 29.8`);
+    assert.ok(Math.abs(dur - 32.8) < 0.4, `delivered ${dur}s ≈ 32.8`);
     const streams = probe(['-show_entries', 'stream=codec_type', '-of', 'csv=p=0', out]).split('\n').filter(Boolean);
     assert.equal(streams.filter((s) => s === 'audio').length, 1, 'audio survives overlay pass');
 
@@ -563,30 +573,30 @@ test('RENDER #8 FIX: {1:15,5:5} + 8-line narrationOverride — re-map + floors m
     if (realShots) {
       closeTo(9.2, s1Src);
       closeTo(13.5, s1Src, 45);
-      closeTo(26.5, s5Src, 45);
-      closeTo(28.0, s5Src);
+      closeTo(29.0, s5Src, 45);
+      closeTo(30.0, s5Src);
       const hdSrc = (t: number, src: string) => hamming(frameDHash(out, t, identityZone), frameDHash(src, 0, identityZone));
       assert.ok(hdSrc(9.2, s1Src) < hdSrc(9.2, s5Src), 't=9.2 closer to scene1 source');
-      assert.ok(hdSrc(28.0, s5Src) < hdSrc(28.0, s1Src), 't=28.0 closer to scene5 source');
+      assert.ok(hdSrc(30.0, s5Src) < hdSrc(30.0, s1Src), 't=30.0 closer to scene5 source');
     } else {
-      closeTo(9.2, s1Img, 20); closeTo(28.0, s5Img, 20);
+      closeTo(9.2, s1Img, 20); closeTo(30.0, s5Img, 20);
     }
     const mA = (t: number) => zoneMean(out, 300, 400, 480, 600, t);
     assert.ok(Math.abs(mA(15.6) - 145) < 16, `scene2 (Y≈145) at 15.6 (got ${mA(15.6).toFixed(0)})`);
-    assert.ok(Math.abs(mA(19.6) - 85) < 16, `scene3 (Y≈85) at 19.6 — post-dissolve [18.4,19.2] (got ${mA(19.6).toFixed(0)})`);
-    assert.ok(Math.abs(mA(23.2) - 196) < 16, `scene4 (Y≈196) at 23.2 — post-dissolve [21.6,22.4] (got ${mA(23.2).toFixed(0)})`);
-    assert.ok(Math.abs(mA(24.2) - 196) < 16, `scene4 still at 24.2 before scene5 dissolve (got ${mA(24.2).toFixed(0)})`);
+    assert.ok(Math.abs(mA(21.0) - 85) < 16, `scene3 (Y≈85) at 21.0 — post-dissolve [19.4,20.2] (got ${mA(21.0).toFixed(0)})`);
+    assert.ok(Math.abs(mA(24.8) - 196) < 16, `scene4 (Y≈196) at 24.8 — post-dissolve [23.6,24.4] (got ${mA(24.8).toFixed(0)})`);
+    assert.ok(Math.abs(mA(26.5) - 196) < 16, `scene4 still at 26.5 before scene5 dissolve (got ${mA(26.5).toFixed(0)})`);
 
-    // END FLASH — window [28.6,29.8], white full-frame drawn last, navy CTA.
-    assert.ok(zoneMean(out, 0, 0, 1080, 1920, 29.3) > 200, 'flash frame full white');
-    assert.ok(zoneMean(out, 300, 1760, 480, 100, 29.3) > 200, 'flash covers bottom bar');
-    assert.ok(zoneMean(out, 60, 1330, 960, 260, 29.3) > 200, 'flash covers bullet panel');
-    const textCrop = bandLuma(out, 29.3, 150, 880, 780, 160);
+    // END FLASH — window [31.6,32.8], white full-frame drawn last, navy CTA.
+    assert.ok(zoneMean(out, 0, 0, 1080, 1920, 32.3) > 200, 'flash frame full white');
+    assert.ok(zoneMean(out, 300, 1760, 480, 100, 32.3) > 200, 'flash covers bottom bar');
+    assert.ok(zoneMean(out, 60, 1330, 960, 260, 32.3) > 200, 'flash covers bullet panel');
+    const textCrop = bandLuma(out, 32.3, 150, 880, 780, 160);
     assert.ok(maxLuma(textCrop) > 190, 'flash CTA visible');
     let textMin = 255;
     for (let i = 0; i < textCrop.length; i++) if (textCrop[i] < textMin) textMin = textCrop[i];
     assert.ok(textMin < 100, `flash CTA navy glyph (min ${textMin})`);
-    assert.ok(zoneMean(out, 0, 0, 1080, 1920, 27.4) < 150, 'no white flash at 27.4');
+    assert.ok(zoneMean(out, 0, 0, 1080, 1920, 30.2) < 150, 'no white flash at 30.2');
 
     // COVER-FIT re-proof (4:3 source fill vs contain bars).
     const src43 = join(dir, 'src43.png');

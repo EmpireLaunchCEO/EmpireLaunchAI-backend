@@ -32,6 +32,7 @@ import {
   normalizeSceneDurationOverrides,
   applySceneDurationOverrides,
   remapNarrationToWindows,
+  narrationFloorSeconds,
 } from '../sceneVideoPipelineService.js';
 import {
   containsLinkInBio,
@@ -245,13 +246,13 @@ test('RENDER #8 override regression: re-map + narration floors keep every scene 
   // phrases live inside them), scenes 2-5 one line each, order preserved, 8/8.
   assert.deepEqual(mapping.map((m) => m.length), [4, 1, 1, 1, 1], 'ordered window re-map');
   assert.deepEqual(mapping.flat(), OWNER_SCRIPT, 'all 8 lines spoken exactly once in order');
-  const floors = mapping.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
-  assert.deepEqual(floors, [13, 5, 4, 4, 3], 'narration floors from the re-mapped windows');
+  const floors = mapping.map((m) => narrationFloorSeconds(m));
+  assert.deepEqual(floors, [15, 6, 5, 5, 5], 'narration floors from MEASURED truth (fire #2 real nova speech ends [13.75,5.499,3.688,4.377,3.949] + 400ms margin)');
   const out = applySceneDurationOverrides(script as any, overrides, 30, floors);
-  assert.deepEqual(out.map((s) => s.duration), [15, 5, 4, 4, 5], 'locked bookends kept; flexible scenes floored at speech rooms');
+  assert.deepEqual(out.map((s) => s.duration), [15, 6, 5, 5, 5], 'locked bookends kept; flexible scenes floored at MEASURED speech rooms');
   const sum = out.reduce((a: number, s: any) => a + s.duration, 0);
-  assert.equal(sum, 33, `exact 30s band kept: re-map + floors fit the plan with NO length overrun (sum=${sum})`);
-  assert.equal(deliveredVideoDuration(out), 29.8, 'delivered 29.8s — the original ~30s agreed band, every word spoken');
+  assert.equal(sum, 36, `honest growth: real narration is 31.5s so the 30s frame cannot hold it (sum=${sum})`);
+  assert.equal(deliveredVideoDuration(out), 32.8, 'delivered 32.8s — every word spoken, single voice, tail clear');
   out.forEach((s: any, i: number) => {
     assert.ok(s.duration >= floors[i], `scene ${i + 1} ${s.duration}s >= narration floor ${floors[i]}s`);
   });
@@ -260,4 +261,55 @@ test('RENDER #8 override regression: re-map + narration floors keep every scene 
   const noFloors = applySceneDurationOverrides(script as any, overrides, 30);
   assert.ok(noFloors.map((s) => s.duration).join(',') !== out.map((s) => s.duration).join(','), 'floors change the outcome (pre-fix behavior differs)');
   assert.ok(Math.max(...noFloors.map((s) => s.duration)) >= 15, 'lock bookends hold either way');
+});
+// RENDER #8 FIRE #2 DISCRIMINATOR (Oct 17 — live-fire invariant trip, $0 root
+// cause): replays the ASSEMBLER's sequential single-voice scheduling math (the
+// exact loop in concatClips: videoStartMs - xfade overlap, fit = trueSpeech+50ms
+// capped to the window, maxStart = videoTotal-fit-100, start = max(videoStart,
+// min(prevSpeechEnd, maxStart)); throw if start < prevSpeechEnd-5) with fire
+// #2's REAL measured speech ends from the production audio assets (project
+// caa06528, project-scene m4as back-scanned -44 dBFS = the assembly's own
+// speechEndOf). PROVES the pre-fix estimate-floor plan [15,5,4,4,5] (29.8s
+// delivered) is structurally impossible — track 4 start 25,701 < prev 26,938 —
+// while the measured-floor plan [15,6,5,5,5] (32.8s delivered) schedules every
+// track cleanly with a clear tail. FAILS PRE-FIX, PASSES POST-FIX. */
+test('RENDER #8 fire #2 discriminator: measured floors make the overlap invariant impossible with REAL nova speech (pre-fix plan must trip)', () => {
+  const tr = 0.8; // DISSOLVE_OVERLAP_SECONDS (SCENE_TRANSITION_MS ?? 800)
+  // fire #2 REAL true-speech ends (s): back-scan of the production scene m4as
+  const REAL_SPEECH = [13.75, 5.499, 3.688, 4.377, 3.949];
+  const schedule = (durs: number[], speech: number[]) => {
+    const videoTotalMs = Math.round((durs.reduce((a, b) => a + b, 0) - tr * Math.max(0, durs.length - 1)) * 1000);
+    let sumPrev = 0;
+    let prevSpeechEndMs = 0;
+    let thrown = '';
+    for (let i = 0; i < durs.length; i++) {
+      const win = durs[i];
+      const videoStartMs = Math.max(0, Math.round((sumPrev - tr * i) * 1000));
+      const trueSpeech = speech[i] ?? 0;
+      const fitBase = trueSpeech > 0 ? Math.min(trueSpeech + 0.05, win) : win; // audioSeconds==win (padded)
+      const fitMs = Math.round(Math.max(0.05, Math.min(fitBase, win)) * 1000);
+      const maxStartMs = Math.max(videoStartMs, videoTotalMs - fitMs - 100);
+      const startMs = Math.max(videoStartMs, Math.min(prevSpeechEndMs, maxStartMs));
+      if (startMs < prevSpeechEndMs - 5) {
+        thrown = `NARRATION_OVERLAP_INVARIANT track=${i} start=${startMs}ms < prevSpeechEnd=${prevSpeechEndMs}ms`;
+        break;
+      }
+      prevSpeechEndMs = startMs + fitMs;
+      sumPrev += win;
+    }
+    return { thrown, prevSpeechEndMs, videoTotalMs };
+  };
+  // PRE-FIX (estimate floors [13,5,4,4,3] -> plan [15,5,4,4,5], delivered 29.8):
+  const pre = schedule([15, 5, 4, 4, 5], REAL_SPEECH);
+  assert.ok(pre.thrown.length > 0, `pre-fix plan MUST trip the invariant (got: ${pre.thrown || 'no throw'})`);
+  assert.match(pre.thrown, /track=4 start=25701ms < prevSpeechEnd=2693[0-9]ms/, `pre-fix reproduces the LIVE production numbers: ${pre.thrown}`);
+  // POST-FIX (measured floors [15,6,5,5,5], delivered 32.8):
+  const post = schedule([15, 6, 5, 5, 5], REAL_SPEECH);
+  assert.equal(post.thrown, '', `post-fix plan must schedule cleanly (got: ${post.thrown})`);
+  assert.ok(post.prevSpeechEndMs <= post.videoTotalMs - 100, `final speech end ${post.prevSpeechEndMs}ms <= videoTotal ${post.videoTotalMs}ms - 100ms`);
+  // Every window >= its real speech + margin: no word can ever be cut by renderClip
+  const floors = [15, 6, 5, 5, 5];
+  REAL_SPEECH.forEach((s, i) => {
+    assert.ok(floors[i] >= s + 0.4, `scene ${i + 1} floor ${floors[i]}s >= real speech ${s}s + 400ms margin`);
+  });
 });
