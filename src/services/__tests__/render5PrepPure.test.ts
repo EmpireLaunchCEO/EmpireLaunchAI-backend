@@ -29,6 +29,8 @@ import {
   deliveredVideoDuration,
   dissolveCompensatedSceneSum,
   finalCopyFallbackLine,
+  normalizeSceneDurationOverrides,
+  applySceneDurationOverrides,
 } from '../sceneVideoPipelineService.js';
 import {
   containsLinkInBio,
@@ -188,4 +190,36 @@ test('default CTA copy (arc fallback + finished-copy battery) is link-in-bio fre
   const emptied = preTtsSanitize('Just the link in bio', { sceneId: 's9' });
   assert.equal(emptied.replaced, true);
   assert.equal(emptied.text, 'Ready to make the move? You can get started today.');
+});
+test('RENDER #8 scene-duration overrides: unequal still layout keeps the exact dissolve-compensated target', () => {
+  const scenes = [
+    { sceneNumber: 1, duration: 6, narration: 'a', visualType: 'still', visualPrompt: 'p1' },
+    { sceneNumber: 2, duration: 10, narration: 'b', visualType: 'still', visualPrompt: 'p2' },
+    { sceneNumber: 3, duration: 10, narration: 'c', visualType: 'still', visualPrompt: 'p3' },
+    { sceneNumber: 4, duration: 5, narration: 'd', visualType: 'still', visualPrompt: 'p4' },
+    { sceneNumber: 5, duration: 4, narration: 'e', visualType: 'still', visualPrompt: 'p5' },
+  ] as any[];
+  // {1:15, 5:5} on a 30s target -> dissolve-compensated sum = 33 (5 scenes).
+  const norm = normalizeSceneDurationOverrides({ 1: 15, 5: 5 }, 5);
+  assert.deepEqual(norm, { 1: 15, 5: 5 }, 'normalized object keeps 1-based keys');
+  const out = applySceneDurationOverrides(scenes, norm, 30);
+  assert.equal(out[0].duration, 15, 'scene 1 locked at 15s');
+  assert.equal(out[4].duration, 5, 'scene 5 locked at 5s');
+  const total = out.reduce((a: number, s: any) => a + s.duration, 0);
+  assert.equal(total, 33, `middle scenes absorb the remainder (sum=${total}, target 33)`);
+  // malformed entries dropped, never thrown; unknown sceneNumbers ignored
+  const junk = normalizeSceneDurationOverrides({ 1: 99, 2: 'x', 9: 3 } as any, 5);
+  assert.equal(junk, null, 'out-of-range/locked-invalid entries -> null');
+  // [12, 5] is FEASIBLE (24 + 5 flexible scenes x 3s floor = 39 >= 33); the
+  // bookends are locked and scenes 3-5 absorb the remainder down to the floor.
+  const arrNorm = normalizeSceneDurationOverrides([12, 5, undefined] as any, 5);
+  assert.deepEqual(arrNorm as any, [12, 5], 'array form: null/undefined entries dropped, order preserved');
+  const arrOut = applySceneDurationOverrides(scenes, arrNorm, 30);
+  assert.equal(arrOut[0].duration, 12, 'array index 0 locks scene 1');
+  assert.equal(arrOut[1].duration, 5, 'array index 1 locks scene 2');
+  const tot = arrOut.reduce((a: number, s: any) => a + s.duration, 0);
+  assert.equal(tot, 33, 'array form also balances to the exact target');
+  assert.ok(arrOut[4].duration >= 3, 'flexible scenes never go below the 3s floor');
+  // null / undefined / empty = no-op (current pixel-exact behavior)
+  assert.equal(applySceneDurationOverrides(scenes, null, 30), scenes);
 });

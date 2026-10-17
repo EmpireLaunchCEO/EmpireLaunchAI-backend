@@ -197,6 +197,23 @@ export const createApproval = async (req: Request, res: Response) => {
       enrichedPayload.visualPromptOverrides = Array.isArray(visualPromptOverrides) && visualPromptOverrides.length
         ? visualPromptOverrides
         : undefined;
+      // RENDER #8 (owner ADJUST #3, OPT-IN): explicit per-scene durations
+      // ({sceneNumber: seconds} or 0-based array) + screenshot cover-fit flag,
+      // forwarded to the scene pipeline with the rest of the render payload.
+      const sceneDurationOverridesRaw = req.body.sceneDurationOverrides !== undefined
+        ? req.body.sceneDurationOverrides
+        : (payload as any)?.sceneDurationOverrides;
+      if (sceneDurationOverridesRaw !== undefined && sceneDurationOverridesRaw !== null) {
+        const okShape = (Array.isArray(sceneDurationOverridesRaw) && sceneDurationOverridesRaw.length > 0)
+          || (typeof sceneDurationOverridesRaw === 'object' && !Array.isArray(sceneDurationOverridesRaw));
+        if (!okShape) {
+          return res.status(400).json({ error: 'Invalid faceless sceneDurationOverrides — expected { sceneNumber: seconds } or a number[]' });
+        }
+        enrichedPayload.sceneDurationOverrides = sceneDurationOverridesRaw;
+      }
+      if (req.body.stillCoverFit !== undefined && req.body.stillCoverFit !== null) {
+        enrichedPayload.stillCoverFit = req.body.stillCoverFit === true;
+      }
       // Feed mood into the per-scene prompt so the video's tone reflects it.
       // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
       // appending an instruction sentence to the idea text. The appended hint
@@ -224,6 +241,10 @@ export const createApproval = async (req: Request, res: Response) => {
           // RENDER #7 OPT-IN: drawn at assembly only (never baked into AI frames).
           onScreenOverlays,
           visualPromptOverrides,
+          // RENDER #8 OPT-IN (owner ADJUST #3): explicit per-scene durations +
+          // screenshot cover-fit (photos more screen-fitting).
+          sceneDurationOverrides: (enrichedPayload as any).sceneDurationOverrides,
+          stillCoverFit: (enrichedPayload as any).stillCoverFit,
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
