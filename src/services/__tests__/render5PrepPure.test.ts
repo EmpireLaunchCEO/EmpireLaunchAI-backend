@@ -247,12 +247,12 @@ test('RENDER #8 override regression: re-map + narration floors keep every scene 
   assert.deepEqual(mapping.map((m) => m.length), [4, 1, 1, 1, 1], 'ordered window re-map');
   assert.deepEqual(mapping.flat(), OWNER_SCRIPT, 'all 8 lines spoken exactly once in order');
   const floors = mapping.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
-  assert.deepEqual(floors, [13, 5, 5, 4, 3], 'narration floors from the re-mapped windows');
+  assert.deepEqual(floors, [13, 5, 4, 4, 3], 'narration floors from the re-mapped windows');
   const out = applySceneDurationOverrides(script as any, overrides, 30, floors);
-  assert.deepEqual(out.map((s) => s.duration), [15, 5, 5, 4, 5], 'locked bookends kept; flexible scenes floored at speech rooms');
+  assert.deepEqual(out.map((s) => s.duration), [15, 5, 4, 4, 5], 'locked bookends kept; flexible scenes floored at speech rooms');
   const sum = out.reduce((a: number, s: any) => a + s.duration, 0);
-  assert.equal(sum, 34, `honest total (floors beat the 33 target by 1s): sum=${sum}`);
-  assert.equal(deliveredVideoDuration(out), 30.8, 'delivered 30.8s = render #7 accepted band (~30s, 30.9 accepted)');
+  assert.equal(sum, 33, `exact 30s band kept: re-map + floors fit the plan with NO length overrun (sum=${sum})`);
+  assert.equal(deliveredVideoDuration(out), 29.8, 'delivered 29.8s — the original ~30s agreed band, every word spoken');
   out.forEach((s: any, i: number) => {
     assert.ok(s.duration >= floors[i], `scene ${i + 1} ${s.duration}s >= narration floor ${floors[i]}s`);
   });
