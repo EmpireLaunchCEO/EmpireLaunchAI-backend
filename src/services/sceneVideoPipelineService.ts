@@ -1835,6 +1835,7 @@ export function applySceneDurationOverrides(
   script: SceneScript[],
   overrides: Record<string, number> | number[] | null | undefined,
   targetDuration: number,
+  floors?: (number | null | undefined)[] | null,
 ): SceneScript[] {
   if (!script.length || overrides == null) return script;
   const n = script.length;
@@ -1858,8 +1859,23 @@ export function applySceneDurationOverrides(
     }
   }
   if (wanted.every((w) => w === null)) return script;
+  // RENDER #8 FAILURE LESSON (Oct 17 - live fire FAILED the fail-closed
+  // NARRATION_OVERLAP_INVARIANT): the balance pass must NEVER shrink a flexible
+  // scene below its narration speech room. The first fire's even mapping needed
+  // rooms ~= [6,8,10,5,4] but the pass shrank scenes to [15,4,6,3,5] (plain 3s
+  // floor), so cumulative speech overfilled the 29.8s band and the single-voice
+  // scheduler could not place scene5's line -> invariant trip at assembly.
+  // `floors` (optional per-scene minimums, usually ceil(estimateNarrationRoom)
+  // of the scene's FINAL line mapping) is now BOTH the shrink-floor and the
+  // grow-floor: flexible scenes never go below it; if locked overrides + floors
+  // exceed the 30s target, the total grows to the honest narration floor
+  // (delivered ~30.8s — the render #7 accepted band) instead of cutting a word.
+  const floorOf = (i: number): number => {
+    const f = Number(floors && floors[i]);
+    return Number.isFinite(f) ? Math.max(3, Math.round(f)) : 3;
+  };
   const target = Math.max(n, Math.round(dissolveCompensatedSceneSum(targetDuration, n)));
-  const sizes = script.map((s, i) => wanted[i] ?? Math.max(3, Math.round(Number(s.duration) || 3)));
+  const sizes = script.map((s, i) => wanted[i] ?? Math.max(floorOf(i), Math.round(Number(s.duration) || 3)));
   let diff = target - sizes.reduce((a, b) => a + b, 0);
   // Balance pass (last -> first, mirroring sizeScenesToNarration): add/remove 1s
   // from FLEXIBLE scenes (no explicit override) until the total === target.
@@ -1870,11 +1886,43 @@ export function applySceneDurationOverrides(
     for (let i = n - 1; i >= 0 && diff !== 0; i--) {
       if (wanted[i] !== null) continue; // locked bookends never resized
       if (diff > 0) { sizes[i] += 1; diff -= 1; moved = true; }
-      else if (sizes[i] > 3) { sizes[i] -= 1; diff += 1; moved = true; }
+      else if (sizes[i] > floorOf(i)) { sizes[i] -= 1; diff += 1; moved = true; }
     }
-    if (!moved) break;
+    if (!moved) break; // floors exhausted: accept total > target (speech never cut)
   }
   return script.map((s, i) => ({ ...s, duration: sizes[i] }));
+}
+/** RENDER #8 FAILURE FIX (Oct 17 - narration/override coexistence): distribute
+ *  override narration lines ACROSS the post-override windows IN ORDER with the
+ *  even-spread guarantee (every scene >= 1 line while lines remain; a scene's
+ *  room may absorb extra lines when they fit). The old even split [2,2,2,1,1]
+ *  assumed room-equal windows; sceneDurationOverrides make windows unequal
+ *  (scene1 15s / scene5 5s), so the even split overfills small rooms and
+ *  under-fills big ones. This re-map lands the owner's 8 lines as [4,1,1,1,1]:
+ *  scene1's 15s window absorbs lines 1-4 (INCLUDING the three bullet phrases
+ *  "76 videos a month!" / "NO buying Credits!" / "Save Hundreds!" - audio aligns
+ *  with the on-screen bullets at 1.5/4.5/7.5s), and scenes 2-5 take one line
+ *  each (the closing CTA stays over the payment shot + flash). Deterministic. */
+export function remapNarrationToWindows(lines: string[], durations: number[]): string[][] {
+  const n = Math.max(1, durations.length);
+  const out: string[][] = Array.from({ length: n }, () => []);
+  if (!lines.length) return out;
+  let li = 0;
+  for (let i = 0; i < n; i++) {
+    const room = Math.max(3, Math.round(Number(durations[i]) || 3));
+    const scenesAfter = n - i - 1;
+    // Reserve >= 1 line for every following scene; spend the remainder here.
+    const maxSpend = Math.max(1, lines.length - li - scenesAfter);
+    let taken = 0;
+    while (taken < maxSpend && li < lines.length) {
+      if (out[i].length === 0 || estimateNarrationRoom([...out[i], lines[li]]) <= room) {
+        out[i].push(lines[li]); li++; taken++;
+      } else break;
+    }
+  }
+  // Tail safety: any leftover lines stay in order in the last scene.
+  while (li < lines.length) { out[n - 1].push(lines[li]); li++; }
+  return out;
 }
 /** LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): "Unless it is specified
  *  by me or the client, it doesn't need to say click the link in bio." — a
@@ -2341,9 +2389,32 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const sceneDurationOverrides = normalizeSceneDurationOverrides(input.sceneDurationOverrides, planned.length);
     if (sceneDurationOverrides) {
       const before = planned.map(s => s.duration);
-      const resized = applySceneDurationOverrides(planned, sceneDurationOverrides, duration);
-      planned.splice(0, planned.length, ...resized);
-      trace(`scene_duration_override project=${projectId} before=[${before.join(',')}] after=[${resized.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(resized)}`);
+      if (narrationOverride && overridePlan) {
+        // RENDER #8 FIX (Oct 17 live-fire NARRATION_OVERLAP_INVARIANT failure):
+        // re-map the dictated lines onto the OVERRIDE windows (scene1 15s absorbs
+        // lines 1-4 incl. the three bullet phrases -> [4,1,1,1,1]) and balance the
+        // flexible scenes against narration floors (never below speech rooms), so
+        // the scheduled voice tracks can never overfill the delivered band.
+        const wantedAt = (i: number): number | null => {
+          if (Array.isArray(sceneDurationOverrides)) {
+            const v = Number(sceneDurationOverrides[i]);
+            return Number.isFinite(v) && v >= 3 ? Math.max(3, Math.round(v)) : null;
+          }
+          const v = Number((sceneDurationOverrides as Record<string, number>)[String(i + 1)]);
+          return Number.isFinite(v) && v >= 3 ? Math.max(3, Math.round(v)) : null;
+        };
+        const prelim = planned.map((s, i) => wantedAt(i) ?? s.duration);
+        const remapped = remapNarrationToWindows(narrationOverride, prelim);
+        const floors = remapped.map((m) => Math.max(3, Math.ceil(estimateNarrationRoom(m))));
+        const resized = applySceneDurationOverrides(planned, sceneDurationOverrides, duration, floors);
+        overridePlan.mapping = remapped;
+        planned.splice(0, planned.length, ...resized.map((s, i) => ({ ...s, duration: resized[i].duration, narration: (remapped[i] || []).join(' ') })));
+        trace(`scene_duration_override project=${projectId} before=[${before.join(',')}] after=[${resized.map(s => s.duration).join(',')}] mapping=[${remapped.map(m => m.length).join(',')}] delivered=${deliveredVideoDuration(resized)}`);
+      } else {
+        const resized = applySceneDurationOverrides(planned, sceneDurationOverrides, duration);
+        planned.splice(0, planned.length, ...resized);
+        trace(`scene_duration_override project=${projectId} before=[${before.join(',')}] after=[${resized.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(resized)}`);
+      }
     }
     // F4 LAUNCH-GATE (task 40c58f6a): every relayed selling point from the FINISHED
     // ESSENCE BRIEF must be SPOKEN in the scene narrations — the Oct 10 acceptance
