@@ -119,3 +119,79 @@ test('9. standalone extractors: Meet/This-is openings, dash-list bullets, avoid-
   assert.ok(mood && /relaxing/.test(mood.positive.toLowerCase()), 'positive extracted');
   assert.ok(mood && /overwhelmed by notifications/.test(mood.avoid ?? ''), 'avoid guard extracted');
 });
+
+// OWNER EXPANSION (Oct 19, rev 163): the dictation-fidelity bar applies to ALL
+// modes — "make sure this follows suit for scene based and twin as well." The
+// fix lives in the SHARED extraction/planner layer, so these discriminators pin
+// Scene-mode + Twin-mode briefs through the exact same entry points the
+// faceless path uses. If a mode-specific branch ever bypassed this layer, the
+// asserts below trip.
+
+test('10. SCENE-mode brief: dictated opening, bullets, end flash, mood all honored via shared layer', () => {
+  const sceneBrief =
+    'Scene-based promo for EmpireLaunch AI. Meet EmpireLaunch AI. ' +
+    '( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points to show on screen) ' +
+    'flash empirelaunchai.com at the end. scene should show someone relaxing instead of being stuck on a phone';
+  const v = extractRequestedVisuals(sceneBrief);
+  assert.match(v.dictatedOpening!, /^Meet EmpireLaunch AI/, 'scene-mode dictated opening verbatim');
+  assert.ok(v.bullets && v.bullets.length >= 2, 'scene bullets extracted');
+  assert.ok(v.bullets!.some((b) => /76 videos a month/.test(b)), 'scene bullet 1 present');
+  assert.ok(v.bullets!.some((b) => /NO CREDIT BUYING/.test(b)), 'scene bullet 2 present');
+  assert.match(v.endFlash!.text, /empirelaunchai\.com/i, 'scene end-flash domain');
+  assert.match(v.mood!.positive.toLowerCase(), /someone relaxing/, 'scene mood positive');
+  assert.match(v.mood!.avoid ?? '', /stuck on a phone/i, 'scene pain-point kept as NEVER-guard only');
+  const d = buildDictationSection(v, 3);
+  assert.ok(d.includes('USER-DICTATED OPENING') && d.includes('Meet EmpireLaunch AI'), 'scene planner block carries the dictated opening');
+  assert.ok(d.includes('USER-REQUESTED END FLASH'), 'scene planner block carries the flash');
+  assert.ok(d.includes('NEVER show'), 'scene planner block carries the NEVER-guard');
+  const spec = buildBriefOverlaySpec(v, 3);
+  assert.ok(spec && spec.perScene && spec.flash, 'scene overlay spec derived');
+  assert.ok(spec!.perScene![0].bullets.length >= 2, 'scene bullets wired to assembly overlays');
+});
+
+test('11. TWIN-mode brief: dictated brand line, bullets, flash, mood follow suit', () => {
+  const twinBrief =
+    'I want a twin video for EmpireLaunch AI. Introducing EmpireLaunch AI, your new go-to platform. ' +
+    '( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points) ' +
+    'flash empirelaunchai.com at the end. show someone enjoying their craft instead of being glued to a phone';
+  const v = extractRequestedVisuals(twinBrief);
+  assert.match(v.dictatedOpening!, /^Introducing EmpireLaunch AI/, 'twin dictated opening verbatim (never rephrased)');
+  assert.ok(v.bullets && v.bullets.length >= 2, 'twin bullets extracted');
+  assert.match(v.endFlash!.text, /empirelaunchai\.com/i, 'twin end-flash domain');
+  assert.match(v.mood!.positive.toLowerCase(), /enjoying their craft/, 'twin mood positive');
+  assert.match(v.mood!.avoid ?? '', /glued to a phone/i, 'twin pain-point -> NEVER-guard');
+  assert.ok(!/glued to a phone/.test(v.mood!.positive.toLowerCase()), 'twin positive never inverts');
+  const d = buildDictationSection(v, 5);
+  assert.ok(d.includes('Introducing EmpireLaunch AI'), 'twin planner block speaks the dictated line verbatim');
+  assert.ok(d.includes('NEVER show'), 'twin NEVER-guard present');
+  const spec = buildBriefOverlaySpec(v, 5);
+  assert.ok(spec && spec.flash, 'twin overlay spec has the end flash');
+});
+
+test('12. mode-parity: Faceless / Scene / Twin all hit the SAME shared extraction contract', () => {
+  const faceless =
+    'Introducing EmpireLaunch AI. ( You get 76 videos a month! NO CREDIT BUYING!! - bullet points for the screen) ' +
+    'flash empirelaunchai.com at the end. show someone relaxing instead of being stuck on a phone';
+  const scene =
+    'Scene-based promo for EmpireLaunch AI. Meet EmpireLaunch AI. ( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points to show on screen) ' +
+    'flash empirelaunchai.com at the end. scene should show someone relaxing instead of being stuck on a phone';
+  const twin =
+    'I want a twin video for EmpireLaunch AI. Introducing EmpireLaunch AI, your new go-to platform. ( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points) ' +
+    'flash empirelaunchai.com at the end. show someone enjoying their craft instead of being glued to a phone';
+  for (const [label, b] of Object.entries({ faceless, scene, twin })) {
+    const v = extractRequestedVisuals(b);
+    assert.match(v.dictatedOpening!, /(Introducing|Meet) EmpireLaunch AI/, `${label}: dictated opening verbatim`);
+    assert.ok(v.bullets && v.bullets.length >= 2, `${label}: bullets extracted`);
+    assert.ok(v.bullets!.some((x) => /76 videos a month/.test(x)), `${label}: bullet 1 present`);
+    assert.ok(v.bullets!.some((x) => /NO CREDIT BUYING/.test(x)), `${label}: bullet 2 present`);
+    assert.match(v.endFlash!.text, /empirelaunchai\.com/i, `${label}: end flash`);
+    assert.ok(v.mood && v.mood.positive, `${label}: mood directive`);
+    assert.ok(!/(stuck on a phone|glued to a phone)/.test(v.mood!.positive.toLowerCase()), `${label}: positive never inverts`);
+    assert.ok(/(stuck on a phone|glued to a phone)/.test((v.mood!.avoid ?? '').toLowerCase()), `${label}: pain point kept as NEVER-guard only`);
+    const d = buildDictationSection(v, 5);
+    assert.ok(d.includes('USER-DICTATED OPENING') && d.includes('USER-REQUESTED ON-SCREEN BULLETS'), `${label}: planner block mandatory`);
+    assert.ok(d.includes('USER-REQUESTED END FLASH') && d.includes('NEVER show'), `${label}: flash + guard in planner block`);
+    const spec = buildBriefOverlaySpec(v, 5);
+    assert.ok(spec && spec.perScene && spec.flash, `${label}: assembly overlay spec derived`);
+  }
+});
