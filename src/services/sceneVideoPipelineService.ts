@@ -10,6 +10,7 @@ import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
+import { refreshR2Url } from './approvalPayloadRefresh.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
@@ -3254,7 +3255,27 @@ else {
   private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<{url?:string;localPath:string}> {
     return generateSceneAudio(text, userId, sceneId, voice, tone, voiceOpts);
   }
-  async getProject(projectId:string,userId:string) { const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId)); if(!project||project.userId!==userId)return null; const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber)); const done=scenes.filter(s=>s.status==='completed').length; return {project,scenes,progress:scenes.length?Math.round(done/scenes.length*100):0}; }
+  async getProject(projectId:string,userId:string) {
+    const [project]=await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id,projectId));
+    if(!project||project.userId!==userId)return null;
+    const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
+    const done=scenes.filter(s=>s.status==='completed').length;
+    // Re-sign stored R2 presigns on read: stored final_video_url/thumbnail/asset
+    // URLs die after ~1h; the review view (VideoProjectProgress polls this) serves
+    // them directly, so a stale URL = broken playback/Save/Download.
+    const freshProject:any = (project.finalVideoUrl||project.thumbnailUrl)
+      ? {...project,
+         finalVideoUrl: project.finalVideoUrl?await refreshR2Url(project.finalVideoUrl):project.finalVideoUrl,
+         thumbnailUrl: project.thumbnailUrl?await refreshR2Url(project.thumbnailUrl):project.thumbnailUrl}
+      : project;
+    const freshScenes = await Promise.all(scenes.map(async (s: any) => {
+      if(!s.assetUrl&&!s.audioUrl) return s;
+      return {...s,
+        assetUrl: s.assetUrl?await refreshR2Url(s.assetUrl):s.assetUrl,
+        audioUrl: s.audioUrl?await refreshR2Url(s.audioUrl):s.audioUrl};
+    }));
+    return {project:freshProject,scenes:freshScenes,progress:scenes.length?Math.round(done/scenes.length*100):0};
+  }
   async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone,undefined,undefined,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 }); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
   /**
    * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
