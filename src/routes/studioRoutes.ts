@@ -627,7 +627,7 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
       if (creation.status === 'completed' && creation.fileUrl) {
         response.assets = [{
           type: 'video',
-          url: creation.fileUrl,
+          url: await refreshR2Url(creation.fileUrl),
           platform: (meta.platforms?.[0]) || 'tiktok',
         }];
       }
@@ -678,7 +678,7 @@ router.get('/creation/:id', async (req: Request, res: Response) => {
     if (project.status === 'completed' && project.finalVideoUrl) {
       response.assets = [{
         type: 'video',
-        url: project.finalVideoUrl,
+        url: await refreshR2Url(project.finalVideoUrl),
         platform: (projectMeta.platforms?.[0]) || 'tiktok',
       }];
     }
