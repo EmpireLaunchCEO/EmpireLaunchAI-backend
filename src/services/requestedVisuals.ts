@@ -274,3 +274,116 @@ export function buildBriefOverlaySpec(
   }
   return spec.perScene || spec.flash ? spec : null;
 }
+
+// ─── TWIN PATH DICTATION ENFORCEMENT (task 08041dff, owner expansion rev 163) ─
+//
+// The Twin engine (cinemaEngineService.createNeuralTwin) has its OWN creative
+// transformation step (transformTwinScriptToPitch) and does NOT run the shared
+// planner/buildDictationSection — its deliverable is the twin SCRIPT text (the
+// talking-head frame pipeline presents the script words on-screen; there is no
+// timed overlay/assembly path). enforceTwinDictation is the deterministic
+// post-enforcement that guarantees the owner's dictation bar on that path:
+//   • dictated opening is the VERBATIM first line (never rephrased/dropped);
+//   • user bullet points are presented as spoken script lines (≤ MAX_BULLETS);
+//   • the exact end-flash domain is the closing CTA (never substituted);
+//   • the brief's positive mood clause closes the pitch and the "instead of …"
+//     pain point is SCRUBBED (never presented as a positive statement).
+// Pure + idempotent: already-honoring script text is left untouched; no asks →
+// no change. It never invents — every appended phrase is the user's own words.
+
+export interface TwinDictationApplied {
+  /** True when the dictated opening was prefixed (already-verbatim scripts stay untouched). */
+  openingPrefixed: boolean;
+  /** Bullet phrases appended as spoken lines (missing ones only). */
+  bulletsAppended: string[];
+  /** True when the end-flash domain CTA was appended. */
+  flashAppended: boolean;
+  /** True when the positive mood clause was appended as the closing line. */
+  moodPositiveAppended: boolean;
+  /** True when the pain-point/avoid phrase was scrubbed from the script. */
+  avoidGuardApplied: boolean;
+}
+
+export interface TwinDictationEnforcement {
+  /** Final twin script text after deterministic enforcement. */
+  script: string;
+  /** Exactly which guarantees were applied by THIS call (for metadata/diagnostics). */
+  applied: TwinDictationApplied;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Deterministic twin-script enforcement — see block comment above. */
+export function enforceTwinDictation(
+  rawScript: string,
+  requested: RequestedVisuals,
+): TwinDictationEnforcement {
+  let s = String(rawScript ?? '').replace(/\s+/g, ' ').trim();
+  const applied: TwinDictationApplied = {
+    openingPrefixed: false,
+    bulletsAppended: [],
+    flashAppended: false,
+    moodPositiveAppended: false,
+    avoidGuardApplied: false,
+  };
+  if (!s) return { script: s, applied };
+
+  // 1. Dictated opening — VERBATIM prefix (never rephrased, never dropped).
+  if (requested.dictatedOpening) {
+    const opening = requested.dictatedOpening.replace(/[.]+$/, '').trim();
+    if (opening && !s.toLowerCase().startsWith(opening.toLowerCase())) {
+      s = `${opening}. ${s}`;
+      applied.openingPrefixed = true;
+    }
+  }
+
+  // 2. Bullets — user-requested on-screen points presented as script lines.
+  for (const b of requested.bullets ?? []) {
+    const item = b.replace(/[.]+$/, '').trim();
+    if (!item || s.toLowerCase().includes(item.toLowerCase())) continue;
+    s = `${s} ${item}.`;
+    applied.bulletsAppended.push(item);
+  }
+
+  // 3. End-flash — EXACT user domain as the closing CTA when missing.
+  if (requested.endFlash?.text) {
+    const domain = requested.endFlash.text.trim();
+    if (domain && !s.toLowerCase().includes(domain.toLowerCase())) {
+      s = `${s} Go to ${domain} to get started!`;
+      applied.flashAppended = true;
+    }
+  }
+
+  // 4a. NEVER-guard — the "instead of …" pain point must never appear as a
+  //     STATEMENT of what the video shows; scrub it (replace with the user's
+  //     own positive clause when one was given).
+  if (requested.mood?.avoid) {
+    const avoid = requested.mood.avoid.replace(/[.;!?]+$/, '').trim();
+    if (avoid) {
+      const re = new RegExp(escapeRegExp(avoid), 'i');
+      if (re.test(s)) {
+        const replacement = requested.mood.positive
+          ? requested.mood.positive.replace(/[.;!?]+$/, '').trim()
+          : '';
+        s = replacement
+          ? s.replace(re, replacement)
+          : s.replace(re, '');
+        applied.avoidGuardApplied = true;
+      }
+    }
+  }
+
+  // 4b. Mood positive — the brief's own aspirational clause closes the pitch.
+  if (requested.mood?.positive) {
+    const pos = requested.mood.positive.replace(/[.;!?]+$/, '').trim();
+    if (pos && !s.toLowerCase().includes(pos.toLowerCase())) {
+      const first = pos.charAt(0).toUpperCase() + pos.slice(1);
+      s = `${s} ${first}.`;
+      applied.moodPositiveAppended = true;
+    }
+  }
+
+  return { script: s.replace(/\s{2,}/g, ' ').trim(), applied };
+}

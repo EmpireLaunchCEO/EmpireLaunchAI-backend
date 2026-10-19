@@ -8,6 +8,7 @@ import { usageService } from './usageService.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantResult } from './videoExportVariants.js';
 import { r2Storage } from './r2StorageService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho } from './creativeTransformation.js';
+import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -23,6 +24,7 @@ export interface TwinCreationRequest {
   voiceId?: string;
   mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
   duration?: number;   // requested twin video length (seconds); honored via frame pacing (zero-video-API Faceless-style engine — Twin never uses a video API)
+  conversation?: { role?: string; content?: unknown }[]; // optional prior user turns — unioned into requestedVisuals extraction so dictation asks are remembered (owner Oct 19)
 }
 
 export interface CinemaAsset {
@@ -71,7 +73,7 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration, conversation } = request;
     // CREATIVE TRANSFORMATION (owner Sep 28): the twin's script must be a FINISHED
     // pitch to potential clients, never a recital of the owner's typed brief or
     // the chat's internal structure. transformTwinScriptToPitch rewrites
@@ -79,6 +81,18 @@ export class CinemaEngineService {
     // reasons", "CTA", meta talk) into a client-directed pitch built from the
     // creative essence, and leaves already-finished user scripts verbatim.
     const safeScript = transformTwinScriptToPitch(script);
+    // DICTATION FIDELITY (owner Oct 19 — task 08041dff, ALL MODES): the twin
+    // path does NOT run the shared planner/buildDictationSection, so its asks
+    // (dictated opening, on-screen bullets, end-flash domain, mood/never-guard,
+    // conversation) are extracted from the user's own script + conversation and
+    // ENFORCED deterministically on the final twin script — verbatim opening
+    // prefix, bullets as presented lines, exact end-flash CTA, pain point
+    // scrubbed (never inverted), positive mood clause closing the pitch. The
+    // enforcement is pure/idempotent: finished user scripts are left verbatim.
+    const talkText = userConversationText(conversation);
+    const requestedVisuals = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
+    const enforced = enforceTwinDictation(safeScript, requestedVisuals);
+    const finalTwinScript = enforced.script;
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -114,9 +128,9 @@ export class CinemaEngineService {
       // talking-head stills (sharp, local) + FFmpeg compose — which is already
       // zero video API and was the pre-existing fallback. Cost ledger never sees
       // a Sora spend for Twin.
-      const lipSyncData = await this.generateLipSyncReasoning(safeScript);
+      const lipSyncData = await this.generateLipSyncReasoning(finalTwinScript);
       const framePaths = await this.generateTalkingFrames(
-        facialDna, lipSyncData, safeScript, this.cinemaDir, assetId, duration
+        facialDna, lipSyncData, finalTwinScript, this.cinemaDir, assetId, duration
       );
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
 
@@ -136,12 +150,14 @@ export class CinemaEngineService {
         thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
         status: 'completed',
         metadata: {
-          script: safeScript,
+          script: finalTwinScript,
           scriptOriginal: isInternalBriefEcho(script) ? String(script || '') : undefined,
           scriptTransformed: isInternalBriefEcho(script),
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
           engine: 'faceless-engine (frame pipeline · zero video API, no Sora/Veo)',
+          requestedVisuals,
+          twinDictationApplied: enforced.applied,
         },
         variants: exportVariants,
       };

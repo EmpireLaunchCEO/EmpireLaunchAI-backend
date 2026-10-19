@@ -9,9 +9,11 @@ import {
   userConversationText,
   buildDictationSection,
   buildBriefOverlaySpec,
+  enforceTwinDictation,
   MAX_BULLETS,
 } from '../requestedVisuals.js';
 import { normalizeAssemblyOverlays } from '../assemblyOverlays.js';
+import { transformTwinScriptToPitch } from '../creativeTransformation.js';
 
 /**
  * USER-REQUESTED ELEMENTS — discriminating fixtures (task 08041dff, owner
@@ -194,4 +196,77 @@ test('12. mode-parity: Faceless / Scene / Twin all hit the SAME shared extractio
     const spec = buildBriefOverlaySpec(v, 5);
     assert.ok(spec && spec.perScene && spec.flash, `${label}: assembly overlay spec derived`);
   }
+});
+// ── TWIN PATH DICTATION ENFORCEMENT (lead review finding 21:50Z Oct 19) ──────
+// The lead proved Twin runs a SEPARATE pipeline (cinemaEngineService.createNeuralTwin +
+// transformTwinScriptToPitch) that never calls the shared planner/buildDictationSection,
+// so the SHARED-layer fix (#127 tests 10-12) did NOT reach Twin — the owner's Oct 19
+// directive ("make sure this follows suit for scene based and twin as well") requires
+// the dictation bar on the twin path ITSELF. These fixtures run the REAL twin
+// transformation (pure/deterministic, no API calls), prove it currently DROPS every
+// ask (the drift), then prove enforceTwinDictation (wired into cinemaEngineService)
+// restores all four: verbatim opening, bullets, exact end-flash domain, mood with
+// never-invert.
+const TWIN_BRIEF =
+  'I want a twin video for EmpireLaunch AI. Introducing EmpireLaunch AI, your new go-to platform. ( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points) ' +
+  'flash empirelaunchai.com at the end. show someone enjoying their craft instead of being glued to a phone';
+test('13. TWIN pipeline drift: transformTwinScriptToPitch drops every dictated ask (the owner\'s failure)', () => {
+  const cooked = transformTwinScriptToPitch(TWIN_BRIEF);
+  // The twin transformation (internal-brief rewrite) is a FINISHED pitch — but today
+  // it silently discards the user's dictates: no opening, no bullets, no domain, no mood.
+  assert.ok(!/Introducing EmpireLaunch AI/.test(cooked), 'cooked pitch must NOT contain the dictated opening (proves drift)');
+  assert.ok(!/76 videos a month/.test(cooked), 'cooked pitch must NOT contain the bullet (proves drift)');
+  assert.ok(!/empirelaunchai\.com/i.test(cooked), 'cooked pitch must NOT contain the end-flash domain (proves drift)');
+  assert.ok(!/glued to a phone|enjoying their craft/.test(cooked), 'cooked pitch must NOT carry the mood ask (proves drift)');
+});
+test('14. TWIN enforcement: all four asks restored on the REAL pipeline output (no inversion)', () => {
+  const v = extractRequestedVisuals(TWIN_BRIEF);
+  assert.ok(v.dictatedOpening && v.bullets && v.endFlash && v.mood, 'extraction found all four asks');
+  const cooked = transformTwinScriptToPitch(TWIN_BRIEF);
+  const enforced = enforceTwinDictation(cooked, v);
+  const s = enforced.script;
+  // 1) dictated opening VERBATIM and FIRST (never rephrased, never relocated).
+  assert.ok(s.startsWith(v.dictatedOpening!), 'twin script opens with the dictated line verbatim');
+  assert.ok(!/Hello|Say hello/i.test(s), 'no rephrase');
+  // 2) on-screen bullets presented as spoken lines (screen-fit cap respected).
+  for (const b of v.bullets!) assert.ok(s.includes(b), 'bullet spoken: ' + b);
+  assert.ok(enforced.applied.bulletsAppended.length >= 2, 'bullets were appended by enforcement');
+  // 3) end-flash EXACT domain as the closing CTA.
+  assert.ok(s.toLowerCase().includes(v.endFlash!.text.toLowerCase()), 'exact domain present');
+  assert.ok(/Go to empirelaunchai\.com to get started/i.test(s), 'domain CTA present');
+  // 4) mood/never-guard: positive clause closes the pitch; pain point NEVER inverts.
+  assert.ok(s.toLowerCase().includes(v.mood!.positive.toLowerCase()), 'positive mood clause present');
+  assert.ok(!/glued to a phone/i.test(s), 'pain point never present as a statement');
+  assert.ok(!new RegExp(v.mood!.avoid!, 'i').test(s), 'avoid phrase absent from final twin script');
+});
+test('15. TWIN enforcement is idempotent: an already-honoring finished script stays verbatim', () => {
+  // A user-authored FINISHED twin script already containing the asks must never be
+  // mangled (mirrors the LINE_CHANGE carve-out / transformTwinScriptToPitch verbatim rule).
+  const finished =
+    'Introducing EmpireLaunch AI, your new go-to platform. You get 76 videos a month, no credit buying. Go to EmpireLaunchAI.com to get started!';
+  // NOTE: extraction source uses the owner's real brief phrasing (parenthetical
+  // " - these are bullet points to show on screen"), which extracts CLEAN bullets;
+  // residue fragments (e.g. "com at the end.") are a synthetic-input artifact and
+  // never appear from real briefs (pinned by tests 2/10-12).
+  const v = extractRequestedVisuals(
+    'Introducing EmpireLaunch AI, your new go-to platform. ( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points to show on screen) flash EmpireLaunchAI.com at the end.'
+  );
+  const enforced = enforceTwinDictation(finished, v);
+  assert.equal(enforced.script, finished, 'already-honoring script untouched');
+  assert.equal(enforced.applied.openingPrefixed, false, 'no opening prefix needed');
+  assert.equal(enforced.applied.flashAppended, false, 'domain already present — no duplicate CTA');
+  assert.ok(enforced.applied.bulletsAppended.length === 0, 'bullets already present — no duplicates');
+});
+test('16. TWIN negative + guard: no asks → no change; avoid phrase scrubbed when it slips in', () => {
+  const bare = 'Welcome to my Empire! This is my Neural Twin double, ready to market 24/7.';
+  assert.equal(enforceTwinDictation(bare, {}).script, bare, 'no asks → script untouched');
+  const positive = 'Smart distribution. Enjoying your craft instead of being glued to a phone.';
+  const guarded = enforceTwinDictation(positive, { mood: { positive: 'enjoying your craft', avoid: 'being glued to a phone' } });
+  assert.ok(!/glued to a phone/i.test(guarded.script), 'never-guard scrubs the pain point');
+  assert.equal(guarded.applied.avoidGuardApplied, true, 'guard applied flag recorded');
+  // Empty inputs never throw and stay empty.
+  assert.deepEqual(enforceTwinDictation('', {}).applied, {
+    openingPrefixed: false, bulletsAppended: [], flashAppended: false,
+    moodPositiveAppended: false, avoidGuardApplied: false,
+  });
 });
