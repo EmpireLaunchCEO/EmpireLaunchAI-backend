@@ -62,6 +62,43 @@ export function appendSceneStillGuards(prompt: string): string {
   return appendFramingGuard(appendNoTextGuard(prompt));
 }
 
+
+/** TIMEOUT HARDENING (task 285c9027 — owner-authorized Oct 19 after the fidelity
+ *  fix landed): gpt-image-2 still-gen per-call window extended 180s → 300s. The
+ *  Oct 19 scene-1 timeout (de36e7b0) died at exactly 180.0s while sibling scenes
+ *  completed — healthy generations were being aborted at the cap. The scene
+ *  worker deadline remains the outer safety net. */
+export const GPT_IMAGE_STILL_TIMEOUT_MS = 300_000;
+
+/** True only when a fetch rejection was caused by AbortSignal.timeout
+ *  (TimeoutError) or an external abort (AbortError). Content-policy/400/429/5xx
+ *  API errors are NOT abort-like and must never trigger a retry. */
+export function isAbortLikeError(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'TimeoutError' || name === 'AbortError';
+}
+
+/** fetch + per-call timeout window with retry-EXACTLY-ONCE-on-timeout semantics:
+ *   - success         → returned as-is, NO second call (completed work is never
+ *                       regenerated or duplicated);
+ *   - timeout/abort   → ONE fresh attempt with a new timeout window;
+ *   - any other error → propagated untouched (never retried).
+ *  Used for gpt-image-2 still generation (generations + edits endpoints). */
+export async function fetchWithRetryOnTimeout(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number = GPT_IMAGE_STILL_TIMEOUT_MS,
+): Promise<Response> {
+  const attempt = (): Promise<Response> => fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isAbortLikeError(err)) throw err;
+    console.warn(`[RenderingEngine] still-gen fetch aborted after ${timeoutMs}ms — retrying once (never retried on success or API errors)`);
+    return attempt();
+  }
+}
 export class RenderingEngine {
   private tempDir: string;
 
@@ -166,7 +203,7 @@ export class RenderingEngine {
       }
     }
     if (!b64Json) {
-      const response = await fetch('https://api.openai.com/v1/images/generations', {
+      const response = await fetchWithRetryOnTimeout(fetch, 'https://api.openai.com/v1/images/generations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -179,7 +216,6 @@ export class RenderingEngine {
           quality,
           ...(opts?.size ? { size: opts.size } : {}),
         }),
-        signal: AbortSignal.timeout(180000)
       });
       // gpt-image-2 can legitimately take 60-120s+ to render a high-quality image.
       // 60s was aborting healthy generations ("The operation was aborted due to
@@ -216,11 +252,10 @@ if (!b64Json) {
     form.append('quality', quality);
     if (size) form.append('size', size);
     form.append('image', new Blob([buf], { type: 'image/png' }), 'input.png');
-    const response = await fetch('https://api.openai.com/v1/images/edits', {
+    const response = await fetchWithRetryOnTimeout(fetch, 'https://api.openai.com/v1/images/edits', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}` },
       body: form as any,
-      signal: AbortSignal.timeout(180000),
     });
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
