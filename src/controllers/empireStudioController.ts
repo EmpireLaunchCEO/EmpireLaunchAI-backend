@@ -65,18 +65,30 @@ export class EmpireStudioController {
    */
   async createNeuralTwin(req: Request, res: Response) {
     const userId = (req as any).userId;
-    const { photoUrl, script, voiceId } = req.body;
+    const { photoUrl, script, voiceId, conversation } = req.body;
 
     if (!photoUrl || !script) {
       return res.status(400).json({ error: 'photoUrl and script are required' });
     }
 
     try {
+      // Conversation memory (owner Oct 19, ALL-MODES bar): union prior USER turns
+      // into the twin engine's dictation extraction (same shape the engine
+      // consumes — { role, content }[]).
+      const conv = Array.isArray(conversation)
+        ? (conversation as any[])
+            .filter((m) => m && typeof m === 'object' && typeof (m as any).content === 'string')
+            .map((m: any) => ({
+              role: typeof m.role === 'string' ? m.role : 'user',
+              content: m.content,
+            }))
+        : undefined;
       const asset = await cinemaEngineService.createNeuralTwin({
         userId,
         photoUrl,
         script,
-        voiceId
+        voiceId,
+        conversation: conv,
       });
       res.json(asset);
     } catch (error: unknown) {

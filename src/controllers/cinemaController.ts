@@ -160,7 +160,7 @@ export class CinemaController {
    */
   async createNeuralTwin(req: Request, res: Response): Promise<void> {
     try {
-      const { photoPath, script, voiceStyle, mood } = req.body;
+      const { photoPath, script, voiceStyle, mood, conversation, conversationHistory } = req.body;
       const userId = resolveUserId(req) || 'system';
 
       if (!photoPath && !req.body.photoUrl) {
@@ -191,6 +191,23 @@ export class CinemaController {
         durationVal = d;
       }
 
+      // Conversation memory (owner Oct 19, ALL-MODES bar): union prior USER turns
+      // into dictation extraction in the twin engine so earlier asks (dictated
+      // opening, end flash, bullets, mood) are remembered — never dropped.
+      // Accept `conversation` or legacy `conversationHistory` from the cinema tab.
+      const convRaw = Array.isArray(conversation)
+        ? conversation
+        : Array.isArray(conversationHistory)
+          ? conversationHistory
+          : undefined;
+      const conv: { role?: string; content?: unknown }[] | undefined = Array.isArray(convRaw)
+        ? (convRaw as any[])
+            .filter((m) => m && typeof m === 'object' && typeof (m as any).content === 'string')
+            .map((m: any) => ({
+              role: typeof m.role === 'string' ? m.role : 'user',
+              content: m.content,
+            }))
+        : undefined;
       const result = await cinemaEngineService.createNeuralTwin({
         userId,
         photoPath,
@@ -199,6 +216,7 @@ export class CinemaController {
         voiceStyle,
         mood: moodVal,
         duration: durationVal,
+        conversation: conv,
       });
 
       // Save to creations table so it shows up in Operations page
