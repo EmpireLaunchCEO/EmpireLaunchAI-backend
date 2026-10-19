@@ -270,3 +270,48 @@ test('16. TWIN negative + guard: no asks → no change; avoid phrase scrubbed wh
     moodPositiveAppended: false, avoidGuardApplied: false,
   });
 });
+
+// ── CONTROLLER→ENGINE CONVERSATION PATH (lead review 22:17Z Oct 19) ──────────
+// The twin ENGINE accepts conversation, but neither production controller passed it
+// through — so "remember the conversation" (owner Oct 19) was dead on the live Twin
+// path. The controllers now read req.body.conversation (cinema route also accepts
+// legacy conversationHistory) and pass the SAME {role,content}[] shape the engine
+// consumes (cinemaEngineService.ts:27). This fixture proves the union exactly as
+// the engine performs it (line 93: extractRequestedVisuals(`${script} ${talkText}`)):
+// ask that lives ONLY in an earlier USER turn must surface in the extracted visuals.
+test('17. CONTROLLER→ENGINE conversation path: earlier-turn asks (end flash, bullets, mood) union into extraction; script keeps the opening', () => {
+  // What the user typed across turns (cinema tab relays user turns; assistant/
+  // system filler must be ignored by userConversationText).
+  const conversation = [
+    { role: 'user', content: 'flash empirelaunchai.com at the end' },
+    { role: 'assistant', content: 'Got it — empirelaunchai.com will flash at the end.' },
+    { role: 'user', content: '( You get 76 videos a month! NO CREDIT BUYING!! - these are bullet points to show on screen)' },
+    { role: 'system', content: 'system pinned message — must be filtered out' },
+    { role: 'user', content: 'show someone enjoying their craft instead of being glued to a phone' },
+  ];
+  const talkText = userConversationText(conversation);
+  assert.match(talkText, /empirelaunchai\.com/);
+  assert.match(talkText, /76 videos a month/);
+  assert.match(talkText, /glued to a phone/);
+  assert.ok(!/assistant|pinned message|Got it/.test(talkText), 'non-user turns filtered by userConversationText');
+  // The script alone carries ONLY the dictated opening — the flash/bullets/mood
+  // asks live exclusively in the conversation turn (the controller-02-03 gap).
+  const script = 'Introducing EmpireLaunch AI, your new go-to platform.';
+  const v = extractRequestedVisuals(script);
+  assert.ok(v.dictatedOpening && !v.endFlash && !v.bullets && !v.mood, 'script alone has only the opening');
+  // Engine union (cinemaEngineService.ts:93) — this is the REAL path the controller
+  // now feeds: script + userConversationText(conversation).
+  const unioned = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
+  assert.match(unioned.dictatedOpening!, /^Introducing EmpireLaunch AI/, 'opening comes from the script (verbatim)');
+  assert.match(unioned.endFlash!.text, /empirelaunchai\.com/i, 'end flame extracted FROM THE TURN, not the script');
+  assert.ok(unioned.bullets && unioned.bullets.length >= 2, 'bullets extracted from the turn');
+  assert.match(unioned.mood!.positive.toLowerCase(), /enjoying their craft/, 'mood positive from the turn');
+  assert.match(unioned.mood!.avoid ?? '', /glued to a phone/i, 'pain point → NEVER-guard from the turn');
+  // Same shape is accepted by the cinema route via legacy conversationHistory —
+  // the normalizer only filters {content:string} objects, any field-name is fine.
+  const legacy = userConversationText(conversation.map((m) => ({ ...m })));
+  assert.equal(legacy, talkText, 'conversationHistory (same entries) normalizes identically');
+  // Missing/empty conversation is a no-op (controller passes undefined → engine no-op).
+  assert.equal(userConversationText(undefined), '');
+  assert.equal(userConversationText([]), '');
+});

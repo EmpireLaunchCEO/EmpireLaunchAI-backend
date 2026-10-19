@@ -19,6 +19,8 @@ import { readFileSync } from 'node:fs';
  * path).
  */
 const SERVICE_SRC = readFileSync(new URL('../../services/cinemaEngineService.ts', import.meta.url), 'utf8');
+const CINEMA_CTRL_SRC = readFileSync(new URL('../../controllers/cinemaController.ts', import.meta.url), 'utf8');
+const STUDIO_CTRL_SRC = readFileSync(new URL('../../controllers/empireStudioController.ts', import.meta.url), 'utf8');
 
 test('twin engine is architecturally separate (lead finding) — no shared-planner reach', () => {
   // Pins the architecture the wiring was built for: Twin never rides
@@ -87,5 +89,50 @@ test('the enforced script (not the raw cooked pitch) feeds the twin downstream p
     SERVICE_SRC,
     /twinDictationApplied:\s*enforced\.applied/,
     'metadata must record exactly which dictation guarantees were applied'
+  );
+});
+// ── CONTROLLER→ENGINE CONVERSATION PLUMBING (lead review 22:17Z Oct 19) ───────
+// The engine accepted conversation but neither production controller passed it
+// through — "remember the conversation" (owner Oct 19) was DEAD on the live Twin
+// path. These guards pin the controller wiring: if a refactor drops the body
+// read or the `conversation:` argument, the suite breaks loudly (same purpose as
+// the engine-wiring guards above).
+test('cinemaController (/api/cinema/create-twin) plumbs conversation or legacy conversationHistory into createNeuralTwin', () => {
+  assert.match(
+    CINEMA_CTRL_SRC,
+    /const\s*\{\s*photoPath,\s*script,\s*voiceStyle,\s*mood,\s*conversation,\s*conversationHistory\s*\}\s*=\s*req\.body;/,
+    'cinema twin handler must read BOTH conversation and legacy conversationHistory from the body'
+  );
+  assert.match(
+    CINEMA_CTRL_SRC,
+    /Array\.isArray\(conversation\)\s*\?\s*conversation\s*:\s*Array\.isArray\(conversationHistory\)/,
+    'controller must fall back to conversationHistory when conversation is absent'
+  );
+  assert.match(
+    CINEMA_CTRL_SRC,
+    /\.filter\(\(m\)\s*=>\s*m\s*&&\s*typeof\s*m\s*===\s*'object'\s*&&\s*typeof\s*\(m as any\)\.content\s*===\s*'string'\)/,
+    'controller must drop non-string-content turns (assistant/system filler)'
+  );
+  assert.match(
+    CINEMA_CTRL_SRC,
+    /createNeuralTwin\(\{[\s\S]*?conversation:\s*conv,\s*\}\);/,
+    'the engine call must pass the normalized conversation through'
+  );
+});
+test('empireStudioController (/api/studio/cinema/twin) plumbs conversation (same shape) into createNeuralTwin', () => {
+  assert.match(
+    STUDIO_CTRL_SRC,
+    /const\s*\{\s*photoUrl,\s*script,\s*voiceId,\s*conversation\s*\}\s*=\s*req\.body;/,
+    'studio twin handler must read conversation from the body'
+  );
+  assert.match(
+    STUDIO_CTRL_SRC,
+    /\.filter\(\s*\(m\)\s*=>\s*m\s*&&\s*typeof\s*m\s*===\s*'object'\s*&&\s*typeof\s*\(m as any\)\.content\s*===\s*'string'\s*\)/,
+    'studio controller must normalize to {role,content}[] (user turns only)'
+  );
+  assert.match(
+    STUDIO_CTRL_SRC,
+    /createNeuralTwin\(\{[\s\S]*?voiceId,\s*conversation:\s*conv,\s*\}\);/,
+    'studio engine call must pass the normalized conversation through'
   );
 });
