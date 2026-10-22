@@ -510,7 +510,30 @@ export function padClipToDuration(input: string, targetSec: number): Promise<voi
     });
   });
 }
+/** MEASURED-TRUTH NARRATION END (task 42ff404a — owner Faceless 2bd309e3 tripped
+ *  NARRATION_OVERLAP_INVARIANT because the LIVE planner sizes scene windows from the
+ *  word-count estimate while real GPT-audio narration is longer). Deterministic,
+ *  zero paid calls: decode the local narration audio to 22.05kHz mono f32 and
+ *  back-scan for the first non-silent sample (-44 dBFS — THE SAME threshold the
+ *  assembly invariant uses) returning the TRUE speech end in ms. 0 = unreadable or
+ *  fully silent (caller keeps the planned window). Never an API call. */
+export function measureTrueSpeechEndMs(file: string): number {
+  let pcm: Buffer;
+  try {
+    pcm = execFileSync(
+      'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-ac', '1', '-ar', '22050', '-f', 'f32le', '-'],
+      { maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch { return 0; }
+  const arr = new Float32Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 4));
+  const TH = 0.006; // -44 dBFS
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (Math.abs(arr[i]) > TH) return Math.round(((i + 1) / 22050) * 1000);
+  }
+  return 0;
+}
 export function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{
+
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
   // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
   // be crossfaded directly. Each xfade overlaps by TRANSITION_MS.
@@ -635,21 +658,9 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       // audio ONCE and back-scan for the first non-silent sample (threshold -44 dBFS;
       // the AAC apad floor is ~-80 dB) — the TRUE narration end, the same length
       // renderClip's atrim already preserved. Deterministic, zero paid APIs.
-      const speechEndOf = (f: string): number => {
-        let pcm: Buffer;
-        try {
-          pcm = execFileSync(
-            'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', f, '-map', '0:a:0', '-ac', '1', '-ar', '22050', '-f', 'f32le', '-'],
-            { maxBuffer: 64 * 1024 * 1024 },
-          );
-        } catch { return 0; }
-        const arr = new Float32Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 4));
-        const TH = 0.006; // -44 dBFS
-        for (let i = arr.length - 1; i >= 0; i--) {
-          if (Math.abs(arr[i]) > TH) return (i + 1) / 22050;
-        }
-        return 0;
-      };
+      // SHARED with the live assembly's measured-truth window sizing
+      // (task 42ff404a): the planner and the invariant MUST measure the same way.
+      const speechEndOf = (f: string): number => measureTrueSpeechEndMs(f) / 1000;
       let prevSpeechEndMs = 0;
       for (let i = 0; i < inputs.length; i++) {
         if (!probes[i].hasAudio) { sumPrev += probes[i].seconds; continue; }
@@ -1943,6 +1954,38 @@ export function applySceneDurationOverrides(
   }
   return script.map((s, i) => ({ ...s, duration: sizes[i] }));
 }
+/** MEASURED-TRUTH WINDOW GROWTH (task 42ff404a — owner Faceless 2bd309e3 tripped
+ *  NARRATION_OVERLAP_INVARIANT at assembly: track=4 start=24095ms <
+ *  prevSpeechEnd=24354ms because the LIVE planner sizes scene windows from the
+ *  word-count estimate ([7,7,7,6,6]) while real GPT-audio narration is longer).
+ *  After audio generation, GROW each scene's window so the narration fits inside
+ *  it with >= MEASURED_NARRATION_MARGIN_MS of headroom — the same measured-truth
+ *  approach the render tooling uses (MEASURED_NARRATION_MS + margin), applied to
+ *  the live Faceless/Scene assembly where the raw narrated audio file is already
+ *  on disk. Pure + deterministic: caller supplies per-scene measured speech end
+ *  ms (measureTrueSpeechEndMs; 0/null = no measurement -> planned window kept).
+ *  NEVER shrinks below the planned duration (visual rooms/bookends stay); the
+ *  total grows as needed (render #8 precedent: 33.267s vs 30s nominal) so every
+ *  narration has room and the single-voice scheduler cannot overlap tracks. */
+export function growSceneWindowsToMeasured(
+  scenes: Array<{ sceneNumber: number; duration: number | null }>,
+  measuredEndMs: Array<number | null | undefined>,
+  marginMs = MEASURED_NARRATION_MARGIN_MS,
+): { scenes: Array<{ sceneNumber: number; duration: number }>; grown: number[] } {
+  const n = Math.max(1, scenes.length);
+  const grown: number[] = [];
+  const out = scenes.map((s, i) => {
+    const planned = Math.max(3, Math.round(Number(s.duration) || 3));
+    const measured = measuredEndMs[i];
+    const floor = typeof measured === 'number' && measured > 0
+      ? Math.max(3, Math.ceil((measured + marginMs) / 1000))
+      : planned;
+    const dur = Math.max(planned, floor); // grow-only: never shrink below planned
+    if (dur > planned) grown.push(s.sceneNumber);
+    return { sceneNumber: s.sceneNumber, duration: dur };
+  });
+  return { scenes: out, grown };
+}
 /** RENDER #8 FAILURE FIX (Oct 17 - narration/override coexistence): distribute
  *  override narration lines ACROSS the post-override windows IN ORDER with the
  *  even-spread guarantee (every scene >= 1 line while lines remain; a scene's
@@ -2724,6 +2767,42 @@ if (!skipGeneration) {
       return;
     }
 
+    // MEASURED-TRUTH WINDOW GROWTH (task 42ff404a — owner Faceless 2bd309e3
+    // tripped NARRATION_OVERLAP_INVARIANT: track=4 start=24095ms <
+    // prevSpeechEnd=24354ms — the live planner sizes windows from the word-count
+    // estimate but real GPT-audio narration is longer). Now that every scene's
+    // narration audio exists locally, MEASURE each scene's true speech end (the
+    // SAME -44dBFS back-scan the assembly invariant uses — deterministic, zero
+    // paid calls) and grow each window to max(planned, measured + margin) so the
+    // narration fits with >=400ms headroom. The video total grows as needed
+    // (render #8 precedent 33.267s vs 30s nominal); the fail-closed invariant
+    // below stays as the final guard but becomes unreachable for normal
+    // dictation. Best-effort: a measurement failure keeps the planned window.
+    try {
+      const sceneRowsAny = complete as any[];
+      const measuredEnds: Array<number | null | undefined> = sceneRowsAny.map((sc) => {
+        const audioLocal = String((sc.metadata as any)?.audioLocalPath || '');
+        if (!audioLocal || !fs.existsSync(audioLocal)) return null;
+        const ms = measureTrueSpeechEndMs(audioLocal);
+        return ms > 0 ? ms : null;
+      });
+      const sizing = growSceneWindowsToMeasured(complete, measuredEnds);
+      if (sizing.grown.length) {
+        const byScene = new Map(sizing.scenes.map((s) => [s.sceneNumber, s.duration]));
+        for (const sc of complete) {
+          const nd = byScene.get(sc.sceneNumber);
+          if (typeof nd === 'number' && nd !== (sc.duration ?? null)) sc.duration = nd;
+        }
+        for (const [sceneNumber, duration] of byScene) {
+          await db.update(schema.videoScenes)
+            .set({ duration, updatedAt: new Date() })
+            .where(and(eq(schema.videoScenes.projectId, projectId), eq(schema.videoScenes.sceneNumber, sceneNumber)));
+        }
+        trace(`measured_narration_windows project=${projectId} grown=[${sizing.grown.join(',')}]`);
+      }
+    } catch (measureErr: any) {
+      trace(`measured_narration_windows_skip project=${projectId} error=${measureErr?.message}`);
+    }
     // Transition to assembling
     await db.update(schema.videoProjects).set({status:'assembling',updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     trace(`assembling_start project=${projectId}`);
