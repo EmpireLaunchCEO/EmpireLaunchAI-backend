@@ -21,6 +21,10 @@
 //     svc 2681:  onScreenOverlaysMeta = mergePerSceneBullets(base, distributeBulletPanels(buildBulletOverlayLines(inventory, f4SellingPoints), n), n)
 //     svc 2654:  enforcePlannerFidelity(planned, { dictatedOpening, moodPositive })
 // ─────────────────────────────────────────────────────────────────────────────
+// LEAD-REVIEW ROUND 2 (Oct 26): fixture composition mirrors the LIVE seam
+// shape — extraction runs on the whole refined script + relayed chat
+// (cinemaEngineService:94). Do NOT refactor these to synthetic inputs; the
+// carried-verbatim + prepend-fallback discrimination depends on this shape.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
