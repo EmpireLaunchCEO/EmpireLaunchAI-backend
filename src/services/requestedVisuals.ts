@@ -255,8 +255,8 @@ export function buildDictationSection(v: RequestedVisuals, sceneCount: number): 
 export function buildBriefOverlaySpec(
   v: RequestedVisuals,
   sceneCount: number,
-): { perScene?: { bullets: { text: string; marker: string; at: number }[] }[]; flash?: { text: string; durationSec: number } } | null {
-  const spec: { perScene?: { bullets: { text: string; marker: string; at: number }[] }[]; flash?: { text: string; durationSec: number } } = {};
+): { perScene?: { bullets: { text: string; marker: string; at: number }[] }[]; flash?: { text: string; durationSec: number; position?: 'center' | 'bottom' } } | null {
+  const spec: { perScene?: { bullets: { text: string; marker: string; at: number }[] }[]; flash?: { text: string; durationSec: number; position?: 'center' | 'bottom' } } = {};
   if (v.bullets && v.bullets.length && sceneCount >= 1) {
     const step = v.bullets.length >= 4 ? 1.05 : 1.35;
     spec.perScene = [
@@ -270,7 +270,12 @@ export function buildBriefOverlaySpec(
     ];
   }
   if (v.endFlash) {
-    spec.flash = { text: v.endFlash.text, durationSec: 1.5 };
+    // OWNER (Oct 26, af053a01): the domain must FLASH AT THE BOTTOM of the
+    // screen. The DERIVED spec (the faceless/Scene default when the request
+    // carries no explicit overlays) lands bottom-positioned with a gentle
+    // pulse; explicit render-time specs (no `position`) keep the legacy
+    // centered end card.
+    spec.flash = { text: v.endFlash.text, durationSec: 1.5, position: 'bottom' };
   }
   return spec.perScene || spec.flash ? spec : null;
 }

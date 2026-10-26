@@ -52,6 +52,13 @@ export interface AssemblyBulletPanel {
 export interface AssemblyEndFlash {
   text: string;
   /** flash window length at the very end (default 1.2s) */
+  /** OVERRIDE (owner Oct 26 — live faceless af053a01): 'bottom' renders a
+   *  translucent navy band at the bottom of the frame with the domain text
+   *  gently PULSING in the final window (never the full-frame white card).
+   *  Absent = the legacy centered end card. */
+  position?: 'center' | 'bottom';
+  /** pulse count for position:'bottom' (default 3, clamped 1-5). */
+  repeat?: number;
   durationSec?: number;
   /** full-frame background color (default 'white') */
   bg?: string;
@@ -239,6 +246,8 @@ export function normalizeAssemblyOverlays(
         bg: typeof flashRaw.bg === 'string' && flashRaw.bg.trim() ? flashRaw.bg : undefined,
         fg: typeof flashRaw.fg === 'string' && flashRaw.fg.trim() ? flashRaw.fg : undefined,
         ...(Number.isFinite(Number(flashRaw.fontSize)) && Number(flashRaw.fontSize) > 0 ? { fontSize: Number(flashRaw.fontSize) } : {}),
+        ...(flashRaw.position === 'bottom' || flashRaw.position === 'center' ? { position: flashRaw.position } : {}),
+        ...(Number.isFinite(Number(flashRaw.repeat)) && Number(flashRaw.repeat) >= 1 ? { repeat: Math.min(5, Math.round(Number(flashRaw.repeat))) } : {}),
       };
     }
   }
@@ -370,15 +379,30 @@ export function applyAssemblyOverlays(
         const dur = Math.min(3, Math.max(0.2, spec.flash.durationSec ?? 1.2));
         const t0 = Math.max(0, total - dur);
         const enable = `enable='between(t,${t0.toFixed(3)},${total.toFixed(3)})'`;
-        const bg = spec.flash.bg || 'white';
-        const fg = spec.flash.fg || '0x0a1f44';
-        const flashFs = fitBulletFontSize([{ text: spec.flash.text }], 1000, spec.flash.fontSize ?? 96, 40);
-        const ff = writeTextFile(spec.flash.text);
-        const ramp = `if(lt(t,${t0.toFixed(3)}),0,if(lt(t,${(t0 + 0.15).toFixed(3)}),(t-${t0.toFixed(3)})/0.15,1))`;
-        vf.push(
-          `drawbox=x=0:y=0:w=1080:h=1920:color=${bg}:t=fill:${enable}`,
-          `drawtext=fontfile='${font}':textfile='${ff}':expansion=none:fontsize=${flashFs}:fontcolor=${fg}:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${ramp}':${enable}`,
-        );
+        if (spec.flash.position === 'bottom') {
+          // OWNER (Oct 26, af053a01): the domain must FLASH AT THE BOTTOM of
+          // the screen — NOT the full-frame white end card. Translucent navy
+          // band + gently PULSING domain text in the final window (alpha floor
+          // 0.4 — never a seizure strobe; on-brand navy/white).
+          const bottomFs = fitBulletFontSize([{ text: spec.flash.text }], 900, spec.flash.fontSize ?? 56, 32);
+          const bottomFf = writeTextFile(spec.flash.text);
+          const pulses = Math.min(5, Math.max(1, spec.flash.repeat ?? 3));
+          const period = 0.75;
+          const on = 0.5;
+          const pulseAlpha = `1-0.6*floor(mod(t-${t0.toFixed(3)},${period})/${on})`;
+          vf.push(`drawbox=x=0:y=1752:w=1080:h=168:color=0x0a1f44@0.85:t=fill:${enable}`);
+          vf.push(`drawtext=fontfile='${font}':textfile='${bottomFf}':expansion=none:fontsize=${bottomFs}:fontcolor=white:x=(w-text_w)/2:y=1782:alpha='${pulseAlpha}':${enable}`);
+        } else {
+          const bg = spec.flash.bg || 'white';
+          const fg = spec.flash.fg || '0x0a1f44';
+          const flashFs = fitBulletFontSize([{ text: spec.flash.text }], 1000, spec.flash.fontSize ?? 96, 40);
+          const ff = writeTextFile(spec.flash.text);
+          const ramp = `if(lt(t,${t0.toFixed(3)}),0,if(lt(t,${(t0 + 0.15).toFixed(3)}),(t-${t0.toFixed(3)})/0.15,1))`;
+          vf.push(
+            `drawbox=x=0:y=0:w=1080:h=1920:color=${bg}:t=fill:${enable}`,
+            `drawtext=fontfile='${font}':textfile='${ff}':expansion=none:fontsize=${flashFs}:fontcolor=${fg}:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${ramp}':${enable}`,
+          );
+        }
       }
       if (!vf.length) {
         // Nothing to draw — pure passthrough copy (default OFF path).
