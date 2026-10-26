@@ -148,6 +148,32 @@ export function appendBandToSvg(svg: string, band: string): string {
   return svg.includes('</svg>') ? svg.replace('</svg>', `${band}</svg>`) : `${svg}${band}`;
 }
 
+/** (b) TWIN MOOD VISUALS — owner Oct 26 mood sequence (stressed at work →
+ *  relaxing with family) placed on the twin's SCENE VISUALS. Main's twin is the
+ *  silent SVG pipeline; its only visual channel is the per-frame SVG, so a
+ *  top-of-frame mood strip shifts cool (first half — the tense before-state,
+ *  expressed ONLY as palette, never as a stated pain point) to warm with the
+ *  positive clause captioned (second half — the aspirational payoff).
+ *  NEVER-STATE guard: this helper only ever emits the POSITIVE clause or
+ *  nothing — the avoid/negative state is structurally unrepresentable here
+ *  (mirrors enforceTwinDictation's avoid-scrub; the owner's negative never
+ *  appears on screen). Pure; deterministic per (frameIndex, totalFrames). */
+export function twinMoodStripMarkup(
+  moodPositive: string | null | undefined,
+  frameIndex: number,
+  totalFrames: number,
+): string {
+  const pos = String(moodPositive ?? '').trim();
+  const late = totalFrames > 1 && frameIndex / totalFrames >= 0.55;
+  const cool = 'rgba(23,32,52,0.45)';
+  const warm = 'rgba(146,86,50,0.45)';
+  const tint = late ? warm : cool;
+  const caption = late && pos
+    ? `<text x="40" y="60" fill="#ffffff" font-size="30" font-weight="bold" font-family="Arial">${escapeXmlText(pos.slice(0, 44).toUpperCase())}</text>`
+    : '';
+  return `<g id="ela-twin-mood"><rect x="0" y="0" width="1080" height="84" fill="${tint}"/>${caption}</g>`;
+}
+
 /** ── (d) MOOD IMAGERY — deterministic scene placement, never a raw dump ─────
  *  When requestedVisuals.mood.positive exists, map it onto the story arc the
  *  owner described ("show someone stressed working, show someone relaxing
