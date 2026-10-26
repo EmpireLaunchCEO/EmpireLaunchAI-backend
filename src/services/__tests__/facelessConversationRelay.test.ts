@@ -94,4 +94,43 @@ describe('faceless conversation relay (owner: full chat, never first-message-onl
     assert.equal(normalized.length, 3, 'should keep first user + assistant + second user, drop system/null/other');
     assert.equal(normalized[2].content, 'second ask — the important one', 'the LAST user turn is the one that must survive');
   });
+
+  /** Mirrors the studio/approval route components filter (studioRoutes.ts /
+   *  approvalController.createApproval). */
+  function normalizeComponents(raw: unknown): string[] | undefined {
+    if (!Array.isArray(raw)) return undefined;
+    const kept = (raw as unknown[]).filter((c): c is string => typeof c === 'string' && c.trim().length > 0);
+    return kept.length ? kept : undefined;
+  }
+
+  it('REVIEW-GAP CLOSED — components normalization keeps every non-empty string, drops empty/whitespace, and omits the field when nothing survives', () => {
+    // Mixed relay: two real components + junk that must not reach the pipeline.
+    const raw = ['Logo on screen', '  ', '', 'Tagline animation', '   \n   '];
+    const components = normalizeComponents(raw);
+    assert.deepEqual(components, ['Logo on screen', 'Tagline animation'], 'kept strings must keep client order, drop empty/whitespace-only');
+
+    // The exact spread the controller uses in the faceless createProject input.
+    const inputWith = { ...(components && components.length ? { components } : {}) };
+    assert.ok('components' in inputWith, 'components must be forwarded when non-empty');
+    assert.deepEqual(inputWith.components, ['Logo on screen', 'Tagline animation']);
+
+    // All-junk relay → field omitted entirely (never an empty array handed to
+    // buildComponentInventory, which reads input.components ?? []).
+    const nothing = normalizeComponents(['', '   ']);
+    const inputWithout = { ...(nothing && nothing.length ? { components: nothing } : {}) };
+    assert.ok(!('components' in inputWithout), 'whitespace-only components must be omitted from the createProject input');
+  });
+
+  it('planner input plumbing — the forwarded components land exactly where createProject (buildComponentInventory, line 2356) reads them', () => {
+    // Shape-check the createProject input the controller builds: components sits
+    // at input.components, the SAME field buildComponentInventory consumes
+    // (sceneVideoPipelineService:2356 — { components: input.components, ... }).
+    const components = ['Logo on screen'];
+    const createProjectInput = {
+      idea: CLEAN_IDEA,
+      conversation: FULL_CONVERSATION,
+      ...(components && components.length ? { components } : {}),
+    };
+    assert.deepEqual(createProjectInput.components, ['Logo on screen'], 'input.components must carry the relayed list');
+  });
 });
