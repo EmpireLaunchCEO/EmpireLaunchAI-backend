@@ -221,6 +221,24 @@ export const createApproval = async (req: Request, res: Response) => {
       // raw-brief chunk that was echoed into metadata.components and injected
       // VERBATIM into visualPrompts (project abca11ed). The pipeline adds the
       // mood hint to the planner prompt from input.mood — no text append needed.
+      // Owner (Oct 19 + Oct 26): the Faceless launch relays the FULL consultant
+      // conversation so the pipeline plans from every user turn — never just the
+      // first message or the refined summary alone. createProject's
+      // requestedVisuals extraction reads input.conversation; keep every valid
+      // {role, content} message (mirrors the studio video-project route).
+      const conversation = Array.isArray(req.body.conversation)
+        ? req.body.conversation
+            .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+            .map((m: any) => ({ role: m.role as 'user' | 'assistant', content: m.content as string }))
+        : undefined;
+      // Owner (Oct 26): the studio app also relays the concrete components the
+      // client/owner named in chat (facelessRelayedComponents). Mirror the
+      // studio video-project route (studioRoutes.ts): keep non-empty strings
+      // only, and forward them so the planner's component inventory sees them —
+      // never silently dropped on the Faceless path.
+      const components = Array.isArray(req.body.components)
+        ? req.body.components.filter((c: any) => typeof c === 'string' && c.trim().length > 0)
+        : undefined;
       const facelessIdea = description.trim();
       try {
         facelessProjectId = await sceneVideoPipelineService.createProject({
@@ -245,6 +263,12 @@ export const createApproval = async (req: Request, res: Response) => {
           // screenshot cover-fit (photos more screen-fitting).
           sceneDurationOverrides: (enrichedPayload as any).sceneDurationOverrides,
           stillCoverFit: (enrichedPayload as any).stillCoverFit,
+          // FULL consultant conversation relayed by the studio app (owner Oct 19 +
+          // Oct 26) — createProject extraction runs idea + userConversationText(conversation).
+          conversation,
+          // Concrete relayed components (owner Oct 26) — forwarded so the planner's
+          // component inventory includes them (mirrors studio video-project route).
+          ...(components?.length ? { components } : {}),
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
