@@ -75,6 +75,79 @@ export function grammarizeYouBenefitSplice(text: unknown): string {
   return t.replace(YOU_NUMBER_SPLICE_RE, (m: string) => `that gives you ${m.replace(/^you\s+/i, '')}`);
 }
 
+/** ── (T) TWIN ON-SCREEN SEAM — the owner's dictated bullet contents, rendered
+ *  directly into the twin's SVG frame channel (the ONLY on-screen text path in
+ *  cinemaEngineService on main — buildTalkingHeadSvg per-frame captions).
+ *  Twin has no component-inventory/F4 machinery, so the canonical band lines are
+ *  the owner's dictated bullet contents (shared with faceless; verbatim lock).
+ *  Deterministic + pure — twin band is composed by twinBandMarkup + appended to
+ *  the frame SVG via appendBandToSvg; fixtures run the REAL expressions.
+ *  VERBATIM SCOPE (owner Oct 26): ONLY these dictated contents are forced on
+ *  screen — all narration/connective text stays the model's own. ────────────── */
+export const TWIN_CANONICAL_BULLETS: string[] = [
+  'You get 76 video creations a month',
+  'NO CREDIT BUYING',
+  '50 designs a month',
+  'Unlimited personal video editing',
+];
+
+/** Deterministic XML/SVG escape for dynamic text (band lines, domain). */
+export function escapeXmlText(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+export interface TwinBandOptions {
+  bullets?: string[];
+  domain?: string;
+  frameIndex: number;
+  totalFrames: number;
+}
+
+/** Pure: build the twin band <g> markup for ONE frame.
+ *  - End frames (last 2 of totalFrames) with a domain: domain-only band at the
+ *    bottom = the owner's \"domain flashing at the bottom of the screen\" end
+ *    state (static band, no strobe).
+ *  - Otherwise: the dictated bullets as a dark bottom band (<=4 lines, ✓ prefix)
+ *    — a real on-screen bullet PANEL, not the 20px grey caption.
+ *  - Nothing requested -> '' (frame untouched). */
+export function twinBandMarkup(o: TwinBandOptions): string {
+  const bullets = (o.bullets ?? []).slice(0, 4);
+  const domain = String(o.domain ?? '').trim();
+  const isEnd = o.totalFrames > 1 && o.frameIndex >= o.totalFrames - 2;
+  if (isEnd && domain) {
+    return [
+      '<g id="ela-twin-band">',
+      `<rect x="40" y="1560" width="1000" height="110" rx="14" fill="rgba(10,14,34,0.86)"/>`,
+      `<text x="540" y="1636" text-anchor="middle" fill="#ffffff" font-size="44" font-weight="bold" font-family="Arial">${escapeXmlText(domain)}</text>`,
+      '</g>',
+    ].join('');
+  }
+  if (bullets.length) {
+    const lines = bullets.map((b, i) => {
+      const y = 1624 + i * 62;
+      return `<text x="60" y="${y}" fill="#ffffff" font-size="34" font-family="Arial">\u2713 ${escapeXmlText(b)}</text>`;
+    });
+    return [
+      '<g id="ela-twin-band">',
+      `<rect x="40" y="1520" width="1000" height="${40 + bullets.length * 62 + 30}" rx="14" fill="rgba(10,14,34,0.86)"/>`,
+      ...lines,
+      '</g>',
+    ].join('');
+  }
+  return '';
+}
+
+/** Pure: append band markup to a frame SVG (insert before closing tag). */
+export function appendBandToSvg(svg: string, band: string): string {
+  if (!band) return svg;
+  return svg.includes('</svg>') ? svg.replace('</svg>', `${band}</svg>`) : `${svg}${band}`;
+}
+
 /** ── (d) MOOD IMAGERY — deterministic scene placement, never a raw dump ─────
  *  When requestedVisuals.mood.positive exists, map it onto the story arc the
  *  owner described ("show someone stressed working, show someone relaxing

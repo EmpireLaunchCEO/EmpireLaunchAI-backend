@@ -35,6 +35,8 @@ import {
   mergePerSceneBullets,
   type SceneLike,
 } from '../plannerFidelity.js';
+import { TWIN_CANONICAL_BULLETS, appendBandToSvg, escapeXmlText, twinBandMarkup } from '../plannerFidelity.js';
+import { enforceTwinDictation, RequestedVisuals } from '../requestedVisuals.js';
 import { buildBriefOverlaySpec } from '../requestedVisuals.js';
 import {
   injectSellingPointsIntoNarration,
@@ -253,6 +255,16 @@ test('fidelity.bullets: merged spec round-trips normalizeAssemblyOverlays (the 2
   assert.equal(reread.flash?.text, END_FLASH_TEXT); // flash preserved alongside
 });
 
+/** Minimal RequestedVisuals from the owner's dictated opening (twin fixtures). */
+function buildTwinRequested(opening: string): RequestedVisuals {
+  return {
+    dictatedOpening: opening,
+    bullets: TWIN_CANONICAL_BULLETS,
+    endFlash: { text: 'EmpireLaunchAi.com' },
+    mood: { positive: 'relaxing with family', avoid: '' },
+  };
+}
+
 // ── (e) SCRUB ──────────────────────────────────────────────────────────────
 test('fidelity.scrub: pre-fix selling-points-only ban lets raw inventory JUNK survive', () => {
   // The PRE-FIX live expression used f4SellingPoints only (task 40c58f6a).
@@ -322,4 +334,53 @@ test('fidelity.flash: normalize passes position through and clamps repeat 1-5', 
     1,
   );
   assert.equal(zero?.flash?.repeat, undefined);
+});
+
+// ── (i) TWIN ON-SCREEN SEAM + CREATIVE FREEDOM (owner Oct 26: verbatim ONLY her
+// dictated lines — everything else stays the model's own phrasing) ────────────
+test('fidelity.twin.band: canonical dictated bullets render in the SVG band (frame 0)', () => {
+  const markup = twinBandMarkup({ bullets: TWIN_CANONICAL_BULLETS, frameIndex: 0, totalFrames: 10 });
+  assert.ok(markup.includes('id="ela-twin-band"'));
+  for (const b of TWIN_CANONICAL_BULLETS) assert.ok(markup.includes(escapeXmlText(b)), b);
+  assert.match(markup, /<rect x="40" y="1520"/); // bottom band (y >= 1520 of 1920)
+  assert.match(markup, /\u2713 /); // check-mark markers
+  assert.ok(!markup.includes('EmpireLaunchAi.com')); // not the end state yet
+});
+test('fidelity.twin.end: the LAST frames carry the domain band only (flashing-at-bottom end state)', () => {
+  const end = twinBandMarkup({ bullets: TWIN_CANONICAL_BULLETS, domain: 'EmpireLaunchAi.com', frameIndex: 9, totalFrames: 10 });
+  assert.ok(end.includes('EmpireLaunchAi.com'));
+  for (const b of TWIN_CANONICAL_BULLETS) assert.ok(!end.includes(escapeXmlText(b)), b);
+  const notEnd = twinBandMarkup({ bullets: TWIN_CANONICAL_BULLETS, domain: 'EmpireLaunchAi.com', frameIndex: 7, totalFrames: 10 });
+  assert.ok(!notEnd.includes('EmpireLaunchAi.com'));
+  assert.ok(notEnd.includes('\u2713 '));
+});
+test('fidelity.twin.empty: no bullets + no domain -> frame untouched', () => {
+  assert.equal(twinBandMarkup({ frameIndex: 0, totalFrames: 10 }), '');
+  assert.equal(appendBandToSvg('<svg></svg>', ''), '<svg></svg>');
+});
+test('fidelity.twin.escape: dynamic text is XML-escaped (no raw markup injection)', () => {
+  const markup = twinBandMarkup({ bullets: ['<Brand & Co>'], frameIndex: 0, totalFrames: 2 });
+  assert.ok(markup.includes('&lt;Brand &amp; Co&gt;'));
+  assert.ok(!markup.includes('<Brand & Co>'));
+  assert.ok(appendBandToSvg('<svg></svg>', markup).endsWith('</svg>'));
+});
+test('fidelity.freedom.faceless: dictated opening lands verbatim; non-dictated narration is NOT forced', () => {
+  const creative = 'It was the best of times, it was the worst of times — that line still pulls.';
+  const inScript = [
+    { sceneNumber: 1, narration: 'Something the planner wrote first.' },
+    { sceneNumber: 2, narration: creative },
+  ];
+  const out = enforcePlannerFidelity(inScript, { dictatedOpening: DICTATED_OPENING });
+  assert.equal(out.script[0]?.narration, DICTATED_OPENING_EXACT); // verbatim lock (enforced form = terminal punct)
+  assert.equal(out.script[1]?.narration, creative); // byte-exact: creative freedom untouched
+  assert.ok(out.trace.includes('openingPatched'));
+});
+test('fidelity.freedom.twin: enforceTwinDictation forces ONLY her dictated lines, preserves creative middle', () => {
+  const creative = 'It was the best of times, it was the worst of times.';
+  const requested = buildTwinRequested(DICTATED_OPENING);
+  const enforced = enforceTwinDictation(`Let me tell you about content creation. ${creative}`, requested);
+  assert.ok(enforced.script.startsWith(DICTATED_OPENING)); // verbatim opening prefix
+  assert.ok(enforced.script.includes(creative)); // creative sentence preserved
+  assert.ok(enforced.script.includes('NO CREDIT BUYING')); // her dictated bullet lands
+  assert.ok(!enforced.script.includes('Say hello to')); // the paraphrased opener is nowhere
 });
