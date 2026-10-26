@@ -64,8 +64,8 @@ test('createNeuralTwin extracts requested visuals and ENFORCES them on the final
   );
   assert.match(
     SERVICE_SRC,
-    /const\s+finalTwinScript\s*=\s*enforced\.script;/,
-    'the enforced script must be the twin deliverable'
+    /const\s+finalTwinScript\s*=\s*grammarizeYouBenefitSplice\(enforced\.script\);/,
+    'the twin deliverable is the ENFORCED script run through the F4 you-splice grammarizer — a no-op unless a "you <n>" splice exists, so the enforced script is the base deliverable in every branch (lead review 21:40Z Oct 26)'
   );
 });
 

@@ -115,6 +115,12 @@ test('twin.grammar: whole-script grammarizeYouBenefitSplice (real service expres
   assert.match(final, /that gives you 76 video creations a month\./);
   assert.equal(final.includes('transformation you 76'), false);
 });
+test('twin.grammar.noop: grammarizeYouBenefitSplice is a NO-OP when no you-<n> splice exists (branch A)', () => {
+  // branch parity with twin.grammar (branch B = splice present -> rewritten):
+  // no splice -> the deliverable is byte-identical to the enforced script.
+  const clean = 'We help creators go from overworked to relaxed. ' + CREATIVE;
+  assert.equal(grammarizeYouBenefitSplice(clean), clean);
+});
 
 // ── TWIN — on-screen SVG seam (real frame-loop expressions) ─────────────────
 test('twin.pre.band: frames WITHOUT the band carry no on-screen bullet text', () => {
