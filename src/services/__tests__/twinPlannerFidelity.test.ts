@@ -81,7 +81,11 @@ test('twin.pre.script: WITHOUT enforceTwinDictation the twin script MISSES every
   assert.equal(SAFE_SCRIPT.toLowerCase().includes('relaxing with family'), false);
 });
 test('twin.post.script: REAL chain lands opening verbatim + bullets + domain + mood; creative stays free', () => {
-  const enforced = enforceTwinDictation(SAFE_SCRIPT, TWIN_REQUESTED());
+  // LIVE shape: the consultant-refined script carries her dictation at the top
+  // (transformTwinScriptToPitch keeps finished copy verbatim) — that is why the
+  // prod extraction sees it; enforcement guarantees it regardless.
+  const SCRIPT = DICTATED_OPENING + '. We help creators go from overworked to relaxed. ' + CREATIVE;
+  const enforced = enforceTwinDictation(SCRIPT, TWIN_REQUESTED());
   const lower = enforced.script.toLowerCase();
   assert.ok(lower.includes(DICTATED_OPENING.toLowerCase())); // her dictated opening lands
   for (const frag of ['76 video creations a month', 'NO CREDIT BUYING', '50 designs a month', 'unlimited personal video editing'])
@@ -90,6 +94,12 @@ test('twin.post.script: REAL chain lands opening verbatim + bullets + domain + m
   assert.ok(lower.includes(MOOD_POSITIVE)); // positive mood closes
   assert.ok(enforced.script.includes(CREATIVE)); // creative freedom preserved byte-for-byte
   assert.equal(enforced.script.includes('Say hello to'), false); // paraphrased opener absent
+});
+test('twin.enforce.prepend: a script missing the opening gets it prepended VERBATIM — the planner CANNOT drop it', () => {
+  // the Oct-26 production loss mode: dictation reached the pipeline, never the
+  // final narration. The fallback is a deterministic position-0 prepend.
+  const enforced = enforceTwinDictation(SAFE_SCRIPT, TWIN_REQUESTED());
+  assert.ok(enforced.script.startsWith(DICTATED_OPENING + '.')); // verbatim + canonical punctuation
 });
 test('twin.grammar: whole-script grammarizeYouBenefitSplice (real service expression) fixes the F4 splice', () => {
   const enforced = enforceTwinDictation(
