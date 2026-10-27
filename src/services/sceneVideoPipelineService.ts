@@ -7,6 +7,7 @@ import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { buildBriefOverlaySpec, buildDictationSection, extractRequestedVisuals, userConversationText } from './requestedVisuals.js';
+import { buildBulletOverlayLines, distributeBulletPanels, enforcePlannerFidelity, grammarizeYouBenefitSplice, mergePerSceneBullets } from './plannerFidelity.js';
 import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from './veoVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
@@ -1577,7 +1578,11 @@ export function verifySellingPointsSpoken(script: SceneScript[], sellingPoints: 
  *  subject positioning → scene 1, benefits → a middle scene (round-robin), CTA+
  *  price → the FINAL scene — truncating the scene's generic narration at the SHORT
  *  cap if needed but NEVER dropping the phrase, then re-verifying. Zero paid calls. */
-export function injectSellingPointsIntoNarration(script: SceneScript[], sellingPoints: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[] } {
+export function injectSellingPointsIntoNarration(
+  script: SceneScript[],
+  sellingPoints: string[],
+  opts?: { skipSceneZero?: boolean },
+): { script: SceneScript[]; injected: string[]; stillMissing: string[] } {
   const next = script.map(s => ({ ...s }));
   if (!sellingPoints.length || !next.length) return { script: next, injected: [], stillMissing: verifySellingPointsSpoken(next, sellingPoints).missing };
   const missing = verifySellingPointsSpoken(next, sellingPoints).missing;
@@ -1592,7 +1597,7 @@ export function injectSellingPointsIntoNarration(script: SceneScript[], sellingP
   for (const c of missing) {
     let target: number;
     if (isCtaPrice(c)) target = last;
-    else if (isHookish(c)) target = 0;
+    else if (isHookish(c)) target = opts?.skipSceneZero ? Math.max(1, Math.min(last - 1, Math.floor(count / 2))) : 0;
     else { target = midCursor; midCursor = (midCursor + 1) % Math.max(1, count - 1); if (midCursor === last) midCursor = Math.max(1, last - 1); }
     const s = next[target];
     s.narration = composeNarrationWithPhrase(s.narration, c, s.duration);
@@ -1624,7 +1629,10 @@ function composeNarrationWithPhrase(existing: string, phrase: string, durationSe
   const roomChars = Math.max(8, maxChars - pChars - 1);
   const fit = capToRoom(existingTrim, roomWords, roomChars);
   const candidate = fit ? `${fit} ${p}` : p;
-  return capNarrationForScene(candidate, durationSec);
+  // PLANNER FIDELITY (owner af053a01): the F4 splice must stay GRAMMATICAL —
+  // "the transformation you 76 video creations a month." is banned; the join
+  // is normalized to a proper relative clause ("…that gives you 76…"). Pure.
+  return grammarizeYouBenefitSplice(capNarrationForScene(candidate, durationSec));
 }
 /** Word-boundary + char-boundary + sentence-completeness trim to a custom room
  *  (the SHORT rule's own word/char logic, but bounded by `roomWords`/`roomChars`
@@ -1679,14 +1687,14 @@ function capSentence(s: string): string {
  *  it cleaned for audit. */
 export function stripBenefitTextFromVisualPrompts(script: SceneScript[], bannedPhrases: string[]): { script: SceneScript[]; strippedScenes: number[] } {
   const next = script.map(s => ({ ...s }));
-  const banned = (bannedPhrases ?? []).map(normalizeComponent).filter(Boolean);
+  const banned = (bannedPhrases ?? []).map(normalizeComponent).map((x: string) => x.replace(/\s+/g, ' ')).filter(Boolean);
   if (!banned.length) return { script: next, strippedScenes: [] };
   const strippedScenes: number[] = [];
   const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const s of next) {
     const before = String(s.visualPrompt || '');
     if (!before.trim()) continue;
-    let v = before;
+    let v = before.replace(/\s+/g, ' ');
     // 1) Bullet form: " — phrase." / " - phrase" (the acceptance failure mode).
     for (const b of banned) {
       v = v.replace(new RegExp(`\\s*[—–-]\\s*${esc(b)}(\\.)?(?=\\s*[—–-]|\\s*$|[,;)])`, 'gi'), ' ');
@@ -2618,7 +2626,10 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // re-add benefit text; voiced videos only (silent videos carry components in
     // visuals by design — not the launch-gate path).
     const f4Visual = f4Voice
-      ? stripBenefitTextFromVisualPrompts(planned, f4SellingPoints.filter(c => !/^EmpireLaunch AI\.$/i.test(c)))
+      ? stripBenefitTextFromVisualPrompts(
+          planned,
+          [...f4SellingPoints, ...inventory, ...inventory.map((c) => String(c ?? '').replace(/^[-–—•*\s]+/, ''))].filter(c => !/^EmpireLaunch AI\.$/i.test(c)),
+        )
       : { script: planned, strippedScenes: [] };
     if (f4Visual.script !== planned) planned.splice(0, planned.length, ...f4Visual.script);
     if (f4Visual.strippedScenes.length) trace(`f4_visual_strip project=${projectId} scenes=[${f4Visual.strippedScenes.join(',')}]`);
@@ -2630,10 +2641,46 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (linkInBioPass.script !== planned) planned.splice(0, planned.length, ...linkInBioPass.script);
     if (linkInBioPass.strippedNarrationScenes.length || linkInBioPass.strippedVisualScenes.length) trace(`link_in_bio_ban project=${projectId} narrationScenes=[${linkInBioPass.strippedNarrationScenes.join(',')}] visualScenes=[${linkInBioPass.strippedVisualScenes.join(',')}]`);
     const overrideSpoken = narrationOverride ? narrationOverride.length - verifySellingPointsSpoken(planned, narrationOverride).missing.length : 0;
+    // PLANNER FIDELITY (owner Oct 26 — live faceless af053a01): the planner
+    // paraphrased the dictated opening ("Say hello to…" ≠ "Introducing…"),
+    // ignored the mood imagery, and left benefit splices ungrammatical.
+    // Stronger prompting already failed once (buildDictationSection reaches
+    // the planner prompt at line 2420 and was IGNORED) — this is DETERMINISTIC
+    // post-plan enforcement of the relayed dictation (plannerFidelity.ts):
+    // verbatim scene-1 opening, grammatical F4 sentences, mood placed on the
+    // right scenes. Pure; zero LLM/DB/paid calls. The idle re-injection below
+    // restores any hook phrase the verbatim opening erased (appended AFTER
+    // her line as a grammatical sentence — never before it).
+    const fidelity = enforcePlannerFidelity(planned, {
+      dictatedOpening: requested.dictatedOpening,
+      moodPositive: requested.mood?.positive,
+    });
+    if (fidelity.script !== planned) planned.splice(0, planned.length, ...fidelity.script);
+    if (fidelity.trace.length) trace(`planner_fidelity project=${projectId} ${fidelity.trace.join(' ')}`);
+    if (f4Voice) {
+      const fidelityReinject = injectSellingPointsIntoNarration(planned, f4SellingPoints, { skipSceneZero: true });
+      if (fidelityReinject.script !== planned) planned.splice(0, planned.length, ...fidelityReinject.script);
+      if (fidelityReinject.injected.length) trace(`planner_fidelity_reinject project=${projectId} injected=[${fidelityReinject.injected.join(' | ')}]`);
+    }
     // RENDER #7 OVERLAYS + SCREENSHOT OVERRIDES (owner ADJUST #2 — OPT-IN metadata;
     // absent = pixel-exact current output). Normalized here so the persisted record
     // is clean and the worker's assembly pass has a boundary-checked spec.
-    const onScreenOverlaysMeta = normalizeAssemblyOverlays(input.onScreenOverlays ?? buildBriefOverlaySpec(requested, planned.length), planned.length) ?? undefined;
+    let onScreenOverlaysMeta: unknown = normalizeAssemblyOverlays(input.onScreenOverlays ?? buildBriefOverlaySpec(requested, planned.length), planned.length) ?? undefined;
+    // PLANNER FIDELITY BULLETS (owner af053a01 — ZERO on-screen text in the
+    // delivered video): the owner asked for bullet points ON SCREEN; the
+    // planner never turned the relayed benefit components into overlay lines.
+    // Build the bullet panel deterministically from the component inventory
+    // and MERGE it into the overlay spec (existing flash / bottomBar
+    // untouched). ONE scene-1 panel of <=4 lines: the overlay normalizer
+    // compacts empty perScene groups, so index 0 is the only position that
+    // survives the persisted-metadata round-trip — the proven render-#8
+    // shape the owner accepted.
+    const bulletLines = buildBulletOverlayLines(inventory, f4SellingPoints);
+    if (bulletLines.length) {
+      const bulletPanels = distributeBulletPanels(bulletLines, planned.length);
+      onScreenOverlaysMeta = mergePerSceneBullets(onScreenOverlaysMeta, bulletPanels, planned.length);
+      if (onScreenOverlaysMeta) trace(`planner_fidelity_bullets project=${projectId} lines=${bulletLines.length} scenes=[${bulletPanels.map((p) => p.sceneIndex + 1).join(',')}]`);
+    }
     const visualPromptOverridesMeta = Array.isArray(input.visualPromptOverrides)
       ? (input.visualPromptOverrides as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       : undefined;

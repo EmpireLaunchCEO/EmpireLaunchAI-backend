@@ -9,6 +9,7 @@ import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantR
 import { r2Storage } from './r2StorageService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho } from './creativeTransformation.js';
 import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
+import { TWIN_CANONICAL_BULLETS, appendBandToSvg, grammarizeYouBenefitSplice, twinBandMarkup, twinMoodStripMarkup } from './plannerFidelity.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -92,7 +93,16 @@ export class CinemaEngineService {
     const talkText = userConversationText(conversation);
     const requestedVisuals = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
     const enforced = enforceTwinDictation(safeScript, requestedVisuals);
-    const finalTwinScript = enforced.script;
+    // F4 grammatical splice (owner af053a01 — "…the transformation you 76 video
+    // creations a month."): stitch "you <number> …" factor fragments into a
+    // grammatical factor sentence via the SHARED deterministic fixer. Whole-script
+    // pass; no-op unless the splice is present; creative freedom elsewhere intact.
+    const finalTwinScript = grammarizeYouBenefitSplice(enforced.script);
+    // MOOD VISUALS (owner Oct 26 — "stressed at work → relaxing with family"):
+    // the request `mood` field was previously DEAD (destructured, never used).
+    // Thread the positive clause into the frame SVG mood strip; the stressed
+    // before-state shows only as a cool palette (never stated — never-guard).
+    const moodPositive = requestedVisuals.mood?.positive || mood || '';
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -130,7 +140,7 @@ export class CinemaEngineService {
       // a Sora spend for Twin.
       const lipSyncData = await this.generateLipSyncReasoning(finalTwinScript);
       const framePaths = await this.generateTalkingFrames(
-        facialDna, lipSyncData, finalTwinScript, this.cinemaDir, assetId, duration
+        facialDna, lipSyncData, finalTwinScript, this.cinemaDir, assetId, duration, TWIN_CANONICAL_BULLETS, moodPositive
       );
       await this.composeNeuralTwinVideo(framePaths, outputPath, lipSyncData, duration);
 
@@ -333,7 +343,9 @@ export class CinemaEngineService {
     script: string,
     outputDir: string,
     assetId: string,
-    duration?: number
+    duration?: number,
+    bullets: string[] = [],
+    moodPositive = ''
   ): Promise<string[]> {
     const framePaths: string[] = [];
     // When a target duration is requested, derive the frame count at constant 2fps so
@@ -354,9 +366,16 @@ export class CinemaEngineService {
 
       // Create an SVG-based talking head frame
       const svg = this.buildTalkingHeadSvg(facialDna, emotion, mouthOpen, scriptParts[i] || '');
+      // PLANNER FIDELITY — twin on-screen bullets + end-state domain (shared
+      // seam): twin's ONLY on-screen text channel is the SVG frame; append the
+      // owner's dictated bullets as a bottom band (end frames: domain band =
+      // \"flashing at the bottom\" end state, no strobe). Zero LLM; pure.
+      const moodStrip = twinMoodStripMarkup(moodPositive, i, totalFrames);
+      const band = twinBandMarkup({ bullets, domain: 'EmpireLaunchAi.com', frameIndex: i, totalFrames });
+      const svgTarget = appendBandToSvg(appendBandToSvg(svg, moodStrip), band);
       const framePath = path.join(outputDir, `frame_${assetId}_${i.toString().padStart(3, '0')}.png`);
 
-      await sharp(Buffer.from(svg))
+      await sharp(Buffer.from(svgTarget))
         .resize(1080, 1920)
         .toFile(framePath);
 
