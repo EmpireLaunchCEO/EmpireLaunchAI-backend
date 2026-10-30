@@ -59,8 +59,13 @@ test('createNeuralTwin extracts requested visuals and ENFORCES them on the final
   );
   assert.match(
     SERVICE_SRC,
-    /const\s+enforced\s*=\s*enforceTwinDictation\(safeScript,\s*requestedVisuals\);/,
-    'dictation enforcement must run AFTER transformTwinScriptToPitch on the cooked script'
+    /const\s+twinSplicePass\s*=\s*sanitizeComponentSpliceFromNarration\(safeScript,\s*\{/,
+    'the component-splice sanitizer must run on the COOKED script (owner Oct 30, 399ef884: "that line just annoys me")'
+  );
+  assert.match(
+    SERVICE_SRC,
+    /const\s+enforced\s*=\s*enforceTwinDictation\(twinSplicePass\.text,\s*requestedVisuals\);/,
+    'dictation enforcement must run AFTER transformTwinScriptToPitch, on the sanitized cooked script (sanitizer first so it never eats her dictated bullet lines, which only exist after enforcement)'
   );
   assert.match(
     SERVICE_SRC,
