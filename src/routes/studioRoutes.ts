@@ -12,7 +12,7 @@ import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
-import { sceneVideoPipelineService, MAX_SCENE_DURATION } from '../services/sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, MAX_SCENE_DURATION, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 import { usageService } from '../services/usageService.js';
@@ -1046,6 +1046,17 @@ router.post('/video-project', async (req: Request, res: Response) => {
       ? req.body.components.filter((c: any) => typeof c === 'string' && c.trim().length > 0)
       : undefined;
     if (!idea || typeof idea !== 'string') return res.status(400).json({ status: 'error', error: 'idea is required' });
+    // UPLOADED-PHOTO PLACEMENT (owner Oct 30): "background for the whole video" /
+    // "one scene" / "these scenes" / "from this point on" / "don't use it". An
+    // explicit placement object beats the deterministic chat parser; malformed
+    // input is a 400 with a readable message — a half-parsed object is NEVER
+    // stored. Absent ⇒ unchanged legacy behaviour (scene 1 only).
+    const placementInput = resolveSourceImagePlacementInput((req.body as any).sourceImagePlacement, {
+      ...(Number.isFinite(durationTarget) ? { durationSeconds: durationTarget } : {}),
+    });
+    if (!placementInput.ok) {
+      return res.status(400).json({ status: 'error', error: placementInput.error });
+    }
     const projectId = await sceneVideoPipelineService.createProject({
       userId: resolvedUserId,
       title: title || idea.slice(0, 80),
@@ -1058,10 +1069,11 @@ router.post('/video-project', async (req: Request, res: Response) => {
       tone,
       mood,
       sourceImages,
-      // Uploaded-photo placement (owner Oct 30): {mode:'background'|'scene'|'time',
-      // sceneNumber?, startSec?, endSec?}. Normalised + persisted by createProject;
-      // absent ⇒ scene 1 only. The chat parser / scene picker is a follow-up.
-      sourceImagePlacement: (req.body as any).sourceImagePlacement,
+      // Uploaded-photo placement (owner Oct 30): validated above through the ONE
+      // shared helper ({mode:'background'|'scene'|'none', sceneNumbers:[...],
+      // requestedSeconds?, anchor, fit, treatment, stated}), persisted to
+      // metadata.sourceImagePlacement by createProject; absent ⇒ scene 1 only.
+      sourceImagePlacement: placementInput.placement ?? undefined,
       conversation,
       components,
     });
