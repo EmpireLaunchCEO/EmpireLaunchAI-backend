@@ -23,6 +23,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { DEEP_NAVY_PANEL_BG, FLASH_MAX_SECONDS } from './plannerFidelity.js';
 
 /** One on-screen bullet: marker glyph + text + optional bring-in time (seconds
  *  after its scene's dissolve-compensated start). `at` default 0 — appears with
@@ -59,6 +60,10 @@ export interface AssemblyEndFlash {
   position?: 'center' | 'bottom';
   /** pulse count for position:'bottom' (default 3, clamped 1-5). */
   repeat?: number;
+  /** OWNER (Oct 30): the owner called the domain "noticeable" → render it
+   *  BIGGER and BRIGHTER (higher pulse alpha floor), never longer. Duration
+   *  comes from resolveEndFlashTiming (conversation-stated, 1–10s). */
+  emphasis?: boolean;
   durationSec?: number;
   /** full-frame background color (default 'white') */
   bg?: string;
@@ -77,15 +82,36 @@ export interface AssemblyOverlaySpec {
   flash?: AssemblyEndFlash;
 }
 
-/** Candidate bold fonts (prod image gets fonts-dejavu-core via the Dockerfile). */
+/** Candidate bold fonts. FIRST the bundled bold ROUNDED sans (owner typed "Yes"
+ *  to "bold rounded sans, white text, deep navy panels" — Poppins ExtraBold is
+ *  committed under public/assets/fonts and shipped by the Dockerfile's
+ *  `COPY . .`, so no extra apt package / build step is needed); then the prod
+ *  image's DejaVu core (apt fonts-dejavu-core). A missing bundled font simply
+ *  falls through — the renderer can never break on a font choice. */
+const BUNDLED_ROUNDED_FONT = 'public/assets/fonts/Poppins-ExtraBold.ttf';
 const FONT_CANDIDATES = [
+  join(process.cwd(), BUNDLED_ROUNDED_FONT),
+  join(process.cwd(), 'dist', BUNDLED_ROUNDED_FONT),
   '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
   '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
 ];
 export function resolveOverlayFont(): string {
   for (const f of FONT_CANDIDATES) if (fs.existsSync(f)) return f;
-  return FONT_CANDIDATES[1]; // last resort — DejaVuSans.ttf path; ffmpeg will error if truly absent
+  return FONT_CANDIDATES[2]; // last resort — DejaVuSans-Bold path; ffmpeg will error if truly absent
+}
+
+/** MARKER font — the bullet glyph (\u2713) is a dingbat that Poppins does NOT
+ *  carry (verified: it renders as tofu), so markers keep drawing with the
+ *  prod image's DejaVu Bold while the bullet TEXT uses the rounded sans. */
+const MARKER_FONT_CANDIDATES = [
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+];
+export function resolveMarkerFont(): string {
+  for (const f of MARKER_FONT_CANDIDATES) if (fs.existsSync(f)) return f;
+  return resolveOverlayFont();
 }
 
 /** Pure: absolute start (seconds) of every scene on the delivered timeline —
@@ -175,7 +201,7 @@ export function resolveBulletPanel(panel: AssemblyBulletPanel | undefined): Requ
   const w = num(panel?.w, 960, 240, 1080 - x);
   const y = num(panel?.y, 1350, 100, 1750);
   const h = num(panel?.h, 240, 100, 1920 - y);
-  return { x, y, w, h, bg: String(panel?.bg || 'black@0.85') };
+  return { x, y, w, h, bg: String(panel?.bg || DEEP_NAVY_PANEL_BG) };
 }
 
 /** Pure: validate + normalize an untrusted `onScreenOverlays` metadata payload.
@@ -242,12 +268,18 @@ export function normalizeAssemblyOverlays(
     if (text) {
       spec.flash = {
         text,
-        ...(Number.isFinite(dur) && dur > 0.2 && dur <= 3 ? { durationSec: dur } : {}),
+        // OWNER (Oct 30, project 399ef884): an explicitly stated flash duration
+        // ("noticeable for the last 5 seconds") must SURVIVE — the old <=3s
+        // clamp silently dropped it back to the 1.2s default. Now 0.2–10s
+        // (FLASH_MAX_SECONDS); the planner-side resolver already bounds it by
+        // the final scene length.
+        ...(Number.isFinite(dur) && dur > 0.2 && dur <= FLASH_MAX_SECONDS ? { durationSec: dur } : {}),
         bg: typeof flashRaw.bg === 'string' && flashRaw.bg.trim() ? flashRaw.bg : undefined,
         fg: typeof flashRaw.fg === 'string' && flashRaw.fg.trim() ? flashRaw.fg : undefined,
         ...(Number.isFinite(Number(flashRaw.fontSize)) && Number(flashRaw.fontSize) > 0 ? { fontSize: Number(flashRaw.fontSize) } : {}),
         ...(flashRaw.position === 'bottom' || flashRaw.position === 'center' ? { position: flashRaw.position } : {}),
         ...(Number.isFinite(Number(flashRaw.repeat)) && Number(flashRaw.repeat) >= 1 ? { repeat: Math.min(5, Math.round(Number(flashRaw.repeat))) } : {}),
+        ...(flashRaw.emphasis === true ? { emphasis: true } : {}),
       };
     }
   }
@@ -303,6 +335,7 @@ export function applyAssemblyOverlays(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const font = opts?.fontPath ?? resolveOverlayFont();
+    const markerFont = opts?.fontPath ?? resolveMarkerFont();
     let textDir: string | null = null;
     let textCounter = 0;
     /** Write a user-visible text value to a temp file for `textfile=` (avoids
@@ -342,13 +375,25 @@ export function applyAssemblyOverlays(
             `drawbox=x=${panel.x}:y=${panel.y}:w=${panel.w}:h=${panel.h}:color=${panel.bg}:t=fill:${enable}`,
           );
           bullets.forEach((b, bi) => {
-            const tf = writeTextFile(`${b.marker ?? ''}${b.text}`);
             const t0 = Math.max(start, start + (b.at ?? 0));
             const t1 = t0 + 0.45;
             const fade = `if(lt(t,${t0.toFixed(3)}),0,if(lt(t,${t1.toFixed(3)}),(t-${t0.toFixed(3)})/0.45,1))`;
             const yBase = Math.round(panel.y + pad + bi * lineH);
+            // MARKER + TEXT are drawn separately: the rounded sans carries the
+            // words, the DejaVu marker font carries the ✓ glyph (Poppins has no
+            // dingbats — it would render as tofu). Same size/fade/enable, so the
+            // line looks unchanged apart from the typeface.
+            let x = panel.x + pad;
+            if (b.marker) {
+              const mf = writeTextFile(b.marker);
+              vf.push(
+                `drawtext=fontfile='${markerFont}':textfile='${mf}':expansion=none:fontsize=${autoSize}:fontcolor=white:x=${x}:y='${yBase} + 20*(1-(${fade}))':alpha='${fade}':${enable}`,
+              );
+              x += Math.round(estimateTextPx(b.marker, autoSize)) + Math.round(autoSize * 0.3);
+            }
+            const tf = writeTextFile(b.text);
             vf.push(
-              `drawtext=fontfile='${font}':textfile='${tf}':expansion=none:fontsize=${autoSize}:fontcolor=white:x=${panel.x + pad}:y='${yBase} + 20*(1-(${fade}))':alpha='${fade}':${enable}`,
+              `drawtext=fontfile='${font}':textfile='${tf}':expansion=none:fontsize=${autoSize}:fontcolor=white:x=${x}:y='${yBase} + 20*(1-(${fade}))':alpha='${fade}':${enable}`,
             );
           });
           return;
@@ -376,7 +421,7 @@ export function applyAssemblyOverlays(
       // END FLASH (owner ADJUST #3): full-frame flash + centered bold CTA in the
       // final `durationSec` (default 1.2s) — drawn LAST so it covers bars/bullets.
       if (spec.flash) {
-        const dur = Math.min(3, Math.max(0.2, spec.flash.durationSec ?? 1.2));
+        const dur = Math.min(FLASH_MAX_SECONDS, Math.max(0.2, spec.flash.durationSec ?? 1.2));
         const t0 = Math.max(0, total - dur);
         const enable = `enable='between(t,${t0.toFixed(3)},${total.toFixed(3)})'`;
         if (spec.flash.position === 'bottom') {
@@ -384,12 +429,16 @@ export function applyAssemblyOverlays(
           // the screen — NOT the full-frame white end card. Translucent navy
           // band + gently PULSING domain text in the final window (alpha floor
           // 0.4 — never a seizure strobe; on-brand navy/white).
-          const bottomFs = fitBulletFontSize([{ text: spec.flash.text }], 900, spec.flash.fontSize ?? 56, 32);
+          // OWNER (Oct 30, 399ef884): "noticeable" = emphasis → bigger glyphs
+          // and a brighter floor (0.65), still a gentle pulse.
+          const emphasis = spec.flash.emphasis === true;
+          const bottomFs = fitBulletFontSize([{ text: spec.flash.text }], 900, spec.flash.fontSize ?? (emphasis ? 78 : 56), 32);
           const bottomFf = writeTextFile(spec.flash.text);
           const pulses = Math.min(5, Math.max(1, spec.flash.repeat ?? 3));
           const period = 0.75;
           const on = 0.5;
-          const pulseAlpha = `1-0.6*floor(mod(t-${t0.toFixed(3)},${period})/${on})`;
+          const swing = emphasis ? 0.35 : 0.6;
+          const pulseAlpha = `1-${swing}*floor(mod(t-${t0.toFixed(3)},${period})/${on})`;
           vf.push(`drawbox=x=0:y=1752:w=1080:h=168:color=0x0a1f44@0.85:t=fill:${enable}`);
           vf.push(`drawtext=fontfile='${font}':textfile='${bottomFf}':expansion=none:fontsize=${bottomFs}:fontcolor=white:x=(w-text_w)/2:y=1782:alpha='${pulseAlpha}':${enable}`);
         } else {

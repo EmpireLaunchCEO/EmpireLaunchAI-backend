@@ -9,7 +9,7 @@ import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS, type ExportVariantR
 import { r2Storage } from './r2StorageService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho } from './creativeTransformation.js';
 import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
-import { TWIN_CANONICAL_BULLETS, appendBandToSvg, grammarizeYouBenefitSplice, twinBandMarkup, twinMoodStripMarkup } from './plannerFidelity.js';
+import { TWIN_CANONICAL_BULLETS, appendBandToSvg, grammarizeYouBenefitSplice, sanitizeComponentSpliceFromNarration, twinBandMarkup, twinMoodStripMarkup } from './plannerFidelity.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -92,7 +92,19 @@ export class CinemaEngineService {
     // enforcement is pure/idempotent: finished user scripts are left verbatim.
     const talkText = userConversationText(conversation);
     const requestedVisuals = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
-    const enforced = enforceTwinDictation(safeScript, requestedVisuals);
+    // DEFECT 2 — TWIN SCRIPT SEAM (owner Oct 30, project 399ef884: "that line
+    // just annoys me"). The twin seam glues its own copy the same way the shared
+    // planner does, so the SAME deterministic sanitizer runs on the transformed
+    // pitch BEFORE enforceTwinDictation appends the owner's dictated lines.
+    // Order matters: after enforcement her dictated bullet contents are script
+    // lines by design (verbatim lock) and must never be removed; before it, only
+    // the model's own pitch copy is at risk — which is exactly the text that
+    // must read as a sentence. No asks → byte-exact no-op.
+    const twinSplicePass = sanitizeComponentSpliceFromNarration(safeScript, {
+      phrases: requestedVisuals.bullets ?? [],
+      protect: [requestedVisuals.dictatedOpening, requestedVisuals.endFlash?.text],
+    });
+    const enforced = enforceTwinDictation(twinSplicePass.text, requestedVisuals);
     // F4 grammatical splice (owner af053a01 — "…the transformation you 76 video
     // creations a month."): stitch "you <number> …" factor fragments into a
     // grammatical factor sentence via the SHARED deterministic fixer. Whole-script
