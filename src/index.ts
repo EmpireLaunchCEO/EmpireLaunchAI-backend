@@ -43,6 +43,7 @@ import setupRoutes from './routes/setupRoutes.js';
 import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
 
 import { startVideoQueueWorker } from './services/videoQueueService.js';
 import { sceneVideoPipelineService } from './services/sceneVideoPipelineService.js';
@@ -178,6 +179,8 @@ app.use('/api/cinema', cinemaRoutes);
 app.use('/api/setup', setupRoutes);
 app.use('/api/actions', actionRoutes);
 app.use('/api/etsy', etsyRoutes);
+// Owner-only admin numbers (must be mounted before the catch-all '/api' router)
+app.use('/api/admin', adminRoutes);
 app.use('/api', subscriptionRoutes);
 
 app.get('/health', (req, res) => {
