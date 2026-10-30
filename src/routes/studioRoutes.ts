@@ -1058,6 +1058,10 @@ router.post('/video-project', async (req: Request, res: Response) => {
       tone,
       mood,
       sourceImages,
+      // Uploaded-photo placement (owner Oct 30): {mode:'background'|'scene'|'time',
+      // sceneNumber?, startSec?, endSec?}. Normalised + persisted by createProject;
+      // absent ⇒ scene 1 only. The chat parser / scene picker is a follow-up.
+      sourceImagePlacement: (req.body as any).sourceImagePlacement,
       conversation,
       components,
     });

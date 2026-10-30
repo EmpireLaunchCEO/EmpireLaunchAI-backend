@@ -604,6 +604,58 @@ export class CinemaEngineService {
     fs.copyFileSync(filePath, targetPath);
     return targetPath;
   }
+  /**
+   * Store an upload AND publish it to R2 (owner Oct 30 — "uploaded photos are
+   * ignored").
+   *
+   * `storeUpload` returns a LOCAL FILESYSTEM PATH. That path lives on Railway's
+   * ephemeral container disk, so it dies on the next redeploy and any resumed or
+   * regenerated project then points at a file that no longer exists. It also
+   * cannot be fetched by URL. So the upload is ALSO pushed to R2 and the durable
+   * URL is what callers persist as the project's source image.
+   *
+   * The local path is still returned (`photoPath`) because Neural Twin's facial
+   * DNA extraction reads the file from disk.
+   *
+   * Never throws: if R2 is unavailable the caller gets `publicUrl: null` plus the
+   * reason, and can fall back to the local path (which the renderer now reads
+   * directly) while telling the client what happened.
+   */
+  async storeUploadAndPublish(
+    filePath: string,
+    type: 'photo' | 'video',
+    userId: string,
+  ): Promise<{ localPath: string; publicUrl: string | null; r2Key?: string; r2Error?: string }> {
+    const localPath = this.storeUpload(filePath, type);
+    const MIME_BY_EXT: Record<string, string> = {
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.pdf': 'application/pdf',
+      '.mp4': 'video/mp4',
+      '.mov': 'video/quicktime',
+      '.webm': 'video/webm',
+      '.mkv': 'video/x-matroska',
+      '.avi': 'video/x-msvideo',
+    };
+    const mime = MIME_BY_EXT[path.extname(localPath).toLowerCase()] || 'image/jpeg';
+    if (!r2Storage.isAvailable) {
+      console.warn(`[CinemaEngine] upload stored locally only (R2 not configured): ${localPath}`);
+      return { localPath, publicUrl: null, r2Error: 'R2 not configured' };
+    }
+    const upload = await r2Storage.uploadFile(localPath, userId || 'anonymous', 'cinema/uploads', mime);
+    if (!upload.success || !upload.key) {
+      console.warn(`[CinemaEngine] upload R2 publish failed (local path kept): ${localPath} error=${upload.error}`);
+      return { localPath, publicUrl: null, r2Error: upload.error || 'R2 upload failed' };
+    }
+    // Prefer a long-lived URL: R2_PUBLIC_URL when the bucket is public, otherwise a
+    // presigned link. Presigned links expire (~1h) but the render path re-signs
+    // R2 URLs via refreshR2Url before use, so a stale link never drops the photo.
+    const publicUrl = process.env.R2_PUBLIC_URL
+      ? r2Storage.getFileUrl(upload.key)
+      : (await r2Storage.getSignedUrl(upload.key)) || r2Storage.getFileUrl(upload.key);
+    console.log(`[CinemaEngine] upload published to R2 key=${upload.key} local=${localPath}`);
+    return { localPath, publicUrl, r2Key: upload.key };
+  }
 }
 
 export const cinemaEngineService = new CinemaEngineService();

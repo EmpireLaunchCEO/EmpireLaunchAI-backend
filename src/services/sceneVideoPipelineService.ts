@@ -9,7 +9,7 @@ import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } fro
 import { buildBriefOverlaySpec, buildDictationSection, extractRequestedVisuals, userConversationText } from './requestedVisuals.js';
 import { applyFlashTimingToOverlaySpec, buildBulletOverlayLines, distributeBulletPanels, enforcePlannerFidelity, grammarizeYouBenefitSplice, mergePerSceneBullets, resolveEndFlashTiming, sanitizePlanComponentSplices } from './plannerFidelity.js';
 import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from './veoVideoService.js';
-import { renderingEngine } from './renderingEngine.js';
+import { renderingEngine, type SourceImageOutcome } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { refreshR2Url } from './approvalPayloadRefresh.js';
@@ -41,7 +41,7 @@ export interface SoraSpan {
   /** Consolidated continuous-take prompt: all span beats IN ORDER + the block prompt. */
   prompt: string;
 }
-export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; narrationScript?: string[];
+export interface VideoProjectInput { userId: string; title: string; idea: string; platforms?: string[]; style?: string; durationTarget?: number; script?: any; voice?: 'female' | 'male' | 'none'; tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto'; mood?: string; sourceImages?: string[]; mode?: 'scene' | 'faceless'; conversation?: ConversationTurn[]; components?: string[]; narrationScript?: string[]; sourceImagePlacement?: SourceImagePlacement | Record<string, unknown> | string;
   /** RENDER #7 OVERLAYS (owner ADJUST #2 — OPT-IN, default OFF): on-screen bullet
    *  lines per scene + persistent bottom-bar text, drawn at ASSEMBLY only (never
    *  baked into AI images). Persisted in metadata as `onScreenOverlays`. */
@@ -1317,6 +1317,117 @@ function withSourceSubject(prompt: string, sourceImage?: string): string {
   if (!sourceImage) return prompt;
   return `${prompt} — Use the user's uploaded reference image as the hero and continuous subject: ${sourceImage}. Keep this exact subject visible and consistent across every scene; do NOT swap it for a different subject.`;
 }
+/**
+ * ─── UPLOADED-PHOTO PLACEMENT (owner Oct 30) ──────────────────────────────────
+ * "Anything the client uploads or agrees to in chat must actually change the
+ * output." The renderer used to hand the uploaded photo to EVERY still scene,
+ * so a 5-scene video became 5 near-identical product shots. Placement is now a
+ * structured spec read from `video_projects.metadata.sourceImagePlacement`:
+ *
+ *   { mode: 'background' | 'scene' | 'time', sceneNumber?, startSec?, endSec? }
+ *
+ *   - 'scene'      → exactly that scene (sceneNumber, 1-based)
+ *   - 'time'       → every scene overlapping [startSec, endSec) on the timeline
+ *   - 'background' → the photo is the video's backdrop: every scene
+ *   - absent/null → SCENE 1 only (the hook establishes the subject)
+ *
+ * The chat parser / scene picker that WRITES this spec is a separate follow-up;
+ * this only makes the renderer honour it when it exists.
+ */
+export interface SourceImagePlacement {
+  mode: 'background' | 'scene' | 'time';
+  sceneNumber?: number;
+  startSec?: number;
+  endSec?: number;
+}
+
+/**
+ * Normalise an arbitrary persisted placement value into a valid spec, or null
+ * when there is nothing usable. Mirrors the visualPromptOverrides normaliser:
+ * invalid/blank input degrades to "no spec" (⇒ scene 1 only), never to a crash.
+ */
+export function normalizeSourceImagePlacement(raw: unknown): SourceImagePlacement | null {
+  if (raw === null || raw === undefined) return null;
+  let value: any = raw;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try { value = JSON.parse(trimmed); } catch { return null; }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const modeRaw = String(value.mode ?? '').trim().toLowerCase();
+  const mode = modeRaw === 'background' || modeRaw === 'time' || modeRaw === 'scene' ? modeRaw : '';
+  if (!mode) return null;
+  const num = (v: any): number | undefined => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const sceneNumber = num(value.sceneNumber);
+  const startSec = num(value.startSec);
+  const endSec = num(value.endSec);
+  if (mode === 'scene') {
+    if (!sceneNumber || sceneNumber < 1) return null;
+    return { mode, sceneNumber: Math.floor(sceneNumber) };
+  }
+  if (mode === 'time') {
+    if (startSec === undefined && endSec === undefined) return null;
+    const start = Math.max(0, startSec ?? 0);
+    const end = endSec === undefined ? Number.POSITIVE_INFINITY : Math.max(start, endSec);
+    if (!Number.isFinite(end) && endSec !== undefined) return null;
+    return { mode, startSec: start, ...(endSec === undefined ? {} : { endSec: end }) };
+  }
+  return { mode };
+}
+
+/**
+ * Which scene numbers should receive the uploaded reference image.
+ * No placement spec ⇒ the FIRST scene only (scene 1 by default) — never every
+ * scene, which is what produced the wall of identical shots.
+ */
+export function scenesForSourceImagePlacement(
+  placement: SourceImagePlacement | null | undefined,
+  scenes: Array<{ sceneNumber: number; duration: number }>,
+): number[] {
+  const ordered = [...(scenes || [])]
+    .filter((s) => s && Number.isFinite(Number(s.sceneNumber)))
+    .sort((a, b) => Number(a.sceneNumber) - Number(b.sceneNumber));
+  if (!ordered.length) return [];
+  if (!placement) return [Number(ordered[0].sceneNumber)];
+  if (placement.mode === 'background') return ordered.map((s) => Number(s.sceneNumber));
+  if (placement.mode === 'scene') {
+    const target = Number(placement.sceneNumber);
+    return ordered.some((s) => Number(s.sceneNumber) === target) ? [target] : [];
+  }
+  // 'time': scenes whose [start, start+duration) overlaps [startSec, endSec)
+  const start = Math.max(0, Number(placement.startSec ?? 0));
+  const end = placement.endSec === undefined ? Number.POSITIVE_INFINITY : Math.max(start, Number(placement.endSec));
+  const hits: number[] = [];
+  let cursor = 0;
+  for (const scene of ordered) {
+    const sceneStart = cursor;
+    const sceneEnd = cursor + Math.max(0, Number(scene.duration) || 0);
+    if (sceneStart < end && sceneEnd > start) hits.push(Number(scene.sceneNumber));
+    cursor = sceneEnd;
+  }
+  return hits;
+}
+
+/**
+ * The reference image a given scene should be rendered from — the uploaded
+ * photo when this scene is a placement target, otherwise undefined (text-to-image
+ * exactly as a photo-less project). Used by BOTH the worker and regeneration so
+ * re-running a scene can never quietly lose the client's photo.
+ */
+export function sourceImageForScene(
+  heroSource: string | undefined,
+  placement: SourceImagePlacement | null | undefined,
+  scenes: Array<{ sceneNumber: number; duration: number }>,
+  sceneNumber: number,
+): string | undefined {
+  if (!heroSource) return undefined;
+  return scenesForSourceImagePlacement(placement, scenes).includes(Number(sceneNumber)) ? heroSource : undefined;
+}
+
 /** Enrich the scene-script GPT prompt so the planner keeps the uploaded image as the subject. */
 function sourceScriptHint(sourceImage?: string): string {
   if (!sourceImage) return '';
@@ -2720,10 +2831,17 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const visualPromptOverridesMeta = Array.isArray(input.visualPromptOverrides)
       ? (input.visualPromptOverrides as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       : undefined;
+    // Uploaded-photo placement (owner Oct 30): normalised here, next to the other
+    // per-scene override normalisers, and persisted so the renderer can honour it
+    // (and so regeneration reads the SAME spec). Absent ⇒ scene 1 only.
+    const sourceImagePlacementMeta = normalizeSourceImagePlacement(input.sourceImagePlacement);
+    if (sourceImagePlacementMeta && !(input.sourceImages && input.sourceImages.length)) {
+      trace(`source_image_placement_without_photo project=${projectId} placement=${JSON.stringify(sourceImagePlacementMeta)}`);
+    }
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{})}});
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -2752,7 +2870,18 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const sourceImages: string[] = Array.isArray(pmeta.sourceImages)
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
-    const heroSource = sourceImages[0];
+    // UPLOADED PHOTO (owner Oct 30): re-sign the stored R2 link before use — a
+    // presigned URL expires after ~1h and a resumed/regenerated project would
+    // otherwise hand the image model a dead link (the same silent-drop bug).
+    const heroSourceRaw = sourceImages[0];
+    const heroSource = heroSourceRaw ? await refreshR2Url(heroSourceRaw) : undefined;
+    const sourceImagePlacement = normalizeSourceImagePlacement(pmeta.sourceImagePlacement);
+    const sourceImageTargetScenes = heroSource
+      ? scenesForSourceImagePlacement(sourceImagePlacement, scenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })))
+      : [];
+    if (heroSource) {
+      trace(`source_image_resolved project=${projectId} mode=${sourceImagePlacement?.mode || 'default'} scenes=[${sourceImageTargetScenes.join(',')}]`);
+    }
     // RENDER #5 PREP (owner script): the owner's dictated narrationScript is
     // AUTHORITATIVE verbatim copy — never substituted by the hygiene guard
     // (allowPlanSpeak, mirroring LINE_CHANGE) and read at a naturally brisk pace
@@ -2810,7 +2939,9 @@ if (!skipGeneration) {
         if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // window take failed → already marked failed
         try {
           const takePath = takeRegistry.get(scene.sceneNumber);
-          await withDeadline(this.processScene(scene, userId, voice, tone, heroSource, takePath, voiceOpts), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          // Only the placement target(s) get the uploaded photo — never every scene.
+          const sceneSourceImage = sourceImageTargetScenes.includes(scene.sceneNumber) ? heroSource : undefined;
+          await withDeadline(this.processScene(scene, userId, voice, tone, sceneSourceImage, takePath, voiceOpts), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
           return { status: 'rejected' as const, reason };
@@ -2838,6 +2969,13 @@ if (!skipGeneration) {
           }).where(eq(schema.videoScenes.id, tRow.id));
         }
       }
+    }
+    // NEVER FAIL SILENTLY (owner Oct 30): if the client uploaded a photo, the
+    // project records whether it actually reached the image model and, when it
+    // did not, exactly why — so a video that dropped its photo is identifiable
+    // after the fact instead of looking like a design choice.
+    if (heroSource) {
+      await this.recordSourceImageOutcome(projectId, sourceImageTargetScenes, pmeta);
     }
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     if (complete.some(s=>s.status!=='completed')) {
@@ -3100,9 +3238,50 @@ if (!skipGeneration) {
       await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta),{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
     }
   }
+  /**
+   * Roll each target scene's `sourceImageUsed` up onto the PROJECT (owner Oct 30).
+   * A client who uploads a photo must be able to see, from the project record,
+   * whether the finished video actually used it — and if not, why. Best-effort:
+   * bookkeeping never fails a render.
+   */
+  private async recordSourceImageOutcome(
+    projectId: string,
+    targetSceneNumbers: number[],
+    snapshot: Record<string, any>,
+  ): Promise<void> {
+    try {
+      const rows: any[] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId, projectId));
+      const targets = rows.filter((r: any) => targetSceneNumbers.includes(Number(r.sceneNumber)));
+      const usedScenes = targets
+        .filter((r: any) => (r.metadata as any)?.sourceImageUsed === true)
+        .map((r: any) => Number(r.sceneNumber));
+      const reasons = targets
+        .filter((r: any) => (r.metadata as any)?.sourceImageUsed !== true)
+        .map((r: any) => `scene ${r.sceneNumber}: ${(r.metadata as any)?.sourceImageSkippedReason || (r.metadata as any)?.error || 'reference not applied'}`);
+      if (!targetSceneNumbers.length) reasons.push('placement spec matched no scene — the uploaded photo was not used');
+      const unusedTargets = targetSceneNumbers.filter(n => !usedScenes.includes(Number(n)));
+      for (const n of unusedTargets) {
+        if (!reasons.some(r => r.startsWith(`scene ${n}:`))) reasons.push(`scene ${n}: not generated`);
+      }
+      const meta = mergeCompletionMetadata(await liveProjectMetadata(projectId, snapshot), {
+        sourceImageUsed: targetSceneNumbers.length > 0 && unusedTargets.length === 0,
+        sourceImageScenes: usedScenes,
+        sourceImageTargetScenes: targetSceneNumbers,
+        ...(reasons.length ? { sourceImageSkippedReason: reasons.join(' | ') } : {}),
+      });
+      await db.update(schema.videoProjects).set({ metadata: meta, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      trace(`source_image_outcome project=${projectId} used=[${usedScenes.join(',')}] targets=[${targetSceneNumbers.join(',')}]${reasons.length ? ` reason=${reasons.join(' | ')}` : ''}`);
+    } catch (e: any) {
+      trace(`source_image_outcome_failed project=${projectId} error=${e?.message}`);
+    }
+  }
   async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
+      // Did the client's uploaded photo actually drive this scene's still? Recorded
+      // on the scene (and rolled up onto the project) so a dropped upload is never
+      // silent — owner rule Oct 30.
+      let sourceImageOutcome: SourceImageOutcome | undefined;
       let sceneSoraVideoId: string | undefined = (scene.metadata as any)?.soraJob?.id ?? (scene.metadata as any)?.soraVideoId; // exactly-once resume id (legacy motion path)
       let sceneVeoOperation: string | undefined = (scene.metadata as any)?.veoJob?.operation; // exactly-once resume op (Veo legacy/per-scene path)
       // Use the uploaded source image as the continuous subject. Where the provider
@@ -3129,6 +3308,7 @@ if (!skipGeneration) {
           trace(`scene_direct_image id=${scene.id} number=${scene.sceneNumber}`);
         } else {
           const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
+          sourceImageOutcome = result.sourceImage;
           if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
           localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
         }
@@ -3231,7 +3411,7 @@ else {
         assetUrl = uploaded.url || safeLocal;
       }
       const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sourceImageOutcome?{sourceImageUsed:sourceImageOutcome.used,sourceImageReference:sourceImageOutcome.reference,...(sourceImageOutcome.reason?{sourceImageSkippedReason:sourceImageOutcome.reason}:{})}:{}),...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
@@ -3446,7 +3626,24 @@ else {
     }));
     return {project:freshProject,scenes:freshScenes,progress:scenes.length?Math.round(done/scenes.length*100):0};
   }
-  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{}); await this.processScene(scene,userId,pmeta.voice,pmeta.tone,undefined,undefined,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 }); await this.processProject(scene.projectId,userId,true); return scene.projectId; }
+  async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{});
+    // UPLOADED PHOTO ON REGENERATION (owner Oct 30): this passed `undefined`, so
+    // re-running a scene silently dropped the client's photo and re-rendered it
+    // from text alone. Resolve the same reference the worker used — re-signed
+    // (presigned R2 links expire) and gated by the same placement rule.
+    const heroSourceRaw = Array.isArray(pmeta.sourceImages)
+      ? pmeta.sourceImages.find((u: any) => typeof u === 'string' && u.length > 0)
+      : undefined;
+    const heroSource = heroSourceRaw ? await refreshR2Url(heroSourceRaw) : undefined;
+    const placement = normalizeSourceImagePlacement(pmeta.sourceImagePlacement);
+    const projectScenes = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId, scene.projectId));
+    const placementTargets = heroSource
+      ? scenesForSourceImagePlacement(placement, projectScenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })))
+      : [];
+    const regenSourceImage = sourceImageForScene(heroSource, placement, projectScenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })), scene.sceneNumber);
+    await this.processScene(scene,userId,pmeta.voice,pmeta.tone,regenSourceImage,undefined,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 });
+    if (heroSource) await this.recordSourceImageOutcome(scene.projectId, placementTargets, pmeta);
+    await this.processProject(scene.projectId,userId,true); return scene.projectId; }
   /**
    * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
    * fire-and-forget scene work dies with it and projects can sit in `generating` /
