@@ -23,6 +23,117 @@ export interface RenderResult {
   error?: string;
 }
 
+/**
+ * Outcome of trying to drive a still from a CLIENT-UPLOADED reference image.
+ * Owner rule (Oct 30): anything a client uploads must actually change the
+ * output — and if it cannot be used, the client must be TOLD, never silently
+ * ignored. So every still that was handed a reference reports back whether the
+ * bytes really reached the image model, and why not when they did not.
+ */
+export interface SourceImageOutcome {
+  used: boolean;
+  /** Human-readable reason the reference was dropped (only when used === false). */
+  reason?: string;
+  /** Safe, truncated description of the reference (never the full data-URI payload). */
+  reference?: string;
+}
+
+/** Mime -> file extension for the multipart upload filename. */
+function extForImageMime(mime: string): string {
+  const m = String(mime || '').toLowerCase();
+  if (m.includes('png')) return 'png';
+  if (m.includes('webp')) return 'webp';
+  if (m.includes('gif')) return 'gif';
+  if (m.includes('pdf')) return 'pdf';
+  return 'jpg';
+}
+
+/**
+ * Log-safe description of a reference. A data: URI carries the whole image in
+ * the string, so never echo it — only its mime prefix and byte count.
+ */
+export function describeReferenceImage(ref: string): string {
+  const r = String(ref || '');
+  if (/^data:/i.test(r)) {
+    const mime = (/^data:([^;,]+)/i.exec(r)?.[1]) || 'unknown';
+    return `data-uri(${mime}, ${r.length} chars)`;
+  }
+  return r.length > 200 ? `${r.slice(0, 200)}…` : r;
+}
+
+/** Detect an image mime from magic bytes, falling back to the file extension. */
+function sniffImageMime(bytes: Buffer, name: string): string {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (/\.png$/i.test(name)) return 'image/png';
+  if (/\.webp$/i.test(name)) return 'image/webp';
+  if (/\.pdf$/i.test(name)) return 'application/pdf';
+  return 'image/jpeg';
+}
+
+/**
+ * Resolve a CLIENT-REFERENCE image into real bytes.
+ *
+ * WHY THIS EXISTS (owner Oct 30, defect "uploaded photos are ignored"): the
+ * upload path returns a LOCAL FILESYSTEM PATH (`/app/public/assets/cinema/…`).
+ * `generateFromInputImage` used to call `fetch(inputImageUrl)` on it, which
+ * throws `TypeError: Failed to parse URL`, and the caller swallowed that and
+ * silently fell back to text-to-image — so the client's photo never reached the
+ * model and never appeared in the video.
+ *
+ * Accepts, in order:
+ *   1. a `data:` URI (bytes already inline),
+ *   2. an `http(s)` URL (R2 / any public or presigned link),
+ *   3. a local path that EXISTS on disk (absolute container path, or relative
+ *      to the process cwd) — read straight from disk, no HTTP round-trip.
+ * Anything else throws a SPECIFIC, actionable error (never a bare URL parse
+ * failure) so the caller can log exactly which reference was unusable.
+ */
+export async function loadReferenceImageBytes(
+  reference: string,
+): Promise<{ bytes: Buffer; mime: string; filename: string }> {
+  const ref = String(reference || '').trim();
+  if (!ref) throw new Error('reference image reference is empty');
+
+  // 1. data: URI
+  const dataMatch = /^data:([^;,]*)(;base64)?,([\s\S]*)$/i.exec(ref);
+  if (dataMatch) {
+    const mime = (dataMatch[1] || 'image/png').toLowerCase();
+    const payload = dataMatch[3] || '';
+    const bytes = dataMatch[2] ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload), 'utf8');
+    if (!bytes.length) throw new Error('reference image data URI contained no bytes');
+    return { bytes, mime, filename: `reference.${extForImageMime(mime)}` };
+  }
+
+  // 2. http(s) URL
+  if (/^https?:\/\//i.test(ref)) {
+    const res = await fetch(ref, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`reference image fetch failed (${res.status}) for ${describeReferenceImage(ref)}`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (!bytes.length) throw new Error(`reference image fetch returned 0 bytes for ${describeReferenceImage(ref)}`);
+    const declared = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const mime = declared.startsWith('image/') ? declared : sniffImageMime(bytes, ref);
+    return { bytes, mime, filename: `reference.${extForImageMime(mime)}` };
+  }
+
+  // 3. local filesystem path (absolute container path first, then cwd-relative)
+  const candidates = path.isAbsolute(ref) ? [ref] : [ref, path.resolve(process.cwd(), ref)];
+  for (const candidate of candidates) {
+    let stat: fs.Stats | undefined;
+    try { stat = fs.statSync(candidate); } catch { stat = undefined; }
+    if (!stat || !stat.isFile()) continue;
+    const bytes = fs.readFileSync(candidate);
+    if (!bytes.length) throw new Error(`reference image file is empty: ${candidate}`);
+    return { bytes, mime: sniffImageMime(bytes, candidate), filename: path.basename(candidate) };
+  }
+
+  throw new Error(
+    `reference image is not readable: ${describeReferenceImage(ref)} ` +
+    `(not an http(s) URL, not a data: URI, and no such file on disk)`,
+  );
+}
+
 // ─── Rendering Engine ───────────────────────────────────────────────────────
 
 /**
@@ -125,7 +236,7 @@ export class RenderingEngine {
       const stillPaths: string[] = [];
       for (let i = 0; i < params.scenes.length; i++) {
         const scene = params.scenes[i];
-        const localPath = await this.generateSceneImage(scene.imagePrompt, workingDir, i, 'high');
+        const { imagePath: localPath } = await this.generateSceneImage(scene.imagePrompt, workingDir, i, 'high');
         const overlayPath = await this.applyTextOverlays(localPath, scene.textOverlays, workingDir, i);
         stillPaths.push(overlayPath);
         sceneImages.push(overlayPath);
@@ -154,19 +265,19 @@ export class RenderingEngine {
    * Generate a single image using GPT Image 2. For image_creation/image_editing.
    * Returns the local path to the generated PNG.
    */
-  async renderImage(prompt: string, userId?: string, inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+  async renderImage(prompt: string, userId?: string, inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<{ success: boolean; imageUrl?: string; error?: string; sourceImage?: SourceImageOutcome }> {
     const taskId = uuidv4().slice(0, 8);
     const workingDir = path.join(this.tempDir, `img_${taskId}`);
     fs.mkdirSync(workingDir, { recursive: true });
 
     try {
-      const localPath = await this.generateSceneImage(prompt, workingDir, 0, 'high', inputImageUrl, opts);
+      const { imagePath: localPath, sourceImage } = await this.generateSceneImage(prompt, workingDir, 0, 'high', inputImageUrl, opts);
       let finalUrl = localPath;
       if (userId && r2Storage.isAvailable) {
         const r2 = await r2Storage.uploadLocalFile(localPath, userId, 'renders/images', 'image/png');
         finalUrl = r2.url || localPath;
       }
-      return { success: true, imageUrl: finalUrl };
+      return { success: true, imageUrl: finalUrl, ...(sourceImage ? { sourceImage } : {}) };
     } catch (err: any) {
       console.error('[RenderingEngine] Image generation failed:', err.message);
       this.cleanupDir(workingDir);
@@ -179,7 +290,7 @@ export class RenderingEngine {
    * Calls POST /v1/images/generations with quality parameter (required).
    * Response: {data: [{b64_json: '...'}], output_format: 'png', size: '...'}
    */
-  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high', inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<string> {
+  private async generateSceneImage(prompt: string, outputDir: string, index: number, quality: string = 'high', inputImageUrl?: string, opts?: { size?: string; noText?: boolean }): Promise<{ imagePath: string; sourceImage?: SourceImageOutcome }> {
     const outputPath = path.join(outputDir, `scene_${index.toString().padStart(2, '0')}.png`);
     
     const apiKey = process.env.OPENAI_API_KEY;
@@ -193,12 +304,26 @@ export class RenderingEngine {
     // we fall back to text-only generations (with the reference already injected into the
     // prompt upstream), so an upload never breaks the pipeline.
     let b64Json: string | undefined;
+    // Owner rule (Oct 30): a dropped upload must never be silent. `sourceImage`
+    // records whether the client's reference really reached the image model so the
+    // pipeline can persist it on the project (metadata.sourceImageUsed) and the
+    // video that lost its photo stays identifiable after the fact.
+    let sourceImage: SourceImageOutcome | undefined;
     if (inputImageUrl) {
+      const reference = describeReferenceImage(inputImageUrl);
       try {
         b64Json = await this.generateFromInputImage(inputImageUrl, opts?.noText ? appendSceneStillGuards(prompt) : prompt, quality, apiKey, opts?.size);
-        console.log(`[RenderingEngine] Image generated via gpt-image-2 (input-image edit)`);
+        sourceImage = { used: true, reference };
+        console.log(`[RenderingEngine] Image generated via gpt-image-2 (input-image edit) reference=${reference}`);
       } catch (inputErr: any) {
-        console.warn(`[RenderingEngine] Input-image edit failed, falling back to text-only: ${inputErr.message}`);
+        // LOUD: name the reference AND the error. This used to be a one-line
+        // console.warn that hid a TypeError on a bare filesystem path — the exact
+        // bug that made every uploaded photo vanish from the finished video.
+        console.error(
+          `[RenderingEngine] SOURCE IMAGE NOT USED — reference=${reference} error=${inputErr?.message || inputErr} ` +
+          `— falling back to text-only generation; the uploaded photo will NOT appear in this scene.`,
+        );
+        sourceImage = { used: false, reference, reason: String(inputErr?.message || inputErr) };
         b64Json = undefined;
       }
     }
@@ -238,20 +363,26 @@ if (!b64Json) {
     await sharp(imageBuffer).png().toFile(outputPath);
 
     console.log(`[RenderingEngine] Scene ${index} image generated via gpt-image-2 (quality: ${quality})`);
-    return outputPath;
+    return { imagePath: outputPath, sourceImage };
   }
   /** Drive gpt-image-2 from a user-uploaded image via the multipart edits endpoint. */
   private async generateFromInputImage(inputImageUrl: string, prompt: string, quality: string, apiKey: string, size?: string): Promise<string> {
-    const imgRes = await fetch(inputImageUrl, { signal: AbortSignal.timeout(30000) });
-    if (!imgRes.ok) throw new Error(`Could not fetch input image (${imgRes.status})`);
-    const buf = Buffer.from(await imgRes.arrayBuffer());
+    // A client reference may be an http(s) URL, a data: URI, or a LOCAL PATH on
+    // this container (what the upload endpoint returns). loadReferenceImageBytes
+    // turns all three into real bytes; a bare path used to throw
+    // `TypeError: Failed to parse URL` here and the photo was silently dropped.
+    const { bytes, mime, filename } = await loadReferenceImageBytes(inputImageUrl);
     const form = new FormData();
     form.append('model', 'gpt-image-2');
     form.append('prompt', prompt);
     form.append('n', '1');
     form.append('quality', quality);
     if (size) form.append('size', size);
-    form.append('image', new Blob([buf], { type: 'image/png' }), 'input.png');
+    // Copy into a fresh ArrayBuffer: a Node Buffer's backing store is typed
+    // ArrayBufferLike (may be SharedArrayBuffer) and is not a valid BlobPart.
+    const imageArrayBuffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(imageArrayBuffer).set(bytes);
+    form.append('image', new Blob([imageArrayBuffer], { type: mime }), filename);
     const response = await fetchWithRetryOnTimeout(fetch, 'https://api.openai.com/v1/images/edits', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}` },

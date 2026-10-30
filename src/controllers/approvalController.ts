@@ -263,6 +263,9 @@ export const createApproval = async (req: Request, res: Response) => {
           // screenshot cover-fit (photos more screen-fitting).
           sceneDurationOverrides: (enrichedPayload as any).sceneDurationOverrides,
           stillCoverFit: (enrichedPayload as any).stillCoverFit,
+          // Uploaded-photo placement (owner Oct 30): where the client's photo goes
+          // (background / scene N / timestamp). Absent ⇒ scene 1 only.
+          sourceImagePlacement: (enrichedPayload as any).sourceImagePlacement ?? (req.body as any).sourceImagePlacement,
           // FULL consultant conversation relayed by the studio app (owner Oct 19 +
           // Oct 26) — createProject extraction runs idea + userConversationText(conversation).
           conversation,
