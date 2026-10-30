@@ -208,7 +208,9 @@ test('(b) with no placement spec only scene 1 receives the reference', () => {
 
 test("(c) placement {mode:'scene',sceneNumber:3} sends the reference to scene 3 only", () => {
   const placement = normalizeSourceImagePlacement({ mode: 'scene', sceneNumber: 3 });
-  assert.deepEqual(placement, { mode: 'scene', sceneNumber: 3 });
+  // Shape upgraded (owner Oct 30) to the canonical spec: the legacy sceneNumber
+  // still maps to the same single scene, and the defaults are filled in.
+  assert.deepEqual(placement, { mode: 'scene', sceneNumbers: [3], anchor: 'start', fit: 'cover', treatment: 'full', stated: true });
   assert.deepEqual(scenesForSourceImagePlacement(placement, FIVE_SCENES), [3]);
 
   const hero = '/app/public/assets/cinema/facial_dna/abc.png';
@@ -228,7 +230,7 @@ test("(c2) placement {mode:'time'} maps a timestamp window onto the scenes that 
 
 test("(c3) placement {mode:'background'} is the explicit opt-in to every scene", () => {
   const placement = normalizeSourceImagePlacement({ mode: 'background' });
-  assert.deepEqual(placement, { mode: 'background' });
+  assert.deepEqual(placement, { mode: 'background', sceneNumbers: [], anchor: 'start', fit: 'cover', treatment: 'full', stated: true });
   assert.deepEqual(scenesForSourceImagePlacement(placement, FIVE_SCENES), [1, 2, 3, 4, 5]);
 });
 
@@ -239,7 +241,7 @@ test('normaliser degrades junk to "no spec" (⇒ scene 1) instead of crashing', 
   assert.equal(normalizeSourceImagePlacement({ mode: 'nowhere' }), null);
   assert.equal(normalizeSourceImagePlacement({ mode: 'scene' }), null, 'a scene mode with no sceneNumber is not usable');
   assert.equal(normalizeSourceImagePlacement({ mode: 'time' }), null, 'a time mode with no window is not usable');
-  assert.deepEqual(normalizeSourceImagePlacement('{"mode":"scene","sceneNumber":"4"}'), { mode: 'scene', sceneNumber: 4 });
+  assert.deepEqual(normalizeSourceImagePlacement('{"mode":"scene","sceneNumber":"4"}'), { mode: 'scene', sceneNumbers: [4], anchor: 'start', fit: 'cover', treatment: 'full', stated: true });
 });
 
 // ─── (d) regeneration keeps the reference ───────────────────────────────────

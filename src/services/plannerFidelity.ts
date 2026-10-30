@@ -424,8 +424,9 @@ const NUMBER_WORDS: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 };
 
-/** "five seconds" → "5 seconds" so the numeric patterns see one shape. */
-function normalizeSpokenSeconds(text: string): string {
+/** "five seconds" → "5 seconds" so the numeric patterns see one shape.
+ *  Shared with sourceImagePlacement.ts (photo placement phrasings). */
+export function normalizeSpokenSeconds(text: string): string {
   return text.replace(
     /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(seconds?|secs?)\b/gi,
     (_m, w: string, u: string) => `${NUMBER_WORDS[w.toLowerCase()] ?? ''} ${u}`,

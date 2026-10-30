@@ -3,7 +3,7 @@ import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { usageService } from '../services/usageService.js';
-import { sceneVideoPipelineService, normalizeNarrationScript } from '../services/sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, normalizeNarrationScript, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
 import {
   FACELESS_MOODS,
@@ -214,6 +214,24 @@ export const createApproval = async (req: Request, res: Response) => {
       if (req.body.stillCoverFit !== undefined && req.body.stillCoverFit !== null) {
         enrichedPayload.stillCoverFit = req.body.stillCoverFit === true;
       }
+      // UPLOADED-PHOTO PLACEMENT (owner Oct 30): where the client's photo goes —
+      // "background for the whole video", one scene, these scenes, "from this point
+      // on", or "don't use it". Validated through the ONE shared helper (an explicit
+      // object beats the deterministic chat parser); malformed input is a 400 with a
+      // readable message so a half-parsed placement is NEVER stored. Absent ⇒
+      // unchanged legacy behaviour (scene 1 only).
+      const sourceImagePlacementRaw = req.body.sourceImagePlacement !== undefined
+        ? req.body.sourceImagePlacement
+        : (payload as any)?.sourceImagePlacement;
+      const sourceImagePlacementInput = resolveSourceImagePlacementInput(sourceImagePlacementRaw, {
+        ...(Number.isFinite(duration) ? { durationSeconds: duration } : {}),
+      });
+      if (!sourceImagePlacementInput.ok) {
+        return res.status(400).json({ error: sourceImagePlacementInput.error });
+      }
+      if (sourceImagePlacementInput.placement) {
+        enrichedPayload.sourceImagePlacement = sourceImagePlacementInput.placement;
+      }
       // Feed mood into the per-scene prompt so the video's tone reflects it.
       // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
       // appending an instruction sentence to the idea text. The appended hint
@@ -263,9 +281,10 @@ export const createApproval = async (req: Request, res: Response) => {
           // screenshot cover-fit (photos more screen-fitting).
           sceneDurationOverrides: (enrichedPayload as any).sceneDurationOverrides,
           stillCoverFit: (enrichedPayload as any).stillCoverFit,
-          // Uploaded-photo placement (owner Oct 30): where the client's photo goes
-          // (background / scene N / timestamp). Absent ⇒ scene 1 only.
-          sourceImagePlacement: (enrichedPayload as any).sourceImagePlacement ?? (req.body as any).sourceImagePlacement,
+          // Uploaded-photo placement (owner Oct 30): validated above through the one
+          // shared helper; persisted to metadata.sourceImagePlacement. Absent ⇒
+          // scene 1 only (unchanged legacy behaviour).
+          sourceImagePlacement: (enrichedPayload as any).sourceImagePlacement ?? undefined,
           // FULL consultant conversation relayed by the studio app (owner Oct 19 +
           // Oct 26) — createProject extraction runs idea + userConversationText(conversation).
           conversation,

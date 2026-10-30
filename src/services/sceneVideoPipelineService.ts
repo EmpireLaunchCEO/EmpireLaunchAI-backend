@@ -1321,112 +1321,55 @@ function withSourceSubject(prompt: string, sourceImage?: string): string {
  * ─── UPLOADED-PHOTO PLACEMENT (owner Oct 30) ──────────────────────────────────
  * "Anything the client uploads or agrees to in chat must actually change the
  * output." The renderer used to hand the uploaded photo to EVERY still scene,
- * so a 5-scene video became 5 near-identical product shots. Placement is now a
- * structured spec read from `video_projects.metadata.sourceImagePlacement`:
+ * so a 5-scene video became 5 near-identical product shots.
  *
- *   { mode: 'background' | 'scene' | 'time', sceneNumber?, startSec?, endSec? }
+ * The contract itself — the persisted shape, the deterministic chat parser, the
+ * strict route validator and the per-scene projection — now lives in ONE place:
+ * `sourceImagePlacement.ts`. It is re-exported here so the renderer, the worker,
+ * regeneration and the API routes all read the SAME rule, and so existing
+ * importers keep working:
  *
- *   - 'scene'      → exactly that scene (sceneNumber, 1-based)
- *   - 'time'       → every scene overlapping [startSec, endSec) on the timeline
+ *   - 'scene'      → only the scenes it names (sceneNumbers, 1-based)
  *   - 'background' → the photo is the video's backdrop: every scene
- *   - absent/null → SCENE 1 only (the hook establishes the subject)
- *
- * The chat parser / scene picker that WRITES this spec is a separate follow-up;
- * this only makes the renderer honour it when it exists.
+ *   - 'none'       → no scene gets it
+ *   - absent/null  → SCENE 1 only (the hook establishes the subject)
  */
-export interface SourceImagePlacement {
-  mode: 'background' | 'scene' | 'time';
-  sceneNumber?: number;
-  startSec?: number;
-  endSec?: number;
-}
-
-/**
- * Normalise an arbitrary persisted placement value into a valid spec, or null
- * when there is nothing usable. Mirrors the visualPromptOverrides normaliser:
- * invalid/blank input degrades to "no spec" (⇒ scene 1 only), never to a crash.
- */
-export function normalizeSourceImagePlacement(raw: unknown): SourceImagePlacement | null {
-  if (raw === null || raw === undefined) return null;
-  let value: any = raw;
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    try { value = JSON.parse(trimmed); } catch { return null; }
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const modeRaw = String(value.mode ?? '').trim().toLowerCase();
-  const mode = modeRaw === 'background' || modeRaw === 'time' || modeRaw === 'scene' ? modeRaw : '';
-  if (!mode) return null;
-  const num = (v: any): number | undefined => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-  };
-  const sceneNumber = num(value.sceneNumber);
-  const startSec = num(value.startSec);
-  const endSec = num(value.endSec);
-  if (mode === 'scene') {
-    if (!sceneNumber || sceneNumber < 1) return null;
-    return { mode, sceneNumber: Math.floor(sceneNumber) };
-  }
-  if (mode === 'time') {
-    if (startSec === undefined && endSec === undefined) return null;
-    const start = Math.max(0, startSec ?? 0);
-    const end = endSec === undefined ? Number.POSITIVE_INFINITY : Math.max(start, endSec);
-    if (!Number.isFinite(end) && endSec !== undefined) return null;
-    return { mode, startSec: start, ...(endSec === undefined ? {} : { endSec: end }) };
-  }
-  return { mode };
-}
-
-/**
- * Which scene numbers should receive the uploaded reference image.
- * No placement spec ⇒ the FIRST scene only (scene 1 by default) — never every
- * scene, which is what produced the wall of identical shots.
- */
-export function scenesForSourceImagePlacement(
-  placement: SourceImagePlacement | null | undefined,
-  scenes: Array<{ sceneNumber: number; duration: number }>,
-): number[] {
-  const ordered = [...(scenes || [])]
-    .filter((s) => s && Number.isFinite(Number(s.sceneNumber)))
-    .sort((a, b) => Number(a.sceneNumber) - Number(b.sceneNumber));
-  if (!ordered.length) return [];
-  if (!placement) return [Number(ordered[0].sceneNumber)];
-  if (placement.mode === 'background') return ordered.map((s) => Number(s.sceneNumber));
-  if (placement.mode === 'scene') {
-    const target = Number(placement.sceneNumber);
-    return ordered.some((s) => Number(s.sceneNumber) === target) ? [target] : [];
-  }
-  // 'time': scenes whose [start, start+duration) overlaps [startSec, endSec)
-  const start = Math.max(0, Number(placement.startSec ?? 0));
-  const end = placement.endSec === undefined ? Number.POSITIVE_INFINITY : Math.max(start, Number(placement.endSec));
-  const hits: number[] = [];
-  let cursor = 0;
-  for (const scene of ordered) {
-    const sceneStart = cursor;
-    const sceneEnd = cursor + Math.max(0, Number(scene.duration) || 0);
-    if (sceneStart < end && sceneEnd > start) hits.push(Number(scene.sceneNumber));
-    cursor = sceneEnd;
-  }
-  return hits;
-}
-
-/**
- * The reference image a given scene should be rendered from — the uploaded
- * photo when this scene is a placement target, otherwise undefined (text-to-image
- * exactly as a photo-less project). Used by BOTH the worker and regeneration so
- * re-running a scene can never quietly lose the client's photo.
- */
-export function sourceImageForScene(
-  heroSource: string | undefined,
-  placement: SourceImagePlacement | null | undefined,
-  scenes: Array<{ sceneNumber: number; duration: number }>,
-  sceneNumber: number,
-): string | undefined {
-  if (!heroSource) return undefined;
-  return scenesForSourceImagePlacement(placement, scenes).includes(Number(sceneNumber)) ? heroSource : undefined;
-}
+import {
+  DEFAULT_SOURCE_IMAGE_PLACEMENT,
+  deriveSceneSourceImageMetadata,
+  describeSourceImagePlacement,
+  normalizeSourceImagePlacement,
+  parseSourceImagePlacement,
+  resolveProjectSourceImagePlacement,
+  resolveSourceImagePlacementInput,
+  scenesForSourceImagePlacement,
+  sourceImageForScene,
+  wholeScenesForSeconds,
+} from './sourceImagePlacement.js';
+export {
+  DEFAULT_SOURCE_IMAGE_PLACEMENT,
+  deriveSceneSourceImageMetadata,
+  describeSourceImagePlacement,
+  normalizeSourceImagePlacement,
+  parseSourceImagePlacement,
+  resolveProjectSourceImagePlacement,
+  resolveSourceImagePlacementInput,
+  scenesForSourceImagePlacement,
+  sourceImageForScene,
+  wholeScenesForSeconds,
+};
+import type {
+  SceneSourceImageMetadata,
+  SceneTiming,
+  SourceImagePlacement,
+  SourceImagePlacementContext,
+} from './sourceImagePlacement.js';
+export type {
+  SceneSourceImageMetadata,
+  SceneTiming,
+  SourceImagePlacement,
+  SourceImagePlacementContext,
+};
 
 /** Enrich the scene-script GPT prompt so the planner keeps the uploaded image as the subject. */
 function sourceScriptHint(sourceImage?: string): string {
@@ -2835,8 +2778,24 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // per-scene override normalisers, and persisted so the renderer can honour it
     // (and so regeneration reads the SAME spec). Absent ⇒ scene 1 only.
     const sourceImagePlacementMeta = normalizeSourceImagePlacement(input.sourceImagePlacement);
-    if (sourceImagePlacementMeta && !(input.sourceImages && input.sourceImages.length)) {
+    const hasUploadedPhoto = Array.isArray(input.sourceImages) && input.sourceImages.some((u: any) => typeof u === 'string' && u.length > 0);
+    if (sourceImagePlacementMeta && !hasUploadedPhoto) {
       trace(`source_image_placement_without_photo project=${projectId} placement=${JSON.stringify(sourceImagePlacementMeta)}`);
+    }
+    // DERIVED PER-SCENE PROJECTION (owner Oct 30): the scenes the placement
+    // actually names get `metadata.sourceImage` ({role, placementIndex, sha256}).
+    // Only written when a placement was STATED — a photo with no placement keeps
+    // exactly today's shape (scene 1 gets the reference, no extra metadata).
+    // `visualPrompt` is never rewritten; the renderer resolves the reference from
+    // the same rule (sourceImageForScene) so the two can never disagree.
+    const sceneSourceImageMeta: Record<number, SceneSourceImageMetadata> = sourceImagePlacementMeta && hasUploadedPhoto
+      ? deriveSceneSourceImageMetadata(
+          sourceImagePlacementMeta,
+          planned.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })),
+        )
+      : {};
+    if (sourceImagePlacementMeta && hasUploadedPhoto) {
+      trace(`source_image_projected project=${projectId} mode=${sourceImagePlacementMeta.mode} scenes=[${Object.keys(sceneSourceImageMeta).join(',')}]`);
     }
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
@@ -2851,6 +2810,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
         ...(mw ? { motionStartSeconds: mw.motionStartSeconds, motionSeconds: mw.motionSeconds, spanOffset: mw.motionStartSeconds } : {}),
         ...(s.narrationRole !== undefined ? { narrationRole: s.narrationRole } : {}),
+        ...(sceneSourceImageMeta[s.sceneNumber] ? { sourceImage: sceneSourceImageMeta[s.sceneNumber] } : {}),
       }};
     }));
     trace(`project_created id=${projectId} scenes=${planned.length} spans=${spanPlans.length}`);
@@ -3624,7 +3584,18 @@ else {
         assetUrl: s.assetUrl?await refreshR2Url(s.assetUrl):s.assetUrl,
         audioUrl: s.audioUrl?await refreshR2Url(s.audioUrl):s.audioUrl};
     }));
-    return {project:freshProject,scenes:freshScenes,progress:scenes.length?Math.round(done/scenes.length*100):0};
+    // UPLOADED-PHOTO PLACEMENT (owner Oct 30): expose what the renderer UNDERSTOOD
+    // on the read path the app already polls (GET /api/studio/video-project/:id), so
+    // the UI can show "your photo appears in scene 3" instead of the client having to
+    // guess. Absent for a photo-less project with no stated placement — the payload
+    // is byte-identical to before.
+    const resolvedPlacement = resolveProjectSourceImagePlacement((project.metadata as any) || {}, scenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })));
+    return {
+      project:freshProject,
+      scenes:freshScenes,
+      progress:scenes.length?Math.round(done/scenes.length*100):0,
+      ...(resolvedPlacement ? { sourceImagePlacement: resolvedPlacement } : {}),
+    };
   }
   async regenerateScene(sceneId:string,userId:string) { const [scene]=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id,sceneId)); if(!scene)return null; const project=await this.getProject(scene.projectId,userId); if(!project)return null; const pmeta=((project.project.metadata as any)||{});
     // UPLOADED PHOTO ON REGENERATION (owner Oct 30): this passed `undefined`, so
