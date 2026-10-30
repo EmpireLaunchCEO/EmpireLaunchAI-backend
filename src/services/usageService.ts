@@ -1,47 +1,12 @@
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { OWNER_CONFIG } from '../config/owner.js';
+// Owner identity (email normalization, OWNER_EMAILS, UNLIMITED_TIERS) lives in
+// services/ownerIdentity.ts — ONE rule shared by quota exemption and the owner-only
+// admin endpoints, so the two can never disagree about who the owner is.
+import { normalizeOwnerEmail, OWNER_EMAILS, UNLIMITED_TIERS } from './ownerIdentity.js';
 
 const { usageLogs, users, approvals } = schema;
-
-/**
- * Gmail (and Googlemail) treat the local part as case-insensitive AND ignore
- * '.' — so first.last@gmail.com, firstlast@gmail.com, First.Last@GMAIL.com are
- * all the same mailbox. The owner's stored email can arrive in any dot-variant
- * depending on how she signed up, so comparison must normalize those away or the
- * exact-string owner check silently fails (real defect — the owner would be
- * counted against client quota). Non-gmail addresses are lowercased only.
- */
-function normalizeOwnerEmail(email: string): string {
-  const raw = String(email || '').trim().toLowerCase();
-  const at = raw.indexOf('@');
-  if (at <= 0) return raw;
-  const domain = raw.slice(at + 1);
-  if (domain === 'gmail.com' || domain === 'googlemail.com') {
-    const local = raw.slice(0, at).replace(/\./g, '');
-    return `${local}@gmail.com`;
-  }
-  return raw;
-}
-
-/**
- * Everything the app considers an owner account. Every entry is normalized so
- * Gmail dot-variants collapse to one canonical comparison. OWNER_CONFIG.email is
- * the primary owner email; the .ai address and the dotted variant are kept for
- * robustness against older rows / internal accounts. The owner (Staci) is
- * unlimited on ALL quotas.
- */
-const OWNER_EMAILS = new Set([
-  normalizeOwnerEmail(OWNER_CONFIG.email),        // stacipeabody@gmail.com (canonical)
-  normalizeOwnerEmail('staci.peabody@gmail.com'), // dotted variant -> same mailbox
-  normalizeOwnerEmail('staci@empirelaunch.ai'),   // internal .ai account
-]);
-
-/** Tiers that are unbounded everywhere else in the codebase (subscriptionGuard,
- *  revenueOracle) — treat them as owner-exempt here too for quota (defense in
- *  depth beyond the email match; the owner's DB row is provisioned OWNER_MASTER). */
-const UNLIMITED_TIERS: ReadonlySet<string> = new Set(['OWNER_MASTER', 'BETA_TESTER']);
 
 // Postgres stores user ids as UUID columns. Guard every DB query with this so a
 // non-UUID sentinel ('anonymous', 'system', '') never reaches Postgres and
