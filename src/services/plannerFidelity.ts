@@ -333,7 +333,7 @@ export function mergePerSceneBullets(
       .map((text, i) => ({ text, marker: '\u2713', at: Number((0.9 + i * 1.1).toFixed(2)) }));
     const totalBullets = bullets.length + add.length;
     const tallPanel = totalBullets >= 3
-      ? { x: 60, y: 1290, w: 960, h: 360, bg: 'black@0.85' }
+      ? { x: 60, y: 1290, w: 960, h: 360, bg: DEEP_NAVY_PANEL_BG }
       : undefined;
     merged[idx] = { ...group, bullets: [...bullets, ...add], ...(tallPanel ? { panel: tallPanel } : {}) };
   }
@@ -383,3 +383,412 @@ export function enforcePlannerFidelity<S extends SceneLike>(
   if (grammarized) trace.push(`grammarized=${grammarized}`);
   return { script: next, trace };
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ROUND 2 (owner Oct 30 — live faceless run 399ef884, evidence
+ * /home/team/shared/_arm5_evidence.txt). PR #132's enforcement is KEPT; these
+ * are the three things it got wrong, all fixed deterministically (pure, zero
+ * LLM, zero DB, zero paid calls):
+ *
+ *   DEFECT 1 — the end flash was HARDCODED to 1.5s. Her last chat turn
+ *     ("Make sure the flashing EmpireLaunchAi.com is noticeable for the last 5
+ *     seconds") was relayed in metadata.conversation and NOTHING consumed it.
+ *     → resolveEndFlashTiming: parse an explicitly stated duration out of the
+ *       user turns, clamp 1–10s and never longer than the final scene; 1.5s
+ *       default when nothing is stated; "noticeable/prominent" = emphasis
+ *       (bigger + brighter), duration is the must-have.
+ *
+ *   DEFECT 2 — component text spliced into narration mid-sentence ("…it clicks
+ *     — the EmpireLaunch Ai Your go-to content creation platform." / "…in front
+ *     of you. 50 designs a month."). Standing rule: ONLY her dictated lines are
+ *     verbatim; every other narration line must read as a sentence.
+ *     → sanitizeComponentSpliceFromNarration: drop a component/bullet fragment
+ *       that is not grammatically integrated (bare-fragment sentence, or glued
+ *       into a verb-less dangling clause). Dictated opening + domain line are
+ *       protected; clean narration is a byte-exact no-op.
+ *
+ *   DEFECT 3 — the bullet panel rendered black@0.85; the owner approved (typed
+ *     "Yes") white text on DEEP NAVY panels in a bold rounded sans.
+ *     → DEEP_NAVY_PANEL_BG (0x0a1f44@0.85, the same navy the accepted bottom
+ *       flash band uses) + a bundled Poppins ExtraBold candidate in
+ *       assemblyOverlays.resolveOverlayFont (DejaVu Sans Bold fallback).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── DEFECT 1: END-FLASH DURATION FROM THE RELAYED CONVERSATION ──────────── */
+
+/** Today's behaviour when the conversation states no duration (render #8). */
+export const FLASH_DEFAULT_SECONDS = 1.5;
+export const FLASH_MIN_SECONDS = 1;
+export const FLASH_MAX_SECONDS = 10;
+
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+/** "five seconds" → "5 seconds" so the numeric patterns see one shape. */
+function normalizeSpokenSeconds(text: string): string {
+  return text.replace(
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(seconds?|secs?)\b/gi,
+    (_m, w: string, u: string) => `${NUMBER_WORDS[w.toLowerCase()] ?? ''} ${u}`,
+  );
+}
+
+/** Duration phrasings, in priority order. Her EXACT sentence —
+ *  "…noticeable for the last 5 seconds" — is matched by pattern 1. */
+const FLASH_DURATION_PATTERNS: RegExp[] = [
+  /\b(?:last|final)\s+(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b/i,
+  /\bfor\s+(?:the\s+)?(?:last\s+|final\s+)?(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b/i,
+  /\b(\d+(?:\.\d+)?)\s*-?\s*(?:seconds?|secs?)\s+(?:at\s+the\s+(?:very\s+)?end|of\s+the\s+end|long)\b/i,
+  /\b(\d+(?:\.\d+)?)\s*-?\s*(?:seconds?|secs?)\s+(?:flash|flashing|domain)\b/i,
+  /\b(?:flash|flashing|domain)\b[^.!?\n]{0,40}?\b(\d+(?:\.\d+)?)\s*-?\s*(?:seconds?|secs?)\b/i,
+];
+
+/** Is this sentence about the end flash (so its number is a FLASH duration and
+ *  not, say, the video length)? */
+const FLASH_SENTENCE_RE = /\bflash|flashing|domain|empirelaunchai|empirelaunch\s+ai\.com|\bwebsite\b|\burl\b|\bsite\b/i;
+
+/** Explicitly stated end-flash duration in the relayed user turns, or
+ *  undefined when the owner never stated one. Latest statement wins. Pure. */
+export function extractRequestedFlashSeconds(raw: unknown): number | undefined {
+  const text = normalizeSpokenSeconds(String(raw ?? '').replace(/\s+/g, ' ').trim());
+  if (!text) return undefined;
+  let found: number | undefined;
+  for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+    const flashSentence = FLASH_SENTENCE_RE.test(sentence) || /\b(?:last|final)\s+\d+(?:\.\d+)?\s*(?:seconds?|secs?)/i.test(sentence);
+    if (!flashSentence) continue;
+    for (const re of FLASH_DURATION_PATTERNS) {
+      const m = re.exec(sentence);
+      if (!m) continue;
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > 0) {
+        found = n;
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/** "noticeable / prominent / hard to miss" = the owner wants it LOUDER, not
+ *  longer. Cheap emphasis flag (bigger + brighter), never a duration. Pure. */
+const FLASH_EMPHASIS_RE = /\bnoticeable|noticeably|prominent|prominently|hard\s+to\s+miss|obvious|bold|bigger|large|clear(?:ly)?\s+visible|make\s+it\s+pop\b/i;
+
+export function extractFlashEmphasis(raw: unknown): boolean {
+  const text = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return false;
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .some((s) => FLASH_SENTENCE_RE.test(s) && FLASH_EMPHASIS_RE.test(s));
+}
+
+export interface EndFlashTiming {
+  /** Final flash window length (seconds) — 1.5 default, 1–10 clamp, never
+   *  longer than the final scene. */
+  durationSec: number;
+  /** Owner asked for it to be noticeable/prominent → bigger + brighter. */
+  emphasis: boolean;
+  /** True when the conversation explicitly stated a duration. */
+  stated: boolean;
+}
+
+/** Resolve the end-flash window from the relayed conversation (deterministic,
+ *  zero LLM). `finalSceneSeconds` bounds it: the flash lives inside the final
+ *  scene, so it can never be longer than that scene. Pure. */
+export function resolveEndFlashTiming(input: {
+  conversationText?: unknown;
+  finalSceneSeconds?: unknown;
+}): EndFlashTiming {
+  const raw = String(input.conversationText ?? '');
+  const statedSeconds = extractRequestedFlashSeconds(raw);
+  const emphasis = extractFlashEmphasis(raw);
+  const finalScene = Number(input.finalSceneSeconds);
+  const sceneCap = Number.isFinite(finalScene) && finalScene > 0 ? Math.max(0.5, finalScene) : FLASH_MAX_SECONDS;
+  const requested = statedSeconds === undefined
+    ? FLASH_DEFAULT_SECONDS
+    : Math.min(FLASH_MAX_SECONDS, Math.max(FLASH_MIN_SECONDS, statedSeconds));
+  return {
+    durationSec: Number(Math.min(requested, sceneCap).toFixed(2)),
+    emphasis,
+    stated: statedSeconds !== undefined,
+  };
+}
+
+/** Apply the resolved timing to an overlay spec (the flash object only — the
+ *  bullets / bottomBar / per-scene groups are untouched). NOTHING stated and no
+ *  emphasis → the spec is returned BY REFERENCE (byte-exact legacy behaviour,
+ *  including explicit render-time specs that carry their own duration). Pure. */
+export function applyFlashTimingToOverlaySpec<T>(spec: T, timing: EndFlashTiming): T {
+  if (!timing.stated && !timing.emphasis) return spec;
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
+  const base = spec as Record<string, unknown>;
+  const flash = base.flash;
+  if (!flash || typeof flash !== 'object' || Array.isArray(flash)) return spec;
+  const nextFlash: Record<string, unknown> = { ...(flash as Record<string, unknown>) };
+  if (timing.stated) nextFlash.durationSec = timing.durationSec;
+  if (timing.emphasis) nextFlash.emphasis = true;
+  return { ...base, flash: nextFlash } as unknown as T;
+}
+
+/* ── DEFECT 2: COMPONENT FRAGMENTS SPLICED INTO NARRATION ────────────────── */
+
+/** Words that make a clause a real sentence (subject + finite verb). Used ONLY
+ *  to decide whether a clause that carries a glued component phrase is a
+ *  dangling fragment; the list is generous on purpose. */
+const FINITE_VERBS = new Set<string>([
+  'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
+  'has', 'have', 'had', 'do', 'does', 'did', 'done',
+  'can', 'could', 'will', 'would', 'should', 'shall', 'may', 'might', 'must',
+  'get', 'gets', 'got', 'gotten', 'give', 'gives', 'gave', 'given',
+  'include', 'includes', 'included', 'offer', 'offers', 'offered',
+  'deliver', 'delivers', 'delivered', 'come', 'comes', 'came',
+  'make', 'makes', 'made', 'save', 'saves', 'saved', 'click', 'clicks', 'clicked',
+  'work', 'works', 'worked', 'feel', 'feels', 'felt', 'look', 'looks', 'looked',
+  'want', 'wants', 'wanted', 'need', 'needs', 'needed', 'take', 'takes', 'took',
+  'show', 'shows', 'showed', 'shown', 'create', 'creates', 'created',
+  'unlock', 'unlocks', 'unlocked', 'bring', 'brings', 'brought',
+  'turn', 'turns', 'turned', 'keep', 'keeps', 'kept', 'start', 'starts', 'started',
+  'build', 'builds', 'built', 'find', 'finds', 'found', 'see', 'sees', 'saw', 'seen',
+  'know', 'knows', 'knew', 'love', 'loves', 'loved', 'enjoy', 'enjoys', 'enjoyed',
+  'pay', 'pays', 'paid', 'cost', 'costs', 'use', 'uses', 'used', 'let', 'lets',
+  'help', 'helps', 'helped', 'run', 'runs', 'ran', 'grow', 'grows', 'grew',
+  'add', 'adds', 'added', 'mean', 'means', 'meant', 'lets', 'ready', 'stay', 'stays',
+  'stop', 'stops', 'stopped', 'become', 'becomes', 'became', 'look', 'sound', 'sounds',
+  'matter', 'matters', 'counts', 'count', 'bring', 'moves', 'move', 'moved',
+]);
+
+function hasFiniteVerb(clause: string): boolean {
+  const words = String(clause ?? '').toLowerCase().match(/[a-z']+/g) ?? [];
+  return words.some((w) => FINITE_VERBS.has(w.replace(/'s$/, '')) || FINITE_VERBS.has(w));
+}
+
+const CLAUSE_BOUNDARY = /[\u2014\u2013;:,-]/;
+/** Index just AFTER the last clause boundary in `s`, or 0. */
+function clauseStartIndex(s: string): number {
+  let idx = 0;
+  for (let i = s.length - 1; i >= 0; i--) {
+    if (CLAUSE_BOUNDARY.test(s[i] ?? '')) {
+      idx = i + 1;
+      break;
+    }
+  }
+  return idx;
+}
+
+/** Connectors that make a component phrase GRAMMATICALLY integrated (it is the
+ *  object of a real verb / a relative clause / a list item), e.g.
+ *  "…that gives you 76 video creations a month." Pure. */
+const INTEGRATOR_TAIL_RE =
+  /(?:\b(?:get|gets|got|give|gives|giving|include|includes|included|offer|offers|deliver|delivers|come|comes|with|means|add|adds|unlock|unlocks|bring|brings|yield|yields|plus|and|or|also|to|of|for|in|on)\s*|\bgives?\s+you\s*|\byou\s+(?:get|receive|enjoy)\s*)$/i;
+
+function normalizePhraseList(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : [];
+  const out: string[] = [];
+  for (const item of list) {
+    const p = String(item ?? '')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/^[\s\-–—•*.;:]+/, '')
+      .replace(/[\s.!?;:,]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (p.length < 8) continue; // 'red' and other one-word noise never qualify
+    if (out.some((o) => o.toLowerCase() === p.toLowerCase())) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/** Whitespace-flexible, dash-flexible, case-insensitive matcher for a phrase. */
+function phraseRegExp(phrase: string): RegExp {
+  const body = phrase
+    .split(/\s+/)
+    .map((tok) =>
+      tok
+        .split('')
+        .map((ch) => (/[.*+?^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch))
+        .join('')
+        .replace(/[-\u2013\u2014]/g, '[\\-\\u2013\\u2014]'),
+    )
+    .join('\\s+');
+  return new RegExp(body, 'gi');
+}
+
+interface PhraseHit {
+  index: number;
+  length: number;
+  phrase: string;
+}
+
+/** First component phrase in `body` that is NOT grammatically integrated. */
+function findSplice(body: string, phrases: { phrase: string; re: RegExp }[]): PhraseHit | undefined {
+  let best: PhraseHit | undefined;
+  for (const { phrase, re } of phrases) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(body)) !== null) {
+      const index = m.index;
+      const length = m[0].length;
+      const before = body.slice(0, index).trimEnd();
+      const after = body.slice(index + length);
+      const hostStart = clauseStartIndex(before);
+      const hostClause = before.slice(hostStart).trim();
+      const integrated =
+        (before.length > 0 && INTEGRATOR_TAIL_RE.test(before)) ||
+        (before.length === 0 && hasFiniteVerb(phrase)) ||
+        (before.length > 0 &&
+          /,$/.test(before) &&
+          /^[\s.!?;:,\u2013\u2014-]*$/.test(after) &&
+          hasFiniteVerb(hostClause));
+      if (!integrated) {
+        const hit = { index, length, phrase };
+        // Longest phrase first — a longer match subsumes a shorter one.
+        if (!best || hit.length > best.length) best = hit;
+      }
+    }
+  }
+  return best;
+}
+
+/** Drop ONE non-integrated phrase occurrence from a sentence body and repair the
+ *  junction (never leave a mid-clause break or two fragments glued). */
+function removeSplice(body: string, hit: PhraseHit): string {
+  const before = body.slice(0, hit.index).replace(/\s+$/, '');
+  const after = body.slice(hit.index + hit.length).replace(/^\s+/, '');
+  const hostStart = clauseStartIndex(before);
+  const hostClause = before.slice(hostStart).trim();
+  const hostIsDangling = !hasFiniteVerb(hostClause) && hostClause.split(/\s+/).filter(Boolean).length <= 10;
+  if (hostIsDangling) {
+    // The clause the fragment was glued onto has no verb of its own ("…it
+    // clicks — the EmpireLaunch Ai") → the WHOLE dangling clause goes with the
+    // fragment, boundary punctuation included.
+    const head = before
+      .slice(0, hostStart)
+      .replace(/[\s\u2014\u2013;:,-]+$/, '')
+      .trim();
+    if (!head) return after.trim();
+    return `${head}${after.trim() ? ` ${after.trim()}` : ''}`.replace(/\s+/g, ' ').trim();
+  }
+  return `${before}${after ? ` ${after}` : ''}`
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim();
+}
+
+export interface NarrationSanitizeOptions {
+  /** Component / bullet / selling-point phrases that must never appear as a
+   *  bare fragment inside narration. */
+  phrases?: unknown;
+  /** Lines that must NEVER be touched — the owner's dictated opening and the
+   *  end-flash domain line. */
+  protect?: unknown;
+}
+
+export interface NarrationSanitizeResult {
+  /** Sanitized narration. BYTE-EXACT copy of the input when nothing was spliced. */
+  text: string;
+  /** Fragments removed (for the audit trace). */
+  removed: string[];
+}
+
+function protectedText(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : [];
+  return list
+    .map((v) =>
+      String(v ?? '')
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\s.!?;:,]+$/, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase(),
+    )
+    .filter((v) => v.length >= 4);
+}
+
+/** THE SANITIZER (defect 2). Removes component/bullet fragments from a
+ *  narration line UNLESS they are grammatically integrated:
+ *   • a whole sentence that is only a fragment ("…in front of you. 50 designs
+ *     a month." → "…in front of you.") is dropped;
+ *   • a fragment glued onto a verb-less dangling clause ("…it clicks — the
+ *     EmpireLaunch Ai Your go-to content creation platform." → "…it clicks.")
+ *     takes that clause with it.
+ *  Protected lines (dictated opening, domain line) and integrated phrases
+ *  ("…that gives you 76 video creations a month.") are untouched; clean
+ *  narration comes back byte-identical. Pure + deterministic. */
+export function sanitizeComponentSpliceFromNarration(
+  narration: unknown,
+  opts: NarrationSanitizeOptions = {},
+): NarrationSanitizeResult {
+  const text = String(narration ?? '');
+  if (!text.trim()) return { text, removed: [] };
+  const protect = protectedText(opts.protect);
+  const candidates = normalizePhraseList(opts.phrases).filter(
+    (p) => !protect.some((pr) => pr.includes(p.toLowerCase()) || p.toLowerCase().includes(pr)),
+  );
+  if (!candidates.length) return { text, removed: [] };
+  // Longest phrase first so "EmpireLaunch Ai — the new content creation
+  // platform" wins over the shorter "your new content creation platform".
+  const phrases = candidates
+    .slice()
+    .sort((a, b) => b.length - a.length)
+    .map((phrase) => ({ phrase, re: phraseRegExp(phrase) }));
+
+  const removed: string[] = [];
+  const chunks = text.split(/(?<=[.!?])\s+/);
+  const outChunks: string[] = [];
+  for (const chunk of chunks) {
+    const trimmedEnd = chunk.replace(/[.!?]+[)\]"'\u201d\u2019]*$/, '');
+    const term = chunk.slice(trimmedEnd.length);
+    let body = trimmedEnd;
+    const lowerBody = body.replace(/\s+/g, ' ').trim().toLowerCase();
+    const isProtected =
+      protect.some((pr) => lowerBody.includes(pr)) ||
+      protect.some((pr) => pr.length > 12 && lowerBody.length > 0 && pr.includes(lowerBody));
+    if (isProtected) {
+      outChunks.push(chunk);
+      continue;
+    }
+    for (let pass = 0; pass < 4; pass++) {
+      const hit = findSplice(body, phrases);
+      if (!hit) break;
+      const next = removeSplice(body, hit);
+      if (next === body) break;
+      removed.push(hit.phrase);
+      body = next;
+    }
+    if (!body.trim()) continue; // the whole sentence was the fragment
+    const needsTerm = !/[.!?]$/.test(body.trim());
+    outChunks.push(`${body.trim()}${needsTerm ? term || '.' : ''}`);
+  }
+  if (!removed.length) return { text, removed };
+  const joined = outChunks.join(' ').replace(/\s+/g, ' ').trim();
+  return { text: joined, removed };
+}
+
+export interface PlanSpliceSanitizeResult<S extends SceneLike> {
+  script: S[];
+  /** 1-based scene numbers whose narration changed. */
+  changedScenes: number[];
+  removed: string[];
+}
+
+/** Plan-level defect-2 pass — one sanitized narration per scene. Scenes with
+ *  clean narration are returned by reference (no-op). Pure. */
+export function sanitizePlanComponentSplices<S extends SceneLike>(
+  script: S[],
+  opts: NarrationSanitizeOptions = {},
+): PlanSpliceSanitizeResult<S> {
+  if (!Array.isArray(script) || script.length === 0) return { script, changedScenes: [], removed: [] };
+  const changedScenes: number[] = [];
+  const removed: string[] = [];
+  const next = script.map((scene, i) => {
+    const res = sanitizeComponentSpliceFromNarration(scene.narration, opts);
+    if (res.text === scene.narration) return scene;
+    changedScenes.push(scene.sceneNumber ?? i + 1);
+    removed.push(...res.removed);
+    return { ...scene, narration: res.text };
+  });
+  if (!changedScenes.length) return { script, changedScenes, removed };
+  return { script: next, changedScenes, removed };
+}
+
+/** DEEP NAVY panel for on-screen bullets (owner typed "Yes" to "white text on
+ *  deep navy panels" — same navy as the accepted bottom-flash band). */
+export const DEEP_NAVY_PANEL_BG = '0x0a1f44@0.85';

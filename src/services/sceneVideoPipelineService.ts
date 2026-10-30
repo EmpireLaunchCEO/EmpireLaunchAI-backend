@@ -7,7 +7,7 @@ import { eq, asc, and, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { buildBriefOverlaySpec, buildDictationSection, extractRequestedVisuals, userConversationText } from './requestedVisuals.js';
-import { buildBulletOverlayLines, distributeBulletPanels, enforcePlannerFidelity, grammarizeYouBenefitSplice, mergePerSceneBullets } from './plannerFidelity.js';
+import { applyFlashTimingToOverlaySpec, buildBulletOverlayLines, distributeBulletPanels, enforcePlannerFidelity, grammarizeYouBenefitSplice, mergePerSceneBullets, resolveEndFlashTiming, sanitizePlanComponentSplices } from './plannerFidelity.js';
 import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from './veoVideoService.js';
 import { renderingEngine } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
@@ -2662,6 +2662,26 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       if (fidelityReinject.script !== planned) planned.splice(0, planned.length, ...fidelityReinject.script);
       if (fidelityReinject.injected.length) trace(`planner_fidelity_reinject project=${projectId} injected=[${fidelityReinject.injected.join(' | ')}]`);
     }
+    // DEFECT 2 (owner Oct 30 — project 399ef884: "that line just annoys me"):
+    // the planner/F4 joins glue component text into narration MID-SENTENCE —
+    // scene 3 "…it clicks — the EmpireLaunch Ai Your go-to content creation
+    // platform.", scene 4 "…right in front of you. 50 designs a month." Standing
+    // rule: ONLY her dictated lines are verbatim; every other narration line must
+    // READ AS A SENTENCE. Deterministic post-plan sanitizer: a component/bullet
+    // fragment that is NOT grammatically integrated is dropped, together with the
+    // verb-less dangling clause it was glued onto. Her dictated opening and the
+    // domain line are PROTECTED; integrated phrases ("…that gives you 76 video
+    // creations a month.") and clean narration are byte-exact no-ops. The
+    // on-screen bullet panel is untouched (it lives in the overlay spec below).
+    // Pure; zero LLM/DB/paid calls.
+    const splicePass = sanitizePlanComponentSplices(planned, {
+      phrases: [...inventory, ...f4SellingPoints],
+      protect: [requested.dictatedOpening, requested.endFlash?.text],
+    });
+    if (splicePass.changedScenes.length) {
+      planned.splice(0, planned.length, ...splicePass.script);
+      trace(`planner_fidelity_splice project=${projectId} scenes=[${splicePass.changedScenes.join(',')}] removed=[${splicePass.removed.join(' | ')}]`);
+    }
     // RENDER #7 OVERLAYS + SCREENSHOT OVERRIDES (owner ADJUST #2 — OPT-IN metadata;
     // absent = pixel-exact current output). Normalized here so the persisted record
     // is clean and the worker's assembly pass has a boundary-checked spec.
@@ -2680,6 +2700,22 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       const bulletPanels = distributeBulletPanels(bulletLines, planned.length);
       onScreenOverlaysMeta = mergePerSceneBullets(onScreenOverlaysMeta, bulletPanels, planned.length);
       if (onScreenOverlaysMeta) trace(`planner_fidelity_bullets project=${projectId} lines=${bulletLines.length} scenes=[${bulletPanels.map((p) => p.sceneIndex + 1).join(',')}]`);
+    }
+    // DEFECT 1 (owner Oct 30 — project 399ef884): the end flash was HARDCODED to
+    // 1.5s. Her last chat turn — "Make sure the flashing EmpireLaunchAi.com is
+    // noticeable for the last 5 seconds" — WAS relayed in metadata.conversation
+    // and NOTHING consumed it. Resolve the flash window deterministically from
+    // the relayed user turns: explicitly stated seconds win (1–10s clamp, never
+    // longer than the final scene); 1.5s default when nothing is stated;
+    // "noticeable"/"prominent" sets an emphasis flag (bigger + brighter, never
+    // longer). Zero extra LLM calls — pure text parsing of her own words.
+    const flashTiming = resolveEndFlashTiming({
+      conversationText: userConversationText(input.conversation),
+      finalSceneSeconds: planned[planned.length - 1]?.duration,
+    });
+    onScreenOverlaysMeta = applyFlashTimingToOverlaySpec(onScreenOverlaysMeta, flashTiming);
+    if (flashTiming.stated || flashTiming.emphasis) {
+      trace(`planner_fidelity_flash project=${projectId} durationSec=${flashTiming.durationSec} stated=${flashTiming.stated} emphasis=${flashTiming.emphasis}`);
     }
     const visualPromptOverridesMeta = Array.isArray(input.visualPromptOverrides)
       ? (input.visualPromptOverrides as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
