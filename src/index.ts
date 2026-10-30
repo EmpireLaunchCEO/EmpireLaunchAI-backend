@@ -44,6 +44,7 @@ import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import billingRoutes from './routes/billingRoutes.js';
 
 import { startVideoQueueWorker } from './services/videoQueueService.js';
 import { sceneVideoPipelineService } from './services/sceneVideoPipelineService.js';
@@ -181,6 +182,9 @@ app.use('/api/actions', actionRoutes);
 app.use('/api/etsy', etsyRoutes);
 // Owner-only admin numbers (must be mounted before the catch-all '/api' router)
 app.use('/api/admin', adminRoutes);
+// Real billing truth (GET /api/billing/me, POST /api/billing/cancel) — also
+// mounted before the catch-all '/api' router.
+app.use('/api/billing', billingRoutes);
 app.use('/api', subscriptionRoutes);
 
 app.get('/health', (req, res) => {

@@ -15,9 +15,14 @@ function getStripe(): Stripe {
     if (!key) {
       throw new Error('STRIPE_SECRET_KEY not configured. Stripe operations unavailable.');
     }
-    stripe = new Stripe(key, {
-      apiVersion: '2025-01-27-acacia' as any,
-    });
+    // A pinned apiVersion the account no longer serves is rejected outright
+    // ("Invalid Stripe API version: 2025-01-27-acacia", verified live 2026-10-30),
+    // which made EVERY call in this service fail. Use the SDK's own default
+    // version, with an env override for when a pin is genuinely required.
+    const apiVersion = String(process.env.STRIPE_API_VERSION || '').trim();
+    stripe = apiVersion
+      ? new Stripe(key, { apiVersion: apiVersion as any })
+      : new Stripe(key);
   }
   return stripe;
 }
