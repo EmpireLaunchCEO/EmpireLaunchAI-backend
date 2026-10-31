@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { db, schema } from '../db/index.js';
 import { stripeService } from '../services/stripeService.js';
-import { eq, desc, and, gt } from 'drizzle-orm';
+import { cancelMyBilling } from './billingController.js';
+import { eq, desc } from 'drizzle-orm';
 
 const { subscriptions } = schema;
 
@@ -234,58 +235,14 @@ export const pollRenewal = async (req: Request, res: Response) => {
 };
 
 /**
- * POST /api/subscriptions/cancel
- * Cancels Stripe subscription at period end.
+ * POST /api/subscriptions/cancel — kept for the Settings card, which already
+ * calls this path. Delegates to the real cancel in controllers/billingController
+ * (services/stripeSubscriptions.ts): resolve the Stripe subscription by
+ * `client_reference_id`/email, set `cancel_at_period_end: true`, keep access
+ * until the paid period ends, and return a visible error instead of the old
+ * bare 404 that the frontend silently swallowed while Stripe kept billing.
  */
-export const cancelSubscription = async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).userId;
-    if (!userId) return res.status(400).json({ error: 'Authentication required' });
-
-    const [latest] = await db.select()
-      .from(subscriptions)
-      .where(eq(subscriptions.userId, userId))
-      .orderBy(desc(subscriptions.paidAt))
-      .limit(1);
-
-    if (!latest) {
-      return res.status(404).json({ error: 'No subscription found' });
-    }
-
-    // Find Stripe subscription ID
-    let subId = latest.stripeSubscriptionId;
-    if (!subId) {
-      const status = await stripeService.getSubscriptionStatus(userId);
-      subId = status.subscriptionId;
-      // Store for future use
-      if (subId) {
-        await db.update(subscriptions)
-          .set({ stripeSubscriptionId: subId })
-          .where(eq(subscriptions.id, latest.id));
-      }
-    }
-
-    if (!subId) {
-      return res.status(404).json({ error: 'Could not find Stripe subscription ID' });
-    }
-
-    const result = await stripeService.cancelSubscription(subId);
-
-    // Record cancellation timestamp for 30-day retention tracking
-    await db.update(subscriptions)
-      .set({ canceledAt: new Date() })
-      .where(eq(subscriptions.id, latest.id));
-
-    res.json({
-      status: 'canceled',
-      activeUntil: result.currentPeriodEnd,
-      message: 'Subscription will be canceled at the end of the current billing period.',
-    });
-  } catch (error: any) {
-    console.error('[Subscription] Cancel error:', error);
-    res.status(500).json({ error: error.message });
-  }
-};
+export const cancelSubscription = cancelMyBilling;
 
 /**
  * POST /api/subscriptions/reactivate
