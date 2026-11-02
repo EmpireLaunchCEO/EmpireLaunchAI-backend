@@ -26,9 +26,10 @@ import { fileURLToPath } from 'node:url';
 
 import {
   BRAND_LABELS,
-  CANCEL_NO_SUBSCRIPTION_MESSAGE,
   aggregateOwnerStats,
   cancelClientSubscription,
+  cancelNoSubscriptionMessage,
+  parseBrandSlot,
   clearBillingCache,
   getClientBillingView,
   getOwnerBillingStats,
@@ -463,7 +464,7 @@ test('(d1) cancel sets ONLY cancel_at_period_end and reports the real period end
     subs: [makeSub({ id: 'sub_cancel_me', metadata: { client_reference_id: CLIENT } })],
   });
 
-  const result = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'subscription' });
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
@@ -481,7 +482,7 @@ test('(d2) cancelling twice is fine and says exactly the same thing (no second w
     subs: [makeSub({ id: 'sub_twice', metadata: { client_reference_id: CLIENT } })],
   });
 
-  const first = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const first = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'subscription' });
   assert.equal(first.ok, true);
 
   // Stripe now reports the flag; the cache was invalidated by the write, so the
@@ -492,7 +493,7 @@ test('(d2) cancelling twice is fine and says exactly the same thing (no second w
   });
   clearBillingCache();
 
-  const second = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const second = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'subscription' });
   assert.equal(second.ok, true);
   if (!second.ok || !first.ok) return;
   assert.equal(second.alreadyCancelled, true);
@@ -502,11 +503,14 @@ test('(d2) cancelling twice is fine and says exactly the same thing (no second w
 
 test('(d3) no subscription ⇒ an explicit, showable failure (not a silent 404, not a fake success)', async () => {
   const fake = useFake({ subs: [] });
-  const result = await cancelClientSubscription({ userId: CLIENT, email: 'nobody@example.com' });
+  const result = await cancelClientSubscription(
+    { userId: CLIENT, email: 'nobody@example.com' },
+    { brandSlot: 'subscription' },
+  );
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.code, 'NO_SUBSCRIPTION');
-  assert.equal(result.message, CANCEL_NO_SUBSCRIPTION_MESSAGE);
+  assert.equal(result.message, cancelNoSubscriptionMessage('subscription'));
   assert.ok(result.message.length > 40, 'the message is written for the client to read');
   assert.equal(fake.calls.updates.length, 0, 'nothing was written to Stripe');
 });
@@ -516,7 +520,7 @@ test('(d4) Stripe rejecting the update is reported, and nothing else is touched'
     subs: [makeSub({ id: 'sub_nope', metadata: { client_reference_id: CLIENT } })],
     updateFail: new Error('This subscription is not cancelable'),
   });
-  const result = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'subscription' });
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.code, 'STRIPE_UNAVAILABLE');
@@ -526,7 +530,7 @@ test('(d4) Stripe rejecting the update is reported, and nothing else is touched'
 
 test('(d5) a Stripe outage on the read is not reported as a cancellation', async () => {
   useFake({ subsFail: true });
-  const result = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'subscription' });
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.code, 'STRIPE_UNAVAILABLE');
@@ -546,24 +550,113 @@ test('(d6) NO ACCESS REVOCATION: the billing module cannot touch local access st
   assert.equal(/tier|quota|isLocked|is_locked/i.test(cancelFn), false);
 });
 
-test('(d7) a client holding two brands has both cancelled, and access runs to the LATEST period end', async () => {
-  const laterEnd = PERIOD_END + 30 * 24 * 60 * 60;
+test('(d7) PER-BRAND CANCEL — cancelling Brand 2 leaves the base plan and Brand 3 untouched', async () => {
+  // A three-brand client. The bug this replaces cancelled every live subscription
+  // on the account, so pressing Cancel on Brand 2 silently killed Brands 1 and 3.
+  const brand3End = PERIOD_END + 30 * 24 * 60 * 60;
   const fake = useFake({
     subs: [
-      makeSub({ id: 'sub_multi_a', metadata: { client_reference_id: CLIENT } }),
-      makeSub({ id: 'sub_multi_b', metadata: { client_reference_id: CLIENT }, priceId: PRICE_BRAND2, productId: PROD_BRAND2, productName: 'Empire Brand 2 Expansion Subscription', periodEnd: laterEnd }),
+      makeSub({ id: 'sub_base', metadata: { client_reference_id: CLIENT } }),
+      makeSub({
+        id: 'sub_brand2',
+        metadata: { client_reference_id: CLIENT },
+        priceId: PRICE_BRAND2,
+        productId: PROD_BRAND2,
+        productName: 'Empire Brand 2 Expansion Subscription',
+      }),
+      makeSub({
+        id: 'sub_brand3',
+        metadata: { client_reference_id: CLIENT },
+        priceId: PRICE_BRAND3,
+        productId: PROD_BRAND3,
+        productName: 'Empire Brand 3 Expansion Subscription',
+        periodEnd: brand3End,
+      }),
     ],
   });
 
-  const result = await cancelClientSubscription({ userId: CLIENT, email: null });
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'brand2' });
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  assert.equal(fake.calls.updates.length, 2);
-  assert.deepEqual(
-    result.subscriptions.map((s) => s.brandSlot).sort(),
-    ['brand2', 'subscription'],
-  );
-  assert.equal(result.activeUntil, new Date(laterEnd * 1000).toISOString());
+
+  // Exactly ONE write, and it is Brand 2's subscription.
+  assert.equal(fake.calls.updates.length, 1, 'only the requested brand may be written');
+  assert.deepEqual(fake.calls.updates.map((c) => c.id), ['sub_brand2']);
+  assert.deepEqual(fake.calls.updates[0].params, { cancel_at_period_end: true });
+
+  // The other two subscriptions were never passed to a cancel call.
+  const touched = fake.calls.updates.map((c) => c.id);
+  assert.equal(touched.includes('sub_base'), false, 'Brand 1 (base plan) must be untouched');
+  assert.equal(touched.includes('sub_brand3'), false, 'Brand 3 must be untouched');
+
+  // The answer is about Brand 2 only — not the account's latest period end.
+  assert.equal(result.brandSlot, 'brand2');
+  assert.equal(result.brandLabel, 'Brand 2');
+  assert.deepEqual(result.subscriptions.map((s) => s.subscriptionId), ['sub_brand2']);
+  assert.deepEqual(result.subscriptions.map((s) => s.brandSlot), ['brand2']);
+  assert.equal(result.activeUntil, new Date(PERIOD_END * 1000).toISOString());
+  assert.notEqual(result.activeUntil, new Date(brand3End * 1000).toISOString());
+  assert.match(result.message, /Brand 2/);
+});
+
+test('(d8) NO SILENT "CANCEL EVERYTHING": a missing brand slot is refused and writes nothing', async () => {
+  const fake = useFake({
+    subs: [
+      makeSub({ id: 'sub_base', metadata: { client_reference_id: CLIENT } }),
+      makeSub({
+        id: 'sub_brand2',
+        metadata: { client_reference_id: CLIENT },
+        priceId: PRICE_BRAND2,
+        productId: PROD_BRAND2,
+        productName: 'Empire Brand 2 Expansion Subscription',
+      }),
+    ],
+  });
+
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: null });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, 'BRAND_SLOT_REQUIRED');
+  assert.match(result.message, /Nothing has been cancelled/i);
+  assert.equal(fake.calls.updates.length, 0, 'a missing slot must never cancel anything');
+
+  // An unrecognised slot is refused the same way — never guessed into a default.
+  const bogus = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'brand9' as any });
+  assert.equal(bogus.ok, false);
+  if (bogus.ok) return;
+  assert.equal(bogus.code, 'BRAND_SLOT_REQUIRED');
+  assert.equal(fake.calls.updates.length, 0);
+});
+
+test('(d9) a brand with no live subscription is a NO_SUBSCRIPTION for THAT brand only', async () => {
+  // The client holds the base plan; they press Cancel on Brand 3.
+  const fake = useFake({
+    subs: [makeSub({ id: 'sub_base', metadata: { client_reference_id: CLIENT } })],
+  });
+  const result = await cancelClientSubscription({ userId: CLIENT, email: null }, { brandSlot: 'brand3' });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, 'NO_SUBSCRIPTION');
+  assert.match(result.message, /Brand 3/);
+  assert.equal(fake.calls.updates.length, 0, 'the base plan they DO hold is not cancelled');
+});
+
+test('(d10) parseBrandSlot: the canonical wire shape, the aliases, and a refusal on anything else', () => {
+  assert.equal(parseBrandSlot('subscription'), 'subscription');
+  assert.equal(parseBrandSlot('brand2'), 'brand2');
+  assert.equal(parseBrandSlot('brand3'), 'brand3');
+  // spellings a client or a UI might send
+  assert.equal(parseBrandSlot('Brand 2'), 'brand2');
+  assert.equal(parseBrandSlot('brand_3'), 'brand3');
+  assert.equal(parseBrandSlot(2), 'brand2');
+  assert.equal(parseBrandSlot('2'), 'brand2');
+  assert.equal(parseBrandSlot('brand1'), 'subscription');
+  // and never a guess
+  assert.equal(parseBrandSlot(undefined), null);
+  assert.equal(parseBrandSlot(null), null);
+  assert.equal(parseBrandSlot(''), null);
+  assert.equal(parseBrandSlot('everything'), null);
+  assert.equal(parseBrandSlot(4), null);
 });
 
 // ═══════════════════════ (e) the client-facing view ═════════════════════════

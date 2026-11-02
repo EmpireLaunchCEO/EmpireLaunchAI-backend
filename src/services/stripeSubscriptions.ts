@@ -153,6 +153,34 @@ export function resolveBrandSlot(input: BrandInput): BrandSlotResolution {
   return { slot: 'subscription', source: 'default', matchedOn: priceId || productId || productName || null };
 }
 
+/**
+ * Turn whatever the caller sent into a canonical `BrandSlot`, or `null`.
+ *
+ * The canonical wire shape is the one `GET /api/billing/me` already returns and
+ * the Settings card already uses (`brandSlot: 'subscription' | 'brand2' |
+ * 'brand3'`). The numeric/alias forms are accepted because a slot is easy to
+ * describe three ways ("brand 2", "brand2", 2) and a 400 on a spelling is not a
+ * useful answer — but an UNRECOGNISED value is `null`, never a default, because
+ * guessing the slot is exactly how one brand's cancel used to hit all three.
+ */
+export function parseBrandSlot(value: unknown): BrandSlot | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') {
+    if (value === 1) return 'subscription';
+    if (value === 2) return 'brand2';
+    if (value === 3) return 'brand3';
+    return null;
+  }
+  const raw = String(value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!raw) return null;
+  if (raw === 'subscription' || raw === 'base' || raw === 'primary' || raw === 'brand1' || raw === '1') {
+    return 'subscription';
+  }
+  if (raw === 'brand2' || raw === '2') return 'brand2';
+  if (raw === 'brand3' || raw === '3') return 'brand3';
+  return null;
+}
+
 // ───────────────────────────── Stripe client seam ────────────────────────────
 
 /** The narrow slice of the Stripe API this module actually calls. */
@@ -195,6 +223,8 @@ export interface StripeBillingApi {
   };
   customers?: {
     retrieve(id: string, params?: Record<string, any>): Promise<any>;
+    /** Optional: used to find a client's Stripe customer by email before any checkout is offered. */
+    list?(params: Record<string, any>): Promise<{ data: any[]; has_more?: boolean }>;
   };
 }
 
@@ -602,6 +632,135 @@ export function matchClientSubscriptions(
   return matches;
 }
 
+// ───────────────────────── reactivation: Stripe first ───────────────────────
+
+export type LiveMatch = 'client_reference_id' | 'customer_id' | 'email';
+
+export interface LiveClientSubscription {
+  subscription: NormalizedSubscription;
+  /** How we proved the subscription belongs to this client. */
+  matchedBy: LiveMatch;
+}
+
+/**
+ * Which live subscription to switch back on when a client presses "reactivate".
+ * A subscription they already asked to cancel wins (that is the one they are
+ * undoing); otherwise the base plan, otherwise the newest.
+ */
+function pickLiveToReactivate(candidates: NormalizedSubscription[]): NormalizedSubscription | null {
+  const live = candidates.filter((s) => s.live);
+  if (!live.length) return null;
+  const cancelling = live.filter((s) => s.cancelAtPeriodEnd);
+  const pool = cancelling.length ? cancelling : live;
+  const base = pool.find((s) => s.brandSlot === 'subscription');
+  if (base) return base;
+  return [...pool].sort((a, b) => String(b.created || '').localeCompare(String(a.created || '')))[0];
+}
+
+/**
+ * Find a subscription that is STILL INSIDE A PAID PERIOD for this client —
+ * `active`, `trialing` or `past_due` — before anything is allowed to offer a new
+ * checkout.
+ *
+ * This is the fix for a real double-charge: a client who bought through a
+ * Payment Link has no `subscriptions` row in our database, so the old reactivate
+ * path found nothing locally, fell through to `createCheckoutSession` and asked
+ * them to pay again for a period they had already paid for. Stripe knew the
+ * whole time; we just never asked it.
+ *
+ * Two doors, both asked (the lesson from the retired Veo endpoint: one door
+ * saying "nothing here" is not proof):
+ *   1. the single billing snapshot — `client_reference_id`, the customer id we
+ *      already know, and the customer's email, normalised;
+ *   2. `customers.list({ email })` → each customer's subscriptions. This catches
+ *      a client whose Stripe customer record carries no email (or a different
+ *      one) but whose customer object the account's email search still returns.
+ *
+ * Returns `null` ONLY when Stripe itself answered and had nothing live. Any
+ * Stripe failure throws `StripeBillingUnavailableError`, so the caller can say
+ * "we could not check" instead of "please pay again".
+ */
+export async function findLiveClientSubscription(
+  identity: ClientIdentity,
+  options: { customerId?: string | null } = {},
+): Promise<LiveClientSubscription | null> {
+  const api = getStripeApi();
+  const customerId = String(options.customerId || '').trim();
+  const email = String(identity.email || '').trim();
+
+  let snapshot: BillingSnapshot;
+  try {
+    snapshot = await readBillingSnapshot({ fresh: true });
+  } catch (error: any) {
+    throw new StripeBillingUnavailableError(error?.message || 'Stripe subscriptions list failed');
+  }
+
+  // Door 1 — the snapshot the rest of the billing surface already trusts.
+  const candidates: LiveClientSubscription[] = [];
+  for (const match of matchClientSubscriptions(snapshot, identity)) {
+    if (match.subscription.live) {
+      candidates.push({ subscription: match.subscription, matchedBy: match.matchedBy });
+    }
+  }
+  if (customerId) {
+    for (const sub of snapshot.subscriptions) {
+      if (sub.live && sub.customerId === customerId) {
+        candidates.push({ subscription: sub, matchedBy: 'customer_id' });
+      }
+    }
+  }
+  const fromSnapshot = pickLiveToReactivate(candidates.map((c) => c.subscription));
+  if (fromSnapshot) {
+    const how = candidates.find((c) => c.subscription.id === fromSnapshot.id)!;
+    return { subscription: fromSnapshot, matchedBy: how.matchedBy };
+  }
+
+  // Door 2 — ask Stripe's customer directory by email, then list that
+  // customer's subscriptions. Only possible when we actually know the email.
+  if (!email) return null;
+  const emailKey = normalizeBillingEmail(email);
+  if (!emailKey) return null;
+
+  const customerIds = new Set<string>();
+  if (api.customers?.list) {
+    let found: any[] = [];
+    try {
+      const res = await api.customers.list({ email, limit: 10 });
+      found = Array.isArray(res?.data) ? res.data : [];
+    } catch (error: any) {
+      throw new StripeBillingUnavailableError(error?.message || 'Stripe customer lookup failed');
+    }
+    for (const customer of found) {
+      if (!customer?.id) continue;
+      // Trust the search, but never a stranger: the customer's own email (when
+      // it has one) must agree with the client's.
+      const customerEmail = typeof customer.email === 'string' ? customer.email : '';
+      if (customerEmail && normalizeBillingEmail(customerEmail) !== emailKey) continue;
+      customerIds.add(String(customer.id));
+    }
+  }
+
+  for (const id of customerIds) {
+    let rows: StripeSubscriptionLike[] = [];
+    try {
+      const res = await api.subscriptions.list({
+        customer: id,
+        status: 'all',
+        limit: 100,
+        expand: ['data.customer'],
+      });
+      rows = Array.isArray(res?.data) ? res.data : [];
+    } catch (error: any) {
+      throw new StripeBillingUnavailableError(error?.message || 'Stripe subscriptions list failed');
+    }
+    const normalized = rows.map((row) => normalizeSubscription(row, new Map()));
+    const best = pickLiveToReactivate(normalized);
+    if (best) return { subscription: best, matchedBy: 'email' };
+  }
+
+  return null;
+}
+
 // ───────────────────────────── client-facing view ───────────────────────────
 
 export interface ClientBillingSubscription {
@@ -806,10 +965,13 @@ export async function getOwnerBillingStats(options: { fresh?: boolean } = {}): P
 
 export interface CancelSuccess {
   ok: true;
+  /** The ONE brand slot this cancel applied to — nothing else was touched. */
+  brandSlot: BrandSlot;
+  brandLabel: string;
   /** True when Stripe already had `cancel_at_period_end` set — same answer, no write. */
   alreadyCancelled: boolean;
   cancelAtPeriodEnd: true;
-  /** Latest paid-through instant across the client's live subscriptions. */
+  /** Paid-through instant for the cancelled brand. Never another brand's date. */
   activeUntil: string | null;
   subscriptions: Array<{
     subscriptionId: string;
@@ -824,7 +986,7 @@ export interface CancelSuccess {
 
 export interface CancelFailure {
   ok: false;
-  code: 'NO_SUBSCRIPTION' | 'STRIPE_UNAVAILABLE';
+  code: 'NO_SUBSCRIPTION' | 'STRIPE_UNAVAILABLE' | 'BRAND_SLOT_REQUIRED';
   message: string;
 }
 
@@ -834,20 +996,55 @@ export const CANCEL_NO_SUBSCRIPTION_MESSAGE =
   'We could not find a Stripe subscription on your account, so there was nothing to cancel. ' +
   'You have not been charged again. If you believe this is wrong, tell us in chat and we will check it by hand.';
 
+/** The same honest answer, naming the brand the caller asked about. */
+export function cancelNoSubscriptionMessage(brandSlot: BrandSlot): string {
+  return `We could not find a Stripe subscription on your account for your ${BRAND_LABELS[brandSlot]} plan, so there was nothing to cancel. ` +
+    'You have not been charged again. If you believe this is wrong, tell us in chat and we will check it by hand.';
+}
+
 /**
- * Cancel at period end — the owner's rule, verbatim: "When a client cancels, they
- * have until the day before their renewal date to continue using the platform."
+ * Shown when the caller did not say WHICH brand to cancel. Deliberately a 400:
+ * the old endpoint guessed by cancelling every live subscription on the account,
+ * so a client on Brand 2 who cancelled Brand 2 also lost Brands 1 and 3.
+ */
+export const CANCEL_BRAND_SLOT_REQUIRED_MESSAGE =
+  'Tell us which plan you want to cancel — Subscription, Brand 2 or Brand 3 — and we will cancel only that one. Nothing has been cancelled.';
+
+export interface CancelOptions {
+  /**
+   * The brand slot being cancelled. REQUIRED. `null`/`undefined`/anything we
+   * cannot recognise is refused — never treated as "all of them".
+   */
+  brandSlot: BrandSlot | null | undefined;
+}
+
+/**
+ * Cancel ONE brand at period end — the owner's rule, verbatim: "When a client
+ * cancels, they have until the day before their renewal date to continue using
+ * the platform."
  *
  * Therefore this function:
- *   • sets ONLY `cancel_at_period_end: true` on Stripe (no invoice, no refund,
- *     no subscription deletion),
+ *   • resolves the caller's live subscriptions and keeps only the ones in the
+ *     REQUESTED brand slot (this is the whole fix: cancelling Brand 2 must leave
+ *     Brands 1 and 3 alone),
+ *   • sets ONLY `cancel_at_period_end: true` on those (no invoice, no refund, no
+ *     subscription deletion),
  *   • touches NO local access state (no tier, no quota, no lock) — the client
  *     keeps working until the paid period ends,
  *   • is idempotent: a second call returns the same period end and does not
  *     write again,
- *   • returns an explicit failure the frontend can show, never a bare 404.
+ *   • returns an explicit failure the frontend can show, never a bare 404 and
+ *     never a silent "cancelled everything".
  */
-export async function cancelClientSubscription(identity: ClientIdentity): Promise<CancelResult> {
+export async function cancelClientSubscription(
+  identity: ClientIdentity,
+  options: CancelOptions = { brandSlot: null },
+): Promise<CancelResult> {
+  const brandSlot = parseBrandSlot(options?.brandSlot);
+  if (!brandSlot) {
+    return { ok: false, code: 'BRAND_SLOT_REQUIRED', message: CANCEL_BRAND_SLOT_REQUIRED_MESSAGE };
+  }
+
   let snapshot: BillingSnapshot;
   try {
     // Always a fresh read: cancelling on a stale snapshot could either skip a
@@ -861,10 +1058,11 @@ export async function cancelClientSubscription(identity: ClientIdentity): Promis
     };
   }
 
-  const matches = matchClientSubscriptions(snapshot, identity);
-  const liveMatches = matches.filter((m) => m.subscription.live);
+  // Only this brand. A client's other brands are not ours to cancel from here.
+  const liveMatches = matchClientSubscriptions(snapshot, identity)
+    .filter((m) => m.subscription.live && m.subscription.brandSlot === brandSlot);
   if (!liveMatches.length) {
-    return { ok: false, code: 'NO_SUBSCRIPTION', message: CANCEL_NO_SUBSCRIPTION_MESSAGE };
+    return { ok: false, code: 'NO_SUBSCRIPTION', message: cancelNoSubscriptionMessage(brandSlot) };
   }
 
   const api = getStripeApi();
@@ -890,8 +1088,7 @@ export async function cancelClientSubscription(identity: ClientIdentity): Promis
       updated = await api.subscriptions.update(sub.id, { cancel_at_period_end: true });
       wrote = true;
     } catch (error: any) {
-      // One brand failing must not silently leave the others uncancelled and
-      // unmentioned: report what did happen and what did not.
+      // Report what did happen and what did not — and never claim success.
       return {
         ok: false,
         code: 'STRIPE_UNAVAILABLE',
@@ -918,16 +1115,19 @@ export async function cancelClientSubscription(identity: ClientIdentity): Promis
     .filter((d): d is string => !!d)
     .sort();
   const activeUntil = periodEnds.length ? periodEnds[periodEnds.length - 1] : null;
+  const label = BRAND_LABELS[brandSlot];
 
   return {
     ok: true,
+    brandSlot,
+    brandLabel: label,
     alreadyCancelled: !wrote,
     cancelAtPeriodEnd: true,
     activeUntil,
     subscriptions: results,
     message: activeUntil
-      ? `Your subscription is cancelled and will not renew. You keep full access until ${activeUntil}.`
-      : 'Your subscription is cancelled and will not renew. You keep full access until the end of the period you already paid for.',
+      ? `Your ${label} plan is cancelled and will not renew. You keep full access until ${activeUntil}.`
+      : `Your ${label} plan is cancelled and will not renew. You keep full access until the end of the period you already paid for.`,
   };
 }
 
@@ -937,7 +1137,9 @@ export const stripeSubscriptions = {
   getOwnerBillingStats,
   aggregateOwnerStats,
   matchClientSubscriptions,
+  findLiveClientSubscription,
   cancelClientSubscription,
+  parseBrandSlot,
   clearBillingCache,
   setStripeApi,
   resolveBrandSlot,

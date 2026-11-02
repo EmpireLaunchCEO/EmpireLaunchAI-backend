@@ -102,13 +102,15 @@ function fakeStripe(o: { subs?: any[]; subsFail?: boolean; updateFail?: Error } 
   return calls;
 }
 
-function makeReq(o: { userId?: string; email?: string } = {}) {
+function makeReq(o: { userId?: string; email?: string; brandSlot?: unknown; viaQuery?: boolean } = {}) {
+  const slotInBody = !o.viaQuery && o.brandSlot !== undefined;
+  const slotInQuery = o.viaQuery && o.brandSlot !== undefined;
   return {
     userId: o.userId ?? CLIENT,
     user: { id: o.userId ?? CLIENT, email: o.email ?? 'client@example.com' },
     headers: {},
-    body: {},
-    query: {},
+    body: slotInBody ? { brandSlot: o.brandSlot } : {},
+    query: slotInQuery ? { brandSlot: o.brandSlot } : {},
   } as any;
 }
 
@@ -214,7 +216,7 @@ test('(1d) /billing/me without an authenticated user is a 401, not a plan', asyn
 test('(2a) cancel returns 200 with the paid-through date and only sets cancel_at_period_end', async () => {
   const calls = fakeStripe({ subs: [makeSub({ id: 'sub_c', ref: CLIENT })] });
   const res = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT }), res);
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'subscription' }), res);
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.status, 'canceled');
@@ -227,12 +229,12 @@ test('(2a) cancel returns 200 with the paid-through date and only sets cancel_at
 test('(2b) cancelling twice is fine: same body, one write', async () => {
   const calls = fakeStripe({ subs: [makeSub({ id: 'sub_twice', ref: CLIENT })] });
   const first = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT }), first);
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'subscription' }), first);
 
   // Stripe now reports the flag set.
   const calls2 = fakeStripe({ subs: [makeSub({ id: 'sub_twice', ref: CLIENT, cancelAtPeriodEnd: true })] });
   const second = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT }), second);
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'subscription' }), second);
 
   assert.equal(second.statusCode, 200);
   assert.equal(second.body.activeUntil, first.body.activeUntil);
@@ -244,7 +246,7 @@ test('(2b) cancelling twice is fine: same body, one write', async () => {
 test('(2c) nothing to cancel ⇒ 409 with a showable message — NOT the silent 404 that hid the defect', async () => {
   const calls = fakeStripe({ subs: [] });
   const res = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT, email: 'nobody@example.com' }), res);
+  await cancelMyBilling(makeReq({ userId: CLIENT, email: 'nobody@example.com', brandSlot: 'subscription' }), res);
 
   assert.notEqual(res.statusCode, 404, 'a 404 is what the frontend used to swallow');
   assert.equal(res.statusCode, 409);
@@ -258,7 +260,7 @@ test('(2c) nothing to cancel ⇒ 409 with a showable message — NOT the silent 
 test('(2d) Stripe rejecting the cancel ⇒ 503 "not cancelled", never a success body', async () => {
   fakeStripe({ subs: [makeSub({ id: 'sub_x', ref: CLIENT })], updateFail: new Error('Subscription not cancelable') });
   const res = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT }), res);
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'subscription' }), res);
 
   assert.equal(res.statusCode, 503);
   assert.equal(res.body.cancelled, false);
@@ -269,10 +271,104 @@ test('(2d) Stripe rejecting the cancel ⇒ 503 "not cancelled", never a success 
 test('(2e) Stripe unreachable ⇒ 503, and the client is told the subscription still stands', async () => {
   fakeStripe({ subsFail: true });
   const res = makeRes();
-  await cancelMyBilling(makeReq({ userId: CLIENT }), res);
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'subscription' }), res);
   assert.equal(res.statusCode, 503);
   assert.equal(res.body.cancelled, false);
   assert.match(res.body.message, /NOT cancelled/);
+});
+
+// ═══════ (2f-h) PER-BRAND CANCEL — the defect this PR exists to fix ════════
+
+/** A three-brand client: base plan, Brand 2 and Brand 3, each with its own period end. */
+const PRICE_BRAND3 = 'price_1TyeuqDrblkzsiVMhiCktLiP';
+const PROD_BRAND3 = 'prod_Uyc9Vws147m6sK';
+
+function threeBrandAccount() {
+  return [
+    makeSub({ id: 'sub_base', ref: CLIENT }),
+    makeSub({
+      id: 'sub_brand2',
+      ref: CLIENT,
+      priceId: PRICE_BRAND2,
+      productId: 'prod_UwdsLaUyzg2WgS',
+      productName: 'Empire Brand 2 Expansion Subscription',
+    }),
+    makeSub({
+      id: 'sub_brand3',
+      ref: CLIENT,
+      priceId: PRICE_BRAND3,
+      productId: PROD_BRAND3,
+      productName: 'Empire Brand 3 Expansion Subscription',
+    }),
+  ];
+}
+
+test('(2f) cancelling Brand 2 cancels ONLY Brand 2 — Brands 1 and 3 are never touched', async () => {
+  const calls = fakeStripe({ subs: threeBrandAccount() });
+  const res = makeRes();
+
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'brand2' }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.cancelled, true);
+  assert.equal(res.body.brandSlot, 'brand2');
+  assert.equal(res.body.brandLabel, 'Brand 2');
+  assert.equal(res.body.activeUntil, new Date(PERIOD_END * 1000).toISOString());
+
+  // THE assertion: exactly one cancel call, for Brand 2.
+  assert.equal(calls.updates.length, 1, 'one brand cancelled ⇒ exactly one Stripe write');
+  assert.deepEqual(calls.updates, [{ id: 'sub_brand2', params: { cancel_at_period_end: true } }]);
+
+  // And the other two subscriptions were never passed to a cancel call.
+  const cancelledIds = calls.updates.map((u) => u.id);
+  assert.equal(cancelledIds.includes('sub_base'), false, 'Brand 1 must survive a Brand 2 cancel');
+  assert.equal(cancelledIds.includes('sub_brand3'), false, 'Brand 3 must survive a Brand 2 cancel');
+  assert.deepEqual(res.body.subscriptions.map((s: any) => s.subscriptionId), ['sub_brand2']);
+});
+
+test('(2g) a cancel with NO brand slot is a 400 and cancels nothing (never "all of them")', async () => {
+  const calls = fakeStripe({ subs: threeBrandAccount() });
+  const res = makeRes();
+
+  await cancelMyBilling(makeReq({ userId: CLIENT }), res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.cancelled, false);
+  assert.equal(res.body.code, 'BRAND_SLOT_REQUIRED');
+  assert.match(res.body.message, /which plan/i);
+  assert.deepEqual(res.body.accepted, ['subscription', 'brand2', 'brand3']);
+  assert.equal(calls.updates.length, 0, 'nothing may be cancelled when the brand is unknown');
+
+  // An unrecognised slot behaves identically — it is never guessed into a default.
+  const bogus = makeRes();
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'brand9' }), bogus);
+  assert.equal(bogus.statusCode, 400);
+  assert.equal(bogus.body.code, 'BRAND_SLOT_REQUIRED');
+  assert.equal(calls.updates.length, 0);
+});
+
+test('(2h) the slot may arrive in the query string too, and Brand 3 cancels only Brand 3', async () => {
+  const calls = fakeStripe({ subs: threeBrandAccount() });
+  const res = makeRes();
+
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'brand3', viaQuery: true }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.brandSlot, 'brand3');
+  assert.deepEqual(calls.updates.map((u) => u.id), ['sub_brand3']);
+});
+
+test('(2i) a brand the client does not hold is a 409 for THAT brand — the ones they do hold are safe', async () => {
+  const calls = fakeStripe({ subs: [makeSub({ id: 'sub_base', ref: CLIENT })] });
+  const res = makeRes();
+
+  await cancelMyBilling(makeReq({ userId: CLIENT, brandSlot: 'brand3' }), res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'NO_SUBSCRIPTION');
+  assert.equal(res.body.brandSlot, 'brand3');
+  assert.match(res.body.message, /Brand 3/);
+  assert.equal(calls.updates.length, 0, 'the base plan they DO hold must not be cancelled');
 });
 
 // ═════════════════ (3) GET /api/admin/client-stats extension ════════════════
