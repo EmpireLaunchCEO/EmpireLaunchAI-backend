@@ -92,8 +92,42 @@ export const VEO_MODEL = 'veo-3.1-lite-generate-001';
 export const VEO_PROVIDER_TAG = 'veo-3.1-lite';
 /** Production per-call duration (enum 4|6|8) — one 6s take per motion window. */
 export const VEO_CALL_SECONDS = 6;
-/** Total paid Veo motion per Scene/Twin video — hard cap (2×6s). */
-export const VEO_MOTION_BUDGET_SECONDS = 12;
+/**
+ * WHOLE-VIDEO MOTION (owner, Nov 2 — "lets make the whole 30 seconds motion with
+ * Veo for scene based"). The 12s cap from PR #89 is GONE: every scene of a Scene
+ * video now gets its own motion window, and the budget is the whole video.
+ * 30s is the longest Scene video the planner ever produces, so 30s is the cap.
+ */
+export const VEO_MOTION_BUDGET_SECONDS = 30;
+/**
+ * The legal per-call durations Veo 3.1 Lite accepts. Anything else is a 400.
+ * A scene shorter than one 6s call is billed at the 4s tier (never padded up);
+ * a scene longer than 7s is billed at 8s. See nearestLegalVeoSeconds().
+ */
+export const VEO_LEGAL_DURATIONS = [4, 6, 8] as const;
+/** Max number of motion windows a single video can buy (30s / 6s). */
+export const VEO_MAX_MOTION_WINDOWS = 5;
+/** Vertex published price, veo-3.1-lite video-only @720p, per second. */
+export const VEO_USD_PER_SECOND_720P = 0.03;
+/** Billed dollars for N seconds of Lite motion at 720p (video-only). */
+export function veoCostUsd(billedSeconds: number): number {
+  const s = Number.isFinite(billedSeconds) && billedSeconds > 0 ? billedSeconds : 0;
+  return Math.round(s * VEO_USD_PER_SECOND_720P * 10000) / 10000;
+}
+/**
+ * Snap a scene's planned narration window onto Veo's 4|6|8 enum.
+ *   < 6s  → 4  (the short tier — a short beat never buys 6s it cannot use)
+ *   < 7s  → 6  (the standard tier)
+ *   >= 7s → 8
+ * Pure + deterministic. The returned value is what the CALL costs; the scene's
+ * own planned length is untouched — the take is fitted to it downstream.
+ */
+export function nearestLegalVeoSeconds(sceneSeconds: number): number {
+  const d = Number.isFinite(sceneSeconds) ? sceneSeconds : VEO_CALL_SECONDS;
+  if (d < 6) return 4;
+  if (d < 7) return 6;
+  return 8;
+}
 export const VEO_ASPECT_RATIO = '9:16';
 export const VEO_RESOLUTION = '720p';
 /** Kept for compatibility with the pre-Vertex contract. NOT sent on the Vertex
@@ -122,13 +156,38 @@ export const VEO_ERRORS = {
   apiKeyBlocked:
     `${VEO_PROVIDER_TAG}: Vertex prediction requires a Google SERVICE ACCOUNT (API_KEY_SERVICE_BLOCKED) — ` +
     `an API key can never call this endpoint. No motion was generated.`,
+  /**
+   * IMAGE-TO-VIDEO REJECTED. Owner rule: the clip MUST begin from the frame we
+   * designed (the scene's still, built from the client's brief and their uploaded
+   * photo). If the provider refuses the input image we say so BY NAME on the scene
+   * record — we never quietly downgrade to text-to-video, because a silent downgrade
+   * is a video that ignores what the client asked for.
+   */
+  imageRejected:
+    `${VEO_PROVIDER_TAG}: the input image was REJECTED — the clip could not be started from the scene's designed still. ` +
+    `This is NOT a silent text-to-video fallback: the scene has no faithful motion rather than wrong motion.`,
 } as const;
+/** Loud, named failure for "we had a still but the provider would not take it". */
+export function veoImageRejectedMessage(detail: string): string {
+  return `${VEO_ERRORS.imageRejected} (${String(detail || 'no detail').slice(0, 240)})`;
+}
+/** Loud, named failure for "this scene should have had a still and did not". */
+export function veoImageMissingMessage(sceneKey: string, reason: string): string {
+  return (
+    `${VEO_PROVIDER_TAG}: scene ${sceneKey} has NO designed still to animate — ${reason}. ` +
+    `Image-to-video needs the scene's still as its first frame; there is no text-to-video fallback.`
+  );
+}
 /** NOT_FOUND / retired-model message (model id interpolated so the log is actionable). */
 export function veoModelUnavailableMessage(model: string = VEO_MODEL): string {
   return `${VEO_PROVIDER_TAG}: the model ${model} is unavailable (NOT_FOUND) — it has been retired or is not ` +
     `granted to this Google project. No motion was generated.`;
 }
 
+/** The image-to-video input image (Google `VideoGenerationModelInstance.Image`).
+ *  Documented shape: `{ mimeType, bytesBase64Encoded | gcsUri }`, mimeType one of
+ *  image/jpeg | image/png. Verified live 2026-11-02 (see veoLiteProduction.test.ts). */
+export interface VeoInputImage { bytesBase64Encoded: string; mimeType: string; }
 export interface VeoGenerateOptions {
   model?: string;
   aspectRatio?: string;
@@ -139,6 +198,8 @@ export interface VeoGenerateOptions {
   sampleCount?: number;
   /** Vertex bills audio separately ($0.05/s vs $0.03/s). Production: false. */
   generateAudio?: boolean;
+  /** IMAGE-TO-VIDEO: the scene's designed still becomes the clip's FIRST FRAME. */
+  image?: VeoInputImage;
 }
 export interface VeoVideoPayload { uri?: string; data?: string; }
 export interface VeoPollResult { done: boolean; error?: string; video?: VeoVideoPayload; }
@@ -153,6 +214,13 @@ export interface VeoSceneGenerateOptions {
   onOperationCreated: (operationName: string) => void | Promise<void>;
   /** 4|6|8 per call. Defaults to VEO_CALL_SECONDS (6). */
   durationSeconds?: number;
+  /**
+   * IMAGE-TO-VIDEO. Local path to the scene's designed still (the frame the
+   * pipeline generated from the client's brief + their uploaded photo). When
+   * present the clip STARTS from that exact frame. When absent, the call is
+   * text-to-video — callers that own a still MUST pass it.
+   */
+  imagePath?: string;
 }
 
 // ─── Service-account credential ──────────────────────────────────────────────
@@ -324,11 +392,20 @@ export function classifyVeoHttpError(
 }
 
 // ─── Request/response helpers ────────────────────────────────────────────────
-/** Build the predictLongRunning POST body. `instances[0].prompt` is the only
- *  content field; generation params ride in Vertex's top-level `parameters`.
- *  `numberOfVideos` is NEVER sent (verified zero-cost 400). */
+/** Build the predictLongRunning POST body. `instances[0].prompt` is the text
+ *  content; `instances[0].image` (image-to-video) is the scene's designed still,
+ *  which becomes the clip's FIRST FRAME. Generation params ride in Vertex's
+ *  top-level `parameters`. `numberOfVideos` is NEVER sent (verified zero-cost 400). */
 export function buildVeoPredictBody(prompt: string, options: VeoGenerateOptions = {}): Record<string, unknown> {
-  const body: Record<string, unknown> = { instances: [{ prompt }] };
+  const instance: Record<string, unknown> = { prompt };
+  if (options.image && options.image.bytesBase64Encoded) {
+    // Google `VideoGenerationModelInstance.Image`: mimeType + bytesBase64Encoded.
+    instance.image = {
+      bytesBase64Encoded: options.image.bytesBase64Encoded,
+      mimeType: options.image.mimeType,
+    };
+  }
+  const body: Record<string, unknown> = { instances: [instance] };
   const parameters: Record<string, unknown> = {};
   if (options.sampleCount !== undefined) parameters.sampleCount = options.sampleCount;
   if (options.aspectRatio) parameters.aspectRatio = options.aspectRatio;
@@ -338,6 +415,20 @@ export function buildVeoPredictBody(prompt: string, options: VeoGenerateOptions 
   if (options.generateAudio !== undefined) parameters.generateAudio = options.generateAudio;
   if (Object.keys(parameters).length > 0) body.parameters = parameters;
   return body;
+}
+/** MIME type for a still on disk. Veo accepts image/jpeg and image/png only. */
+export function veoImageMimeType(filePath: string): string {
+  const ext = path.extname(String(filePath || '')).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  return 'image/png';
+}
+/** Read a still from disk into the documented image-to-video input shape.
+ *  Throws (loud) when the file is missing or empty — a caller that owns a still
+ *  must never silently fall back to text-to-video. */
+export function loadVeoInputImage(filePath: string): VeoInputImage {
+  const buf = fs.readFileSync(filePath);
+  if (!buf.length) throw new Error(`input image is empty: ${filePath}`);
+  return { bytesBase64Encoded: buf.toString('base64'), mimeType: veoImageMimeType(filePath) };
 }
 /** The create response is a long-running operation — the name MUST be present. */
 export function parseVeoOperationName(createJson: any): string {
@@ -427,7 +518,7 @@ export class VeoVideoService {
    *   4. Poll (5s→10s backoff) until done / terminal error.
    *   5. Save the video (inline base64 — the Vertex path — or a signed https uri).
    */
-  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number }> {
+  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean }> {
     const model = VEO_MODEL;
     const billedSeconds = opts.durationSeconds ?? VEO_CALL_SECONDS;
     let operationName: string | undefined = opts.existingOperationName;
@@ -438,6 +529,19 @@ export class VeoVideoService {
       console.error(`[Veo] veo_credentials_missing scene=${opts.sceneKey} error=${error.message}`);
       return { success: false, error: error.message, operationName };
     }
+    // IMAGE-TO-VIDEO: the scene's designed still becomes the clip's FIRST FRAME.
+    // Loaded BEFORE the create so a missing/unreadable still fails loud and free
+    // (no paid call, no silent text-to-video downgrade).
+    let inputImage: VeoInputImage | undefined;
+    if (opts.imagePath) {
+      try {
+        inputImage = loadVeoInputImage(opts.imagePath);
+      } catch (error: any) {
+        const msg = veoImageMissingMessage(opts.sceneKey, `could not read the still at ${opts.imagePath}: ${error?.message || 'unknown error'}`);
+        console.error(`[Veo] veo_input_image_unreadable scene=${opts.sceneKey} path=${opts.imagePath} error=${error?.message}`);
+        return { success: false, error: msg, operationName };
+      }
+    }
     try {
       if (!operationName) {
         const body = buildVeoPredictBody(opts.prompt, {
@@ -446,9 +550,10 @@ export class VeoVideoService {
           resolution: VEO_RESOLUTION,
           durationSeconds: billedSeconds,
           generateAudio: false, // billed separately on Vertex; the pipeline narrates itself
+          ...(inputImage ? { image: inputImage } : {}),
         });
         const createUrl = buildVeoCreateUrl(sa.project_id, model);
-        console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s`);
+        console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s image=${inputImage ? 'yes' : 'no'}`);
         const token = await this.tokens.getAccessToken(sa);
         const createRes = await fetch(createUrl, {
           method: 'POST',
@@ -458,8 +563,12 @@ export class VeoVideoService {
         });
         if (!createRes.ok) {
           const text = await createRes.text().catch(() => '');
-          const mapped = classifyVeoHttpError(createRes.status, text, 'create', model);
-          console.error(`[Veo] veo_create_failed scene=${opts.sceneKey} status=${createRes.status} error=${mapped}`);
+          // An image-bearing call rejected for image reasons gets its OWN message —
+          // never a generic HTTP code, and never a quiet retry as text-to-video.
+          const mapped = inputImage && /image|mime|jpeg|png|base64/i.test(text)
+            ? veoImageRejectedMessage(`HTTP ${createRes.status}: ${text}`)
+            : classifyVeoHttpError(createRes.status, text, 'create', model);
+          console.error(`[Veo] veo_create_failed scene=${opts.sceneKey} status=${createRes.status} image=${inputImage ? 'yes' : 'no'} error=${mapped}`);
           return { success: false, error: mapped, operationName };
         }
         const createJson = await createRes.json().catch(() => null);
@@ -481,8 +590,8 @@ export class VeoVideoService {
       if (poll.error) return { success: false, error: poll.error, operationName };
       // STEP 3: SAVE (inline base64 from Vertex, or a signed https uri)
       const videoPath = await this.saveVideo(poll.video!, sa, opts.sceneKey);
-      console.log(`[Veo] veo_scene_downloaded scene=${opts.sceneKey} path=${videoPath}`);
-      return { success: true, videoPath, operationName, billedSeconds };
+      console.log(`[Veo] veo_scene_downloaded scene=${opts.sceneKey} path=${videoPath} billed=${billedSeconds}s usd=${veoCostUsd(billedSeconds)}`);
+      return { success: true, videoPath, operationName, billedSeconds, estimatedUsd: veoCostUsd(billedSeconds), usedImage: Boolean(inputImage) };
     } catch (error: any) {
       console.error(`[VeoVideoService] scene ${opts.sceneKey} failed: ${error.message}`);
       return { success: false, error: error.message, operationName };

@@ -8,7 +8,15 @@ import { db, schema } from '../db/index.js';
 import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { buildBriefOverlaySpec, buildDictationSection, extractRequestedVisuals, userConversationText } from './requestedVisuals.js';
 import { applyFlashTimingToOverlaySpec, buildBulletOverlayLines, distributeBulletPanels, enforcePlannerFidelity, grammarizeYouBenefitSplice, mergePerSceneBullets, resolveEndFlashTiming, sanitizePlanComponentSplices } from './plannerFidelity.js';
-import { veoVideoService, VEO_PROVIDER_TAG, VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from './veoVideoService.js';
+import {
+  veoVideoService,
+  VEO_PROVIDER_TAG,
+  VEO_CALL_SECONDS,
+  VEO_MOTION_BUDGET_SECONDS,
+  VEO_MAX_MOTION_WINDOWS,
+  nearestLegalVeoSeconds,
+  veoCostUsd,
+} from './veoVideoService.js';
 import { renderingEngine, type SourceImageOutcome } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -511,6 +519,70 @@ export function padClipToDuration(input: string, targetSec: number): Promise<voi
     });
   });
 }
+/** ONE retry per window, and only on a PROVEN objective failure (network drop,
+ *  timeout, poll hiccup, 5xx). A credential, permission, retired-model,
+ *  safety-filter or image-rejection failure is DETERMINISTIC — retrying it can only
+ *  burn wall clock and money, never succeed. Owner rule: "max one auto-retry, only
+ *  on a proven objective failure, never on taste." */
+export function isRetryableVeoFailure(error: string | undefined): boolean {
+  const e = String(error || '');
+  if (!e) return false;
+  if (/PERMISSION_DENIED|IAM_PERMISSION_DENIED|GOOGLE_VERTEX_SA_JSON|service.?account|credential/i.test(e)) return false;
+  if (/is unavailable \(NOT_FOUND\)|retired|not granted/i.test(e)) return false;
+  if (/input image was REJECTED|NO designed still/i.test(e)) return false;
+  if (/media filtered|raiMediaFiltered/i.test(e)) return false;
+  if (/API_KEY_SERVICE_BLOCKED/i.test(e)) return false;
+  return true;
+}
+/** FIT a motion take to its scene's planned narration window — the narration-sync
+ *  guarantee for whole-video Veo motion.
+ *
+ *  Veo only sells 4|6|8 seconds and the planner's dissolve-compensated scene
+ *  windows are NOT on that grid (a 5-scene 30s plan gives ~6.8s scenes), so a take
+ *  is always slightly the wrong length. Two bad answers, one good one:
+ *    - pad the tail with a cloned frame (tpad) → the picture FREEZES for the
+ *      difference: exactly the "five clips stapled together" look the owner vetoed;
+ *    - leave it short → picture and narration drift apart.
+ *    - stretch with setpts → the motion CONTINUES, speed changes by the ratio
+ *      (6.0s take → 6.8s slot = 13% slower, not perceptible on a product shot) and
+ *      the clip lands EXACTLY on its window.
+ *  So: trim when the take is long enough, stretch when it is short, never pad.
+ *  Pure FFmpeg; zero paid seconds. */
+export function fitClipToDuration(input: string, targetSec: number): Promise<void> {
+  const t = Math.max(0.1, Number(targetSec) || 0.1);
+  const out = `${input}.fit.mp4`;
+  const probeSeconds = (f: string): number => {
+    try {
+      const d = execFileSync('ffprobe', ['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1', f], { maxBuffer: 1024 * 1024 }).toString().trim();
+      const n = parseFloat(d);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch { return 0; }
+  };
+  const have = probeSeconds(input);
+  // Long enough (or unmeasurable) → frame-accurate trim to the window.
+  if (!have || have >= t - 0.02) {
+    return sliceSoraTake(input, out, 0, t).then(() => { fs.renameSync(out, input); });
+  }
+  // Short → slow the take to exactly the window, then re-cadence to 30fps.
+  const ratio = t / have;
+  return new Promise((resolve, reject) => {
+    execFile('ffmpeg', [
+      '-y', '-i', input,
+      '-vf', `setpts=PTS*${ratio.toFixed(6)},fps=30`,
+      '-t', String(t),
+      '-an',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      out,
+    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      if (err) reject(new Error('ffmpeg fit exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      else {
+        try { fs.renameSync(out, input); resolve(); }
+        catch (e) { reject(e); }
+      }
+    });
+  });
+}
 /** MEASURED-TRUTH NARRATION END (task 42ff404a — owner Faceless 2bd309e3 tripped
  *  NARRATION_OVERLAP_INVARIANT because the LIVE planner sizes scene windows from the
  *  word-count estimate while real GPT-audio narration is longer). Deterministic,
@@ -758,6 +830,27 @@ const MAX_SCENES = 60;
 /** Bounded parallelism for scene generation — a 3-min (15–30 scene) video must NOT fire
  *  that many concurrent Sora/gpt-audio calls (rate limits, cost spike, memory). */
 const SCENE_CONCURRENCY = 3;
+/**
+ * WHOLE-VIDEO VEO MOTION (owner Nov 2): every scene of a Scene video now gets its
+ * own Veo call, so a 5-scene video is FIVE calls. Windows are independent and each
+ * one's operation name is persisted BEFORE it is polled (exactly-once), so a
+ * bounded number may run at once.
+ *   MEASURED, not estimated: one 4s / 720p / 9:16 image-to-video call took
+ *   54.7s end to end on 2026-11-02 (token 0.14s, create 0.62s, 10 polls at 5s).
+ *   Five SEQUENTIAL 6s calls would be ~5 minutes and would blow the old per-span
+ *   deadline; three at a time fits comfortably.
+ *   3 is also the ceiling that keeps the pre-pass's still renders inside the box.
+ */
+const VEO_WINDOW_CONCURRENCY = 3;
+/** Initial call + EXACTLY ONE retry, and only on a proven objective failure. */
+const VEO_WINDOW_MAX_ATTEMPTS = 2;
+/**
+ * Motion pre-pass deadline, sized from the MEASURED 54.7s/call: 5 windows at
+ * concurrency 3 = 2 waves (~2 min of Veo) + up to 5 stills at the 300s gpt-image
+ * window in the worst case. 12 minutes is generous and still well inside a
+ * Railway request — the old SCENE_DEADLINE_MS (7 min) was sized for TWO windows.
+ */
+const VEO_PREPASS_DEADLINE_MS = 12 * 60 * 1000;
 /** Per-scene provider deadline (unchanged from prior behaviour). */
 const SCENE_DEADLINE_MS = 7 * 60 * 1000;
 
@@ -1260,27 +1353,86 @@ export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []):
   }
   return spans;
 }
-/** VEO MOTION WINDOW BUDGET (owner Sep 18 — Sora → Veo Lite): each motion WINDOW of a
- *  Scene plan becomes its OWN Veo call of <=6s (Lite enum 4|6|8), exactly-once per
- *  window. Total paid motion per Scene video is capped at VEO_MOTION_BUDGET_SECONDS
- *  (12s = 2x6s calls ~= $0.60 for a 30s video — the owner-approved canonical Scene
- *  bill). Windows beyond the budget are demoted back to stills (front windows first:
- *  planMotionWindows already treats the END of a run as least important — it shrinks
- *  and truncates from the END), so the persisted plan, scene visualTypes and span
- *  metadata all agree with what the worker will actually pay for. Pure + deterministic.
- *  Runs for mode==='scene' only (Faceless + Twin-15s stay zero-video-API). */
+/** VEO WHOLE-VIDEO MOTION (owner, Nov 2 — "lets make the whole 30 seconds motion
+ *  with Veo for scene based", "it needs to be 6 seconds calls", "needs to make sure
+ *  that it makes the video as clients want").
+ *
+ *  This REPLACES the 12s / 2-window cap introduced in PR #89 (Sep 21). The rule now:
+ *    - EVERY scene of a Scene video gets its OWN motion window. There is no
+ *      "important windows only" election — if a scene is on screen, it moves.
+ *    - Each window is ONE Veo call sized by nearestLegalVeoSeconds(scene duration):
+ *      <6s → 4s, 6.0–6.9s → 6s, >=7s → 8s. A short beat never buys 6s it cannot
+ *      use; a long beat is not squeezed into a take that is too short.
+ *    - Total billed motion NEVER exceeds the video's own planned duration, and never
+ *      exceeds VEO_MOTION_BUDGET_SECONDS (30s = 5 × 6s). A 5-scene 30s video is
+ *      5 calls totalling 30s; a 3-scene 18s video is 3 calls totalling 18s.
+ *  Pure + deterministic. Faceless and Twin never reach this (zero Veo spend).
+ */
+export function planVeoSceneWindows(script: SceneScript[]): MotionWindow[] {
+  if (!script.length) return [];
+  const plannedTotal = script.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
+  // The whole video is the budget, but never more than 30s of paid motion.
+  const ceiling = Math.min(VEO_MOTION_BUDGET_SECONDS, Math.max(0, Math.ceil(plannedTotal)));
+  const windows: MotionWindow[] = [];
+  let spent = 0;
+  let offset = 0;
+  for (const scene of script) {
+    if (windows.length >= VEO_MAX_MOTION_WINDOWS) break;
+    let seconds = nearestLegalVeoSeconds(Number.isFinite(scene.duration) ? scene.duration : VEO_CALL_SECONDS);
+    // Step down to the nearest legal duration that still fits the ceiling.
+    while (seconds > 4 && spent + seconds > ceiling) seconds = seconds === 8 ? 6 : 4;
+    if (spent + seconds > ceiling) break; // no legal duration fits — this scene stays a still
+    windows.push({ sceneNumber: scene.sceneNumber, motionStartSeconds: offset, motionSeconds: seconds });
+    spent += seconds;
+    offset += seconds;
+  }
+  return windows;
+}
+/** ONE span for the whole video: with per-scene windows the span is just the
+ *  container that carries them (soraBlock 0), so the persisted `spans` metadata
+ *  shape stays unchanged for every existing reader. */
+export function planVeoSceneSpans(script: SceneScript[]): SoraSpan[] {
+  const windows = planVeoSceneWindows(script);
+  if (!windows.length) return [];
+  const run = script.filter((s) => windows.some((w) => w.sceneNumber === s.sceneNumber));
+  return [{
+    soraBlock: 0,
+    sceneNumbers: windows.map((w) => w.sceneNumber),
+    totalSeconds: windows.reduce((a, w) => a + w.motionSeconds, 0),
+    windows,
+    prompt: buildSpanPrompt(run, undefined, windows),
+  }];
+}
+/** Project the elected windows onto the plan: windowed scenes become `motion`
+ *  (block 0), every other scene becomes a `still`. Keeps the persisted plan,
+ *  the scene visualTypes and the worker's paid calls in exact agreement. */
+export function applyVeoSceneMotion(script: SceneScript[], spans: SoraSpan[]): SceneScript[] {
+  const motion = new Set<number>();
+  for (const span of spans) for (const w of span.windows ?? []) motion.add(w.sceneNumber);
+  return script.map((s) => motion.has(s.sceneNumber)
+    ? { ...s, visualType: 'motion' as const, soraBlock: 0 }
+    : { ...s, visualType: 'still' as const, soraBlock: undefined });
+}
+/** HARD CAP on paid motion: at most `maxWindows` windows AND at most
+ *  `maxSeconds` of billed motion per video (default 5 × 6s = 30s). Anything over
+ *  is deterministically demoted back to a still — front windows first, matching
+ *  planMotionWindows' least-important-tail semantics — so the persisted plan, the
+ *  scene visualTypes and the worker's per-window takes always agree. */
 export function capVeoMotionWindows(
   script: SceneScript[],
   spans: SoraSpan[],
-  maxWindows: number = Math.max(1, Math.floor(VEO_MOTION_BUDGET_SECONDS / VEO_CALL_SECONDS)),
+  maxWindows: number = VEO_MAX_MOTION_WINDOWS,
+  maxSeconds: number = VEO_MOTION_BUDGET_SECONDS,
 ): { script: SceneScript[]; spans: SoraSpan[] } {
   if (!spans.length) return { script, spans };
   const demoted = new Set<number>();
   let kept = 0;
+  let spent = 0;
   const capped = spans
     .map((span) => {
       const windows = (span.windows ?? []).filter((w) => {
-        if (kept < maxWindows) { kept += 1; return true; }
+        const secs = Number.isFinite(w.motionSeconds) ? w.motionSeconds : VEO_CALL_SECONDS;
+        if (kept < maxWindows && spent + secs <= maxSeconds) { kept += 1; spent += secs; return true; }
         demoted.add(w.sceneNumber);
         return false;
       });
@@ -2642,14 +2794,15 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // planMotionWindows' least-important-tail semantics) so the persisted plan, span
     // metadata and the worker's per-window Veo takes all agree. Faceless (zero-video-API
     // hard lock) and Twin never reach this step.
-    let spanPlans = mode === 'scene'
-      ? planSoraSpans(planned, extractSoraBlockPrompts(generatedScript || {}, budget))
-      : [];
-    if (mode === 'scene' && spanPlans.length) {
-      const cap = capVeoMotionWindows(planned, spanPlans);
-      spanPlans = cap.spans;
-      planned.splice(0, planned.length, ...cap.script);
-      trace(`veo_window_cap project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} demotedToStill=${planned.filter(s => s.visualType !== 'motion').length}`);
+    // WHOLE-VIDEO MOTION (owner Nov 2): every scene gets its own Veo window, and the
+    // motion budget is the whole video (capped at 30s). The old Sora-shaped span
+    // election (ONE contiguous <=16s take per block, "important windows only") is no
+    // longer used for Scene mode: a scene that is on screen always moves.
+    let spanPlans = mode === 'scene' ? capVeoMotionWindows(planned, planVeoSceneSpans(planned)).spans : [];
+    if (mode === 'scene') {
+      planned.splice(0, planned.length, ...applyVeoSceneMotion(planned, spanPlans));
+      const motionSeconds = spanPlans.reduce((a, sp) => a + sp.windows.reduce((b, w) => b + w.motionSeconds, 0), 0);
+      trace(`veo_whole_video_motion project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} motionSeconds=${motionSeconds} stillScenes=${planned.filter((s) => s.visualType !== 'motion').length} usd=${veoCostUsd(motionSeconds)}`);
     }
     const motionWindowByScene = new Map<number, MotionWindow>();
     for (const span of spanPlans) for (const w of span.windows) motionWindowByScene.set(w.sceneNumber, w);
@@ -2862,25 +3015,32 @@ if (!skipGeneration) {
       const spanPlans: SoraSpan[] = Array.isArray(pmeta.spans) ? pmeta.spans : [];
       const takeRegistry = new Map<number, string>();
       const failedSpanSceneIds = new Set<string>();
+      // Context the motion pre-pass needs per scene: the scene row (its visual
+      // prompt) and the ONE uploaded photo this scene is allowed to use.
+      const sceneByNumber = new Map<number, any>(scenes.map((s: any) => [s.sceneNumber, s]));
+      const stillSourceFor = (sceneNumber: number): string | undefined =>
+        sourceImageTargetScenes.includes(sceneNumber) ? heroSource : undefined;
       for (const span of spanPlans) {
         try {
           const takes = await withDeadline(
-            this.generateVeoTakes(span, projectId, heroSource),
-            SCENE_DEADLINE_MS,
-            `Veo span ${span.soraBlock}`,
+            this.generateVeoTakes(span, projectId, heroSource, sceneByNumber, stillSourceFor),
+            VEO_PREPASS_DEADLINE_MS,
+            `Veo motion windows ${span.soraBlock}`,
           );
           for (const [sceneNumber, takePath] of takes) takeRegistry.set(sceneNumber, takePath);
-          trace(`veo_span_takes_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takes.size}`);
+          trace(`veo_windows_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takes.size}`);
         } catch (spanError: any) {
-          trace(`veo_span_take_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
+          trace(`veo_window_takes_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
           const ids = span.sceneNumbers
-            .map(n => scenes.find(s => s.sceneNumber === n)?.id)
+            .map(n => scenes.find((s: any) => s.sceneNumber === n)?.id)
             .filter((id): id is string => Boolean(id));
           for (const id of ids) failedSpanSceneIds.add(id);
           for (const id of ids) {
             await db.update(schema.videoScenes).set({
               status: 'failed',
-              metadata: mergeCompletionMetadata(await liveSceneMetadata(id, {}), { error: `Veo span take ${span.soraBlock} failed: ${spanError?.message}` }),
+              // The REAL reason (our credentials vs the missing service account vs a
+              // retired model vs a rejected input image) reaches the scene record.
+              metadata: mergeCompletionMetadata(await liveSceneMetadata(id, {}), { error: `Veo motion window failed: ${spanError?.message}` }),
               updatedAt: new Date(),
             }).where(eq(schema.videoScenes.id, id));
           }
@@ -3281,17 +3441,15 @@ else {
         const motionWindow = Number((scene.metadata as any)?.motionSeconds ?? NaN);
         if (spanTakePath && fs.existsSync(spanTakePath)) {
           if ((scene.metadata as any)?.veoWindowReady) {
-            // VEO PER-WINDOW (owner Sep 18 — Sora → Veo Lite): the take path IS this
-            // scene's already-window-sliced Veo clip (generateOneVeoWindow sliced the
-            // 6s call to the scene's important-seconds window). Hold (tpad
-            // clone-last-frame) to the scene's full timeline slot so the planned
-            // length + narration window are preserved — zero extra paid seconds.
-            const sliceWindow = Number.isFinite(motionWindow) ? motionWindow : (scene.duration || 3);
-            if (Number.isFinite(motionWindow) && sliceWindow < (scene.duration || 3) - 0.05) {
-              await padClipToDuration(spanTakePath, scene.duration || 3);
-            }
+            // WHOLE-VIDEO VEO MOTION (owner Nov 2): the take IS this scene's own Veo
+            // clip, and generateOneVeoWindow already fitted it to the scene's planned
+            // narration window (trim, or a gentle slow-down — never a frozen tail).
+            // Re-assert the exact length here as a cheap guarantee that picture and
+            // narration cannot drift.
+            const sceneSeconds = scene.duration || 3;
+            await fitClipToDuration(spanTakePath, sceneSeconds);
             localPath = spanTakePath;
-            trace(`scene_veo_window_ready id=${scene.id} win=${sliceWindow}s pad=${Math.max(0, Math.round(((scene.duration || 3) - sliceWindow) * 10) / 10)}s`);
+            trace(`scene_veo_window_ready id=${scene.id} window=${sceneSeconds}s`);
           } else {
             // One 16s take per soraBlock (owner Sep 14), sliced CONTIGUOUSLY into each
             // scene's IMPORTANT-SECONDS window [motionStart, +motionSeconds) — 3×5s →
@@ -3318,16 +3476,20 @@ else {
           throw new Error(`Motion span take ${spanBlock} missing (span generation failed) — regenerate in Studio`);
         } else {
           // LEGACY path (in-flight pre-span projects / single-scene regeneration):
-          // Veo 3.1 Lite — one 6s call per scene, sliced to the scene's window.
+          // Veo 3.1 Lite — one call per scene, starting from the scene's designed
+          // still and fitted to the scene's own narration window.
           let veoLocalPath: string | undefined;
           let veoLastError: string | undefined;
-          for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
+          const legacySceneSeconds = Number.isFinite(scene.duration) ? scene.duration : VEO_CALL_SECONDS;
+          const legacyBilledSeconds = nearestLegalVeoSeconds(legacySceneSeconds);
+          const legacyStillPath = await this.renderSceneStillForMotion(scene, scene.projectId, sourceImage);
+          for (let attempt = 1; attempt <= VEO_WINDOW_MAX_ATTEMPTS; attempt++) {
             if (attempt > 1) {
+              if (!isRetryableVeoFailure(veoLastError)) break;
               const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
-              trace(`scene_veo_retry_${attempt - 1} id=${scene.id} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+              trace(`scene_veo_retry_${attempt - 1} id=${scene.id} attempt=${attempt}/${VEO_WINDOW_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
-            const windowSeconds = Math.min(VEO_CALL_SECONDS, Math.max(1, Math.round(scene.duration || VEO_CALL_SECONDS)));
             sceneVeoOperation = (scene.metadata as any)?.veoJob?.operation ?? sceneVeoOperation;
             const veoResult = await veoVideoService.generateSceneVideo({
               prompt: `${subjectPrompt} — One continuous single take of this scene's content: no cuts, no scene changes, one fluid motion sequence, same subject throughout.`,
@@ -3337,24 +3499,25 @@ else {
                 sceneVeoOperation = operation;
                 void this.persistSceneVeoOperation(scene.id, operation);
               },
-              durationSeconds: VEO_CALL_SECONDS,
+              durationSeconds: legacyBilledSeconds,
+              imagePath: legacyStillPath,
             });
             if (veoResult.operationName) sceneVeoOperation = veoResult.operationName;
             if (veoResult.success && veoResult.videoPath) {
-              const sliceWindow = Math.min(windowSeconds, veoResult.billedSeconds ?? VEO_CALL_SECONDS);
               const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
               fs.mkdirSync(sliceDir, { recursive: true });
               const slicePath = path.join(sliceDir, `veo-legacy-scene-${scene.sceneNumber}.mp4`);
-              await sliceSoraTake(veoResult.videoPath, slicePath, 0, sliceWindow);
-              if (sliceWindow < (scene.duration || 3) - 0.05) await padClipToDuration(slicePath, scene.duration || 3);
+              await sliceSoraTake(veoResult.videoPath, slicePath, 0, veoResult.billedSeconds ?? legacyBilledSeconds);
+              await fitClipToDuration(slicePath, legacySceneSeconds);
+              await this.recordVeoCost(scene.projectId, `scene${scene.sceneNumber}`, veoResult.billedSeconds ?? legacyBilledSeconds);
               veoLocalPath = slicePath;
-              trace(`scene_veo_legacy_ok id=${scene.id} win=${sliceWindow}s billed=${veoResult.billedSeconds}s`);
+              trace(`scene_veo_legacy_ok id=${scene.id} billed=${veoResult.billedSeconds}s scene=${legacySceneSeconds}s`);
               break;
             }
             veoLastError = veoResult.error || 'no video path';
             trace(`scene_veo_attempt_failed id=${scene.id} attempt=${attempt} error=${veoLastError}`);
           }
-          if (!veoLocalPath) throw new Error(veoLastError || 'Veo scene generation failed');
+          if (!veoLocalPath) throw new Error(`Veo scene ${scene.sceneNumber} failed after ${VEO_WINDOW_MAX_ATTEMPTS} attempt(s): ${veoLastError || 'no error detail'}`);
           localPath = veoLocalPath;
         }
       }
@@ -3391,37 +3554,82 @@ else {
    *  metadata (soraJobs[block], shape {id, status, createdAt}) the moment the API
    *  returns it, and a retry (even
    *  after a process restart) RESUMES that id via existingVideoId — never re-POST. */
-  /** Generate Veo takes for EVERY motion window of a span (owner Sep 18 — Sora → Veo
-   *  Lite): each window is its OWN Veo call (6s — Lite enum 4|6|8) sliced to the
-   *  window's important seconds, so the returned Map<sceneNumber, takePath> gives each
-   *  motion scene a ready-to-use clip (tpad-hold fills the scene's fuller timeline slot
-   *  downstream in renderClip). EXACTLY-ONCE per window (owner spec): the operation name
-   *  is persisted in project metadata (metadata.veoJobs[sceneKey] = {operation, status,
-   *  createdAt}) the moment the API returns it; retries (even after a process restart)
-   *  RESUME that operation via existingOperationName — never a second paid POST. */
-  private async generateVeoTakes(span: SoraSpan, projectId: string, heroSource?: string): Promise<Map<number, string>> {
+  /** Generate ONE Veo take per motion window, starting each clip from the scene's
+   *  DESIGNED STILL (owner Nov 2: "needs to make sure that it makes the video as
+   *  clients want"). Every scene is its own window, so a 5-scene video is 5 calls.
+   *  EXACTLY-ONCE per window: the operation name is persisted in project metadata
+   *  (metadata.veoJobs[sceneKey]) the moment the API returns it; a retry (even after
+   *  a process restart) RESUMES that operation — never a second paid POST.
+   *  WALL CLOCK: windows are independent, so up to VEO_WINDOW_CONCURRENCY run at
+   *  once (measured 54.7s per 4s call — five sequential calls would not fit the
+   *  deadline). A single window failing does NOT kill the others: the successful
+   *  takes are returned and the missing scenes fail individually downstream. */
+  private async generateVeoTakes(
+    span: SoraSpan,
+    projectId: string,
+    heroSource?: string,
+    sceneByNumber?: Map<number, any>,
+    sourceImageFor?: (sceneNumber: number) => string | undefined,
+  ): Promise<Map<number, string>> {
     const takes = new Map<number, string>();
     const windows = span.windows ?? [];
     if (!windows.length) return takes;
-    for (const w of windows) {
+    const outcomes = await mapLimit(windows, VEO_WINDOW_CONCURRENCY, async (w) => {
       const sceneKey = `block${span.soraBlock}-scene${w.sceneNumber}`;
-      const takePath = await this.generateOneVeoWindow(span, w, projectId, sceneKey, heroSource);
-      takes.set(w.sceneNumber, takePath);
+      const scene = sceneByNumber?.get(w.sceneNumber);
+      try {
+        const takePath = await this.generateOneVeoWindow(
+          span, w, projectId, sceneKey, heroSource, scene, sourceImageFor?.(w.sceneNumber),
+        );
+        return { sceneNumber: w.sceneNumber, takePath, error: undefined as string | undefined };
+      } catch (err: any) {
+        return { sceneNumber: w.sceneNumber, takePath: undefined as string | undefined, error: String(err?.message || err) };
+      }
+    });
+    const failures = outcomes.filter((o) => !o.takePath);
+    for (const o of outcomes) if (o.takePath) takes.set(o.sceneNumber, o.takePath);
+    if (failures.length) {
+      trace(`veo_windows_failed project=${projectId} block=${span.soraBlock} failed=[${failures.map((f) => f.sceneNumber).join(',')}] ok=${takes.size}`);
+      // Nothing succeeded → surface the REAL reason for the whole span (credentials
+      // vs service account vs retired model vs rejected image), never a bare count.
+      if (takes.size === 0) {
+        throw new Error(failures.map((f) => f.error).filter(Boolean).join(' | ') || 'all Veo motion windows failed');
+      }
     }
     return takes;
   }
-  /** Generate ONE Veo window take with exactly-once resume + the same retry/backoff
-   *  policy the legacy Sora span path used. The 6s take is sliced to THIS window's
-   *  important seconds (tpad-hold fills the rest of the scene below — zero extra paid
-   *  seconds). Provider tag 'veo-3.1-lite' for cost tracking (never in UI). */
-  private async generateOneVeoWindow(span: SoraSpan, w: MotionWindow, projectId: string, sceneKey: string, heroSource?: string): Promise<string> {
+  /** Generate ONE Veo window take: render the scene's designed still, send it as the
+   *  image-to-video FIRST FRAME, then fit the returned clip to the scene's planned
+   *  narration window (trim or gentle slow-down — never a frozen tail). At most ONE
+   *  retry, and only on a proven objective failure. */
+  private async generateOneVeoWindow(
+    span: SoraSpan,
+    w: MotionWindow,
+    projectId: string,
+    sceneKey: string,
+    heroSource?: string,
+    scene?: any,
+    sceneSourceImage?: string,
+  ): Promise<string> {
     const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
-    const windowSeconds = Math.max(1, Math.min(w.motionSeconds || VEO_CALL_SECONDS, VEO_CALL_SECONDS));
+    // What the call COSTS is the legal Veo duration; what the scene NEEDS is its own
+    // planned narration window. They are deliberately different numbers.
+    const billedSeconds = Number.isFinite(w.motionSeconds) ? w.motionSeconds : VEO_CALL_SECONDS;
+    const sceneSeconds = Number.isFinite(scene?.duration) ? scene.duration : billedSeconds;
+    // IMAGE-TO-VIDEO: the scene's designed still (brief + the client's uploaded photo,
+    // exactly as the still renderer builds it) is the clip's FIRST FRAME. If the still
+    // cannot be produced this throws LOUD — never a silent text-to-video downgrade.
+    const stillPath = await this.renderSceneStillForMotion(scene, projectId, sceneSourceImage);
     let persistedOp: string | undefined = await this.loadVeoTakeOperation(projectId, sceneKey);
-    for (let attempt = 1; attempt <= SCENE_SORA_MAX_ATTEMPTS; attempt++) {
+    let lastError: string | undefined;
+    for (let attempt = 1; attempt <= VEO_WINDOW_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
+        if (!isRetryableVeoFailure(lastError)) {
+          trace(`veo_window_no_retry project=${projectId} ${sceneKey} reason=deterministic_failure`);
+          break;
+        }
         const backoffMs = SCENE_SORA_RETRY_BACKOFF_MS[attempt - 1] || 10_000;
-        trace(`veo_window_retry_${attempt - 1} project=${projectId} ${sceneKey} attempt=${attempt}/${SCENE_SORA_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
+        trace(`veo_window_retry_${attempt - 1} project=${projectId} ${sceneKey} attempt=${attempt}/${VEO_WINDOW_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
       const result = await veoVideoService.generateSceneVideo({
@@ -3432,23 +3640,96 @@ else {
           persistedOp = operation;
           void this.persistVeoTakeOperation(projectId, sceneKey, operation);
         },
-        durationSeconds: VEO_CALL_SECONDS,
+        durationSeconds: billedSeconds,
+        imagePath: stillPath,
       });
       if (result.operationName) persistedOp = result.operationName;
       if (result.success && result.videoPath) {
         const dir = path.join(process.cwd(), 'temp', 'scene-projects', projectId);
         fs.mkdirSync(dir, { recursive: true });
         const slicedPath = path.join(dir, `veo-${sceneKey}.mp4`);
-        // The 6s take is sliced to THIS window's important seconds; tpad-hold fills the
-        // rest of the scene's timeline slot downstream (zero extra paid seconds).
-        await sliceSoraTake(result.videoPath, slicedPath, 0, windowSeconds);
+        await sliceSoraTake(result.videoPath, slicedPath, 0, billedSeconds);
+        // NARRATION SYNC: land the picture EXACTLY on the scene's planned window.
+        await fitClipToDuration(slicedPath, sceneSeconds);
+        await this.recordVeoCost(projectId, sceneKey, result.billedSeconds ?? billedSeconds);
         void this.markVeoJobStatus(projectId, sceneKey, 'completed');
-        trace(`veo_window_ready project=${projectId} ${sceneKey} window=${windowSeconds}s billed=${result.billedSeconds}s`);
+        trace(`veo_window_ready project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
         return slicedPath;
       }
-      trace(`veo_window_attempt_failed project=${projectId} ${sceneKey} attempt=${attempt} error=${result.error || 'no video path'} op=${persistedOp || 'none'}`);
+      lastError = result.error || 'no video path';
+      trace(`veo_window_attempt_failed project=${projectId} ${sceneKey} attempt=${attempt} error=${lastError} op=${persistedOp || 'none'}`);
     }
-    throw new Error(`Veo window ${sceneKey} failed after ${SCENE_SORA_MAX_ATTEMPTS} attempts`);
+    // PROPAGATE THE REAL REASON (owner Oct 31): the client must be able to tell
+    // "our credentials/role", "the service account is missing" and "the model was
+    // retired" apart. The old throw dropped the underlying error entirely.
+    throw new Error(`Veo window ${sceneKey} failed after ${VEO_WINDOW_MAX_ATTEMPTS} attempt(s): ${lastError || 'no error detail'}`);
+  }
+  /** Render (or reuse) the scene's DESIGNED STILL — the frame the motion clip must
+   *  begin from. Same rules as the still path in processScene: a direct image URL is
+   *  used pixel-exact, otherwise gpt-image-2 draws it from the scene's visual prompt
+   *  with the client's uploaded photo as the reference subject. Cached on the scene
+   *  metadata so a retry/regeneration never pays for the still twice, and so the
+   *  record shows WHICH frame the motion began from. */
+  private async renderSceneStillForMotion(scene: any, projectId: string, sourceImage?: string): Promise<string> {
+    if (!scene) throw new Error('scene record missing — cannot render the still the motion clip must start from');
+    const cached = String((scene.metadata as any)?.motionStillPath || '');
+    if (cached && fs.existsSync(cached)) return cached;
+    const visualPrompt = String(scene.visualPrompt || '');
+    const usableSource = sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined;
+    let stillPath: string;
+    let sourceImageOutcome: SourceImageOutcome | undefined;
+    if (isDirectImageUrl(visualPrompt)) {
+      stillPath = await ensureLocalFile(visualPrompt, `motion still scene ${scene.sceneNumber}`);
+    } else {
+      const result = await renderingEngine.renderImage(
+        withSourceSubject(visualPrompt, usableSource),
+        undefined,
+        usableSource,
+        { size: '1024x1792', noText: true },
+      );
+      sourceImageOutcome = result.sourceImage;
+      if (!result.success || !result.imageUrl) throw new Error(result.error || 'GPT Image 2 failed for the motion still');
+      stillPath = await ensureLocalFile(result.imageUrl, `motion still scene ${scene.sceneNumber}`);
+    }
+    try {
+      const [row] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, scene.id)).limit(1);
+      const meta = ((row?.metadata as any) || {});
+      await db.update(schema.videoScenes).set({
+        metadata: {
+          ...meta,
+          motionStillPath: stillPath,
+          // "Anything the client uploads must actually change the output" — the
+          // motion path records the same source-image truth the still path does.
+          ...(sourceImageOutcome ? {
+            sourceImageUsed: sourceImageOutcome.used,
+            sourceImageReference: sourceImageOutcome.reference,
+            ...(sourceImageOutcome.reason ? { sourceImageSkippedReason: sourceImageOutcome.reason } : {}),
+          } : {}),
+        },
+        updatedAt: new Date(),
+      }).where(eq(schema.videoScenes.id, scene.id));
+    } catch { /* best-effort */ }
+    return stillPath;
+  }
+  /** COST ACCOUNTING: billed seconds and dollars per video, accumulated on the
+   *  project under metadata.motionCost so real motion spend is observable instead of
+   *  inferred. Keyed BY WINDOW, so a retry or a resume of the same window can never
+   *  double-count — a video that fails halfway reports exactly what it spent. */
+  private async recordVeoCost(projectId: string, sceneKey: string, billedSeconds: number): Promise<void> {
+    try {
+      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+      if (!row) return;
+      const meta = ((row.metadata as any) || {});
+      const prev = (meta.motionCost as { perWindow?: Record<string, number> }) || {};
+      const perWindow: Record<string, number> = { ...(prev.perWindow || {}) };
+      if (perWindow[sceneKey] === undefined) perWindow[sceneKey] = billedSeconds;
+      const total = Object.values(perWindow).reduce((a, b) => a + (Number(b) || 0), 0);
+      const calls = Object.keys(perWindow).length;
+      await db.update(schema.videoProjects)
+        .set({ metadata: { ...meta, motionCost: { billedSeconds: total, calls, usd: veoCostUsd(total), perWindow } }, updatedAt: new Date() })
+        .where(eq(schema.videoProjects.id, projectId));
+      trace(`veo_cost project=${projectId} window=${sceneKey} billed=${billedSeconds}s total=${total}s calls=${calls} usd=${veoCostUsd(total)}`);
+    } catch { /* best-effort */ }
   }
   /** Persist a Veo window's operation name in project metadata under `veoJobs[sceneKey]`
    *  = {operation, status:'in_progress', createdAt} BEFORE polling (durable, exactly-once
