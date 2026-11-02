@@ -13,10 +13,13 @@ import {
   VEO_PROVIDER_TAG,
   VEO_CALL_SECONDS,
   VEO_MOTION_BUDGET_SECONDS,
+  VEO_MOTION_PLAN_CEILING_SECONDS,
   VEO_MAX_MOTION_WINDOWS,
   nearestLegalVeoSeconds,
+  planVeoClipDurations,
   veoCostUsd,
 } from './veoVideoService.js';
+import { planMatchCutCuts, JOIN_GOOD_PSNR, JOIN_VISIBLE_PSNR, type MatchCutReport } from './sceneJoinService.js';
 import { renderingEngine, type SourceImageOutcome } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -257,7 +260,7 @@ export async function ensureLocalFile(
  * The caller logs the report and can attach it to the draft payload so the GPT-5.2
  * exception-handler router (decision-only, no pixel/audio edits) can SELECT a fix.
  */
-export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Record<string, any> {
+export function runRenderQC(media: string, opts?: { allowSilent?: boolean; matchCutJoins?: number }): Record<string, any> {
   const report: Record<string, any> = { ok: true, flags: [] as string[] };
   try {
     const fmt = execFileSync('ffprobe', [
@@ -296,7 +299,11 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean }): Re
       // ffmpeg writes "Parsed_select" once per selected frame to stderr; count them.
       const hardCuts = (scene.match(/Parsed_select/g) || []).length;
       report.hardCuts = hardCuts;
-      if (hardCuts > 1) { report.ok = false; report.flags.push('hard_cut_detected'); }
+      // MATCH-CUT (Scene mode): the boundary IS a cut — no transition is applied on
+      // purpose. One detected boundary per join is expected; anything beyond that is
+      // still a defect. Faceless/Twin (xfade) keep the original 1-cut allowance.
+      const cutAllowance = Math.max(1, opts?.matchCutJoins ?? 0);
+      if (hardCuts > cutAllowance) { report.ok = false; report.flags.push('hard_cut_detected'); }
     } catch { report.hardCuts = -1; }
     // silencedetect (audio gap > 1s) — cheap
     try {
@@ -530,6 +537,9 @@ export function isRetryableVeoFailure(error: string | undefined): boolean {
   if (/PERMISSION_DENIED|IAM_PERMISSION_DENIED|GOOGLE_VERTEX_SA_JSON|service.?account|credential/i.test(e)) return false;
   if (/is unavailable \(NOT_FOUND\)|retired|not granted/i.test(e)) return false;
   if (/input image was REJECTED|NO designed still/i.test(e)) return false;
+  // A refused JOIN TARGET (`lastFrame`) is deterministic too: retrying spends money
+  // to be told the same thing, and the join will not line up either way.
+  if (/LAST-FRAME image was REJECTED|NO readable join target/i.test(e)) return false;
   if (/media filtered|raiMediaFiltered/i.test(e)) return false;
   if (/API_KEY_SERVICE_BLOCKED/i.test(e)) return false;
   return true;
@@ -605,7 +615,24 @@ export function measureTrueSpeechEndMs(file: string): number {
   }
   return 0;
 }
-export function concatClips(inputs: string[], output: string): Promise<void> { return new Promise((resolve,reject)=>{
+export interface ConcatOptions {
+  /**
+   * HOW scenes are joined.
+   *   'xfade' (default, Faceless / Twin / legacy) — dissolve the boundary.
+   *   'match-cut' (SCENE MODE, owner Nov 2) — NO TRANSITION AT ALL: each clip's
+   *   edge black is cut out and the two clips are cut on their best-matching frame
+   *   pair, then concatenated. This is what the owner asked for: "cant FFmpeg cut
+   *   out ANY dip inbetween scenes? ... even ending a scene and starting the next
+   *   one with the same image. if there is a 0.4 dip FFmpeg could stitch that out".
+   *   The cross-dissolve she rejected on Oct 12 ("transition flash") is never used.
+   */
+  join?: 'xfade' | 'match-cut';
+  /** Working directory for the join's cut clips (defaults under temp/). */
+  joinWorkDir?: string;
+  /** Short label so join artefacts are identifiable in logs/temp. */
+  joinLabel?: string;
+}
+export function concatClips(inputs: string[], output: string, opts?: ConcatOptions): Promise<MatchCutReport | undefined> { return (async () => {
 
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
   // rendered to the same 1080x1920 / 30fps / yuv420p in renderClip, so they can
@@ -628,7 +655,9 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     const cmd = ffmpeg().input(inputs[0]);
     cmd.outputOptions(['-c:v','libx264','-pix_fmt','yuv420p','-r','30']);
     // single-input re-encode carries all streams (incl. audio) through by default
-    return void cmd.save(output).on('end',()=>resolve()).on('error',reject);
+    return new Promise<MatchCutReport | undefined>((res, rej) => {
+      cmd.save(output).on('end', () => res(undefined)).on('error', rej);
+    });
   }
   const probe = (f: string): { seconds: number; hasAudio: boolean; audioSeconds: number } => {
     try {
@@ -650,12 +679,47 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       return { seconds, hasAudio, audioSeconds };
     } catch { return { seconds: 3, hasAudio: false, audioSeconds: 0 }; }
   };
+  const tr = TR_MS/1000;
+  // ── MATCH-CUT JOIN (SCENE MODE — owner Nov 2) ────────────────────────────
+    // The transition is GONE, not shortened: no xfade, no dip to black, no
+    // cross-dissolve. Before anything is assembled, the join service
+    //   1. cuts any black run off either end of every clip (blackdetect), then
+    //   2. searches the last 0.4s of clip A against the first 0.4s of clip B and
+    //      cuts both on the pair with the smallest frame difference.
+    // The per-join material this removes is the same 800ms the old xfade used to
+    // OVERLAP — so `tr` below becomes the join's CUT ALLOWANCE and the delivered
+    // length arithmetic (and therefore every planner/delivery-band guarantee) is
+    // unchanged: sum(clips) − tr×(n−1) seconds, exactly as before.
+    let matchCutReport: MatchCutReport | undefined;
+    if (opts?.join === 'match-cut') {
+      // The delivered length contract is unchanged: sum(clips) − tr×(n−1). With
+      // match-cut, tr is what each join FOLDS AWAY instead of what it overlaps.
+      const declaredTotal = inputs
+        .map((f) => probe(f).seconds)
+        .reduce((a: number, b: number) => a + b, 0) - tr * Math.max(0, inputs.length - 1);
+      const workDir = opts.joinWorkDir || path.join(process.cwd(), 'temp', 'scene-projects', 'join-cut');
+      const plan = await planMatchCutCuts(inputs, {
+        workDir,
+        targetSeconds: declaredTotal,
+        label: opts.joinLabel,
+      });
+      inputs = plan.paths;
+      matchCutReport = plan.report;
+      const worst = matchCutReport.worstCutPsnr;
+      const line = `join_match_cut clips=${inputs.length} worstPsnr=${worst} visible=${matchCutReport.visibleJoins} blackTrimmed=${matchCutReport.blackTrimmedSeconds}s delivered=${matchCutReport.deliveredSeconds}s target=${matchCutReport.targetSeconds}s`;
+      if (worst < JOIN_VISIBLE_PSNR) console.error(`[MATCH-CUT] JOIN VISIBLE — ${line}`);
+      else if (worst < JOIN_GOOD_PSNR) console.warn(`[MATCH-CUT] join weaker than a true match — ${line}`);
+      else console.log(`[MATCH-CUT] ${line}`);
+    }
+  return new Promise<MatchCutReport | undefined>((resolve, reject) => {
   try {
     // First pass: probe each clip's duration + whether it has an audio track so
     // xfade offsets are exact and audio can be crossfaded and mapped into the final.
     const probes = inputs.map(probe);
     const seconds = probes.map(p => p.seconds);
-    const tr = TR_MS/1000;
+    // With match-cut the neighbours SHARE NO TIME: the audio timeline advances by the
+    // full kept length of every clip, so the overlap term is zero.
+    const trUsed = matchCutReport ? 0 : tr;
     // ── BLACK-FLASH GUARD (owner Sep 17: "0.5s xfade ... flashed black") ─────
     // The old chain set offset+duration == clip end EXACTLY; on MP4s where the
     // container duration is a hair longer than the decodable frame PTS, the fade's
@@ -668,24 +732,37 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
     // narration scheduler below may push tracks later for single-voice, but the
     // delivered length must stay exactly this budget (29.5-30.5s owner band), so
     // totalSec stays anchored to it and the audio clamp keeps speech inside it.
-    const videoTotalMs = Math.round((seconds.reduce((a,b)=>a+b,0) - tr * Math.max(0, inputs.length - 1)) * 1000);
+    const videoTotalMs = Math.round((seconds.reduce((a,b)=>a+b,0) - trUsed * Math.max(0, inputs.length - 1)) * 1000);
     const totalSec = (videoTotalMs / 1000).toFixed(3);
     const filter = [];
     let offsetAcc = 0;
     // Per-input clone-tail pad (video only; audio handled below by acrossfade):
     // [i:v]tpad=...:[i:p] — every input is extended so NO xfade ever reads EOF.
-    for (let i = 0; i < inputs.length; i++) {
-      filter.push(`[${i}:v]tpad=stop_mode=clone:stop_duration=${tailPad}[v${i}p]`);
-    }
-    // xfade chain (VIDEO) over the PADDED labels. IMPORTANT: padding only extends
-    // each input's TAIL (start PTS unchanged), so xfade offsets computed from the
-    // ORIGINAL probed durations stay exact AND the fade-out region always has
-    // real frames to read — deterministic no-black at the boundary.
-    offsetAcc = Math.max(0, seconds[0] - tr);
-    filter.push(`[v0p][v1p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
-    for (let i=2;i<inputs.length;i++){
-      offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
-      filter.push(`[v${i-1}][v${i}p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
+    let videoMapLabel = `[v${inputs.length-1}]`;
+    if (matchCutReport) {
+      // MATCH-CUT: plain concatenation. NOT ONE FRAME of the boundary is blended,
+      // faded or held — the two clips butt up against each other exactly on the
+      // frame pair the search picked. `setsar=1` + `fps` keep the filter's stream
+      // contract identical across inputs (a mismatched PAR is a hard concat error).
+      for (let i = 0; i < inputs.length; i++) {
+        filter.push(`[${i}:v]fps=${30},setsar=1,setpts=PTS-STARTPTS[v${i}p]`);
+      }
+      filter.push(`${inputs.map((_, i) => `[v${i}p]`).join('')}concat=n=${inputs.length}:v=1:a=0[vout]`);
+      videoMapLabel = '[vout]';
+    } else {
+      for (let i = 0; i < inputs.length; i++) {
+        filter.push(`[${i}:v]tpad=stop_mode=clone:stop_duration=${tailPad}[v${i}p]`);
+      }
+      // xfade chain (VIDEO) over the PADDED labels. IMPORTANT: padding only extends
+      // each input's TAIL (start PTS unchanged), so xfade offsets computed from the
+      // ORIGINAL probed durations stay exact AND the fade-out region always has
+      // real frames to read — deterministic no-black at the boundary.
+      offsetAcc = Math.max(0, seconds[0] - tr);
+      filter.push(`[v0p][v1p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v1]`);
+      for (let i=2;i<inputs.length;i++){
+        offsetAcc = Math.max(0, offsetAcc + seconds[i-1] - tr);
+        filter.push(`[v${i-1}][v${i}p]xfade=transition=fadeblack:duration=${tr}:offset=${offsetAcc.toFixed(3)}[v${i}]`);
+      }
     }
     // ── AUDIO: carry each clip's narration through with acrossfade between
     //    consecutive audio-bearing clips (same overlap tr as the video xfade), then
@@ -737,7 +814,9 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       let prevSpeechEndMs = 0;
       for (let i = 0; i < inputs.length; i++) {
         if (!probes[i].hasAudio) { sumPrev += probes[i].seconds; continue; }
-        const videoStartMs = Math.max(0, Math.round((sumPrev - tr * i) * 1000));
+        // trUsed (not tr): with match-cut nothing is overlapped, so scene i starts
+        // exactly where the kept clips before it END. Narration stays on its picture.
+        const videoStartMs = Math.max(0, Math.round((sumPrev - trUsed * i) * 1000));
         const win = probes[i].seconds;
         const trueSpeech = speechEndOf(inputs[i]);
         // Fit = the REAL narration end (+50ms sample guard, capped to the stream
@@ -809,18 +888,20 @@ export function concatClips(inputs: string[], output: string): Promise<void> { r
       const fc = [...filter, ...aParts, ...audioFilter].join(';');
       const args:string[] = [];
       inputs.forEach(i=>{ args.push('-i',i); });
-      args.push('-filter_complex', fc, '-map','[v'+(inputs.length-1)+']');
+      args.push('-filter_complex', fc, '-map', videoMapLabel);
       if (audioMap) { args.push('-map', audioMap, '-c:a','aac','-b:a','128k'); }
       args.push('-t', totalSec, '-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
       execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
-        if(err) reject(new Error('ffmpeg xfade exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
-        else resolve();
+        if(err) reject(new Error((matchCutReport ? 'ffmpeg match-cut concat' : 'ffmpeg xfade') + ' exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
+        else resolve(matchCutReport);
       });
     })();
   } catch(e:any){
-    reject(new Error('xfade concat failed: '+e.message));
+    reject(new Error((opts?.join === 'match-cut' ? 'match-cut join failed: ' : 'xfade concat failed: ')+e.message));
   }
-}); }
+  });
+  })();
+}
 /** Max Scene-Based video duration (3 minutes). Durations above this are rejected at the route. */
 export const MAX_SCENE_DURATION = 180;
 /** Target ~1 scene per 6s of video so every scene stays a short, renderable single Sora shot. */
@@ -1371,18 +1452,38 @@ export function planSoraSpans(script: SceneScript[], soraBlocks: string[] = []):
 export function planVeoSceneWindows(script: SceneScript[]): MotionWindow[] {
   if (!script.length) return [];
   const plannedTotal = script.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
-  // The whole video is the budget, but never more than 30s of paid motion.
-  const ceiling = Math.min(VEO_MOTION_BUDGET_SECONDS, Math.max(0, Math.ceil(plannedTotal)));
+  const sceneCount = Math.min(script.length, VEO_MAX_MOTION_WINDOWS);
+  // THE OWNER'S PLAN (Nov 2): "we can do 4 6 seconds calls and 1 8 second call".
+  // The ceiling is the video's own length plus the 2s join slack, and never more
+  // than 32s of paid motion — the slack is the material the join folds away.
+  const ceiling = Math.min(VEO_MOTION_PLAN_CEILING_SECONDS, Math.max(0, Math.ceil(plannedTotal) + 2));
+  const durations = planVeoClipDurations(sceneCount);
+  // WHICH SCENE GETS THE 8s CLIP: the one with the LONGEST planned narration window,
+  // so the long take is TRIMMED to its slot instead of stretched. Ties go to the last
+  // scene (the 8s clip is the last call in the default plan). The sum never changes.
+  if (durations.length > 1) {
+    let longIndex = durations.length - 1;
+    let best = -1;
+    for (let i = 0; i < sceneCount; i++) {
+      const d = Number.isFinite(script[i].duration) ? script[i].duration : 0;
+      if (d >= best) { best = d; longIndex = i; }
+    }
+    const eightAt = durations.indexOf(8);
+    if (eightAt !== -1 && longIndex !== eightAt) {
+      durations[eightAt] = 6;
+      durations[longIndex] = 8;
+    }
+  }
   const windows: MotionWindow[] = [];
   let spent = 0;
   let offset = 0;
-  for (const scene of script) {
-    if (windows.length >= VEO_MAX_MOTION_WINDOWS) break;
-    let seconds = nearestLegalVeoSeconds(Number.isFinite(scene.duration) ? scene.duration : VEO_CALL_SECONDS);
-    // Step down to the nearest legal duration that still fits the ceiling.
+  for (let i = 0; i < durations.length; i++) {
+    let seconds = durations[i];
+    // Step down to the nearest legal duration that still fits the ceiling (only
+    // reachable for a very short planned video; the 5-scene plan always fits 32s).
     while (seconds > 4 && spent + seconds > ceiling) seconds = seconds === 8 ? 6 : 4;
-    if (spent + seconds > ceiling) break; // no legal duration fits — this scene stays a still
-    windows.push({ sceneNumber: scene.sceneNumber, motionStartSeconds: offset, motionSeconds: seconds });
+    if (spent + seconds > ceiling) break;
+    windows.push({ sceneNumber: script[i].sceneNumber, motionStartSeconds: offset, motionSeconds: seconds });
     spent += seconds;
     offset += seconds;
   }
@@ -1414,7 +1515,8 @@ export function applyVeoSceneMotion(script: SceneScript[], spans: SoraSpan[]): S
     : { ...s, visualType: 'still' as const, soraBlock: undefined });
 }
 /** HARD CAP on paid motion: at most `maxWindows` windows AND at most
- *  `maxSeconds` of billed motion per video (default 5 × 6s = 30s). Anything over
+ *  `maxSeconds` of billed motion per video (default 4 × 6s + 1 × 8s = 32s — the
+ *  30s motion budget plus the 2s join slack the owner's plan buys). Anything over
  *  is deterministically demoted back to a still — front windows first, matching
  *  planMotionWindows' least-important-tail semantics — so the persisted plan, the
  *  scene visualTypes and the worker's per-window takes always agree. */
@@ -1422,7 +1524,7 @@ export function capVeoMotionWindows(
   script: SceneScript[],
   spans: SoraSpan[],
   maxWindows: number = VEO_MAX_MOTION_WINDOWS,
-  maxSeconds: number = VEO_MOTION_BUDGET_SECONDS,
+  maxSeconds: number = VEO_MOTION_PLAN_CEILING_SECONDS,
 ): { script: SceneScript[]; spans: SoraSpan[] } {
   if (!spans.length) return { script, spans };
   const demoted = new Set<number>();
@@ -3201,7 +3303,37 @@ if (!skipGeneration) {
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
-      const assembled0=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length}`); await concatClips(clips,assembled0); trace(`ffmpeg_assembly_end project=${projectId}`);
+      // SCENE MODE JOINS BY MATCH-CUT (owner Nov 2): no transition at all — the
+      // join service removes edge black and cuts each boundary on its best-matching
+      // frame pair. Faceless and Twin keep the dissolve (their stills are unrelated
+      // frames; there is no "same image" for them to meet on).
+      const sceneJoin = pmeta?.mode === 'faceless' ? 'xfade' : 'match-cut';
+      const assembled0=path.join(dir,'final.mp4'); trace(`ffmpeg_assembly_start project=${projectId} clips=${clips.length} join=${sceneJoin}`);
+      const joinReport = await concatClips(clips, assembled0, sceneJoin === 'match-cut'
+        ? { join: 'match-cut', joinWorkDir: path.join(dir, 'join-cut'), joinLabel: `p${String(projectId).slice(0, 8)}` }
+        : undefined);
+      trace(`ffmpeg_assembly_end project=${projectId} delivered=${probeClipSeconds(assembled0).toFixed(2)}s`);
+      if (joinReport) {
+        // THE JOIN'S OWN NUMBERS, ON THE PROJECT — a join that is still visible must
+        // be inspectable, never assumed good. Worst PSNR is the number to watch.
+        trace(`join_quality project=${projectId} worst=${joinReport.worstCutPsnr}dB visible=${joinReport.visibleJoins}/${joinReport.joins.length} black=${joinReport.blackTrimmedSeconds}s delivered=${joinReport.deliveredSeconds}s target=${joinReport.targetSeconds}s joins=[${joinReport.joins.map((j) => `${j.from}->${j.to}:${j.cutPsnr}dB(drop ${j.aTailDropFrames}f+${j.bHeadDropFrames}f)`).join(', ')}]`);
+        if (joinReport.worstCutPsnr < JOIN_VISIBLE_PSNR) {
+          trace(`join_visible_warning project=${projectId} worst=${joinReport.worstCutPsnr}dB — delivered, measured, not hidden`);
+        }
+        try {
+          const [jrow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+          const jmeta = ((jrow?.metadata as any) || {});
+          const motionCost = jmeta.motionCost
+            ? { ...jmeta.motionCost, joinWorstPsnr: joinReport.worstCutPsnr, visibleJoins: joinReport.visibleJoins }
+            : undefined;
+          await db.update(schema.videoProjects).set({
+            metadata: { ...jmeta, joinReport, ...(motionCost ? { motionCost } : {}) },
+            updatedAt: new Date(),
+          }).where(eq(schema.videoProjects.id, projectId));
+        } catch (joinMetaErr: any) {
+          trace(`join_report_persist_failed project=${projectId} error=${joinMetaErr?.message}`);
+        }
+      }
       // RENDER #7 ON-SCREEN OVERLAYS (owner ADJUST #2 — bullet points in writing on
       // screen + EmpireLaunchAI.com pinned at the bottom). OPT-IN via metadata
       // `onScreenOverlays` (normalized at creation); absent = concatClips output,
@@ -3226,7 +3358,7 @@ if (!skipGeneration) {
       // (decision-only, no pixel/audio edits) to choose a deterministic fix from.
       let qc: Record<string, any> | undefined;
       try {
-        qc = runRenderQC(assembled, { allowSilent: voice === 'none' });
+        qc = runRenderQC(assembled, { allowSilent: voice === 'none', matchCutJoins: joinReport ? Math.max(1, clips.length - 1) : 0 });
         trace(`render_qc project=${projectId} ok=${qc.ok} flags=${(qc.flags || []).join('|') || 'none'}`);
         if (!qc.ok) trace(`render_qc_warn project=${projectId} flags=${(qc.flags || []).join('|')}`);
       } catch (qcErr: any) { trace(`render_qc_error project=${projectId} err=${qcErr?.message}`); }
@@ -3574,12 +3706,36 @@ else {
     const takes = new Map<number, string>();
     const windows = span.windows ?? [];
     if (!windows.length) return takes;
-    const outcomes = await mapLimit(windows, VEO_WINDOW_CONCURRENCY, async (w) => {
+    // ONE STILL PER SCENE, RENDERED ONCE (owner Nov 2 — scenes must not be merged,
+    // chained or re-drawn): a scene's designed still is ALSO the previous clip's
+    // join target (`lastFrame`), so with up to VEO_WINDOW_CONCURRENCY windows in
+    // flight two calls legitimately ask for the SAME picture. The promise cache makes
+    // that exactly one render — never a second paid still, never a stale one.
+    const stillPromises = new Map<number, Promise<string>>();
+    const stillFor = (sceneNumber: number): Promise<string> => {
+      const scene = sceneByNumber?.get(sceneNumber);
+      if (!scene) {
+        return Promise.reject(new Error(`scene ${sceneNumber} record missing — cannot render the still the motion clip (or its join) needs`));
+      }
+      let p = stillPromises.get(sceneNumber);
+      if (!p) {
+        p = this.renderSceneStillForMotion(scene, projectId, sourceImageFor?.(sceneNumber));
+        stillPromises.set(sceneNumber, p);
+      }
+      return p;
+    };
+    const outcomes = await mapLimit(windows, VEO_WINDOW_CONCURRENCY, async (w, index) => {
       const sceneKey = `block${span.soraBlock}-scene${w.sceneNumber}`;
       const scene = sceneByNumber?.get(w.sceneNumber);
+      const nextWindow = windows[index + 1];
       try {
+        const stillPath = await stillFor(w.sceneNumber);
+        // JOIN STEERING (owner Nov 2): clips 1..n-1 are told to END on the NEXT
+        // scene's designed picture. The LAST clip sends no lastFrame — there is no
+        // next picture to land on. A missing target fails LOUD (no silent drop).
+        const lastFramePath = nextWindow ? await stillFor(nextWindow.sceneNumber) : undefined;
         const takePath = await this.generateOneVeoWindow(
-          span, w, projectId, sceneKey, heroSource, scene, sourceImageFor?.(w.sceneNumber),
+          span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath,
         );
         return { sceneNumber: w.sceneNumber, takePath, error: undefined as string | undefined };
       } catch (err: any) {
@@ -3609,7 +3765,8 @@ else {
     sceneKey: string,
     heroSource?: string,
     scene?: any,
-    sceneSourceImage?: string,
+    stillPathArg?: string,
+    lastFramePath?: string,
   ): Promise<string> {
     const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
     // What the call COSTS is the legal Veo duration; what the scene NEEDS is its own
@@ -3619,7 +3776,9 @@ else {
     // IMAGE-TO-VIDEO: the scene's designed still (brief + the client's uploaded photo,
     // exactly as the still renderer builds it) is the clip's FIRST FRAME. If the still
     // cannot be produced this throws LOUD — never a silent text-to-video downgrade.
-    const stillPath = await this.renderSceneStillForMotion(scene, projectId, sceneSourceImage);
+    // The pre-pass resolves it (once per scene, shared with the previous clip's
+    // lastFrame); the fallback keeps this method correct on its own.
+    const stillPath = stillPathArg || await this.renderSceneStillForMotion(scene, projectId);
     let persistedOp: string | undefined = await this.loadVeoTakeOperation(projectId, sceneKey);
     let lastError: string | undefined;
     for (let attempt = 1; attempt <= VEO_WINDOW_MAX_ATTEMPTS; attempt++) {
@@ -3642,6 +3801,8 @@ else {
         },
         durationSeconds: billedSeconds,
         imagePath: stillPath,
+        // JOIN STEERING: end this clip on the NEXT scene's designed still.
+        ...(lastFramePath ? { lastFramePath } : {}),
       });
       if (result.operationName) persistedOp = result.operationName;
       if (result.success && result.videoPath) {
@@ -3653,7 +3814,7 @@ else {
         await fitClipToDuration(slicedPath, sceneSeconds);
         await this.recordVeoCost(projectId, sceneKey, result.billedSeconds ?? billedSeconds);
         void this.markVeoJobStatus(projectId, sceneKey, 'completed');
-        trace(`veo_window_ready project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
+        trace(`veo_window_ready project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} lastFrame=${result.usedLastFrame ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
         return slicedPath;
       }
       lastError = result.error || 'no video path';

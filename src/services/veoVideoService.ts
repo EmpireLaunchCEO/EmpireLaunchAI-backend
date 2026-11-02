@@ -100,6 +100,23 @@ export const VEO_CALL_SECONDS = 6;
  */
 export const VEO_MOTION_BUDGET_SECONDS = 30;
 /**
+ * SCENE-JOIN REWORK (owner, Nov 2 — "we can do 4 6 seconds calls and 1 8 second
+ * call ... with the extra 2 seconds FFmpeg has that to work with"):
+ *
+ *   FIVE clips for a 30s Scene video: 4 × 6s + 1 × 8s = **32s**. The 2s over the
+ *   video's own length is not waste — it is the material FFmpeg folds away when it
+ *   cuts each join on its best-matching frame pair (and removes any black dip), so
+ *   the delivered video still lands on its planned length.
+ *
+ * Cost: 32s × $0.03/s = **$0.96/video** (was $0.90 at 5 × 6s). Scene is capped at
+ * 2 videos/week (8/month) ⇒ **≈$7.68/client/month worst case**, ~15% of the $50 price.
+ */
+export const VEO_MOTION_JOIN_SLACK_SECONDS = 2;
+/** Hard ceiling on billed motion per video: the 30s budget plus the 2s join slack. */
+export const VEO_MOTION_PLAN_CEILING_SECONDS = VEO_MOTION_BUDGET_SECONDS + VEO_MOTION_JOIN_SLACK_SECONDS;
+/** The long clip the owner's plan buys for the FINAL scene (Veo's 8s tier). */
+export const VEO_LONG_CLIP_SECONDS = 8;
+/**
  * The legal per-call durations Veo 3.1 Lite accepts. Anything else is a 400.
  * A scene shorter than one 6s call is billed at the 4s tier (never padded up);
  * a scene longer than 7s is billed at 8s. See nearestLegalVeoSeconds().
@@ -127,6 +144,32 @@ export function nearestLegalVeoSeconds(sceneSeconds: number): number {
   if (d < 6) return 4;
   if (d < 7) return 6;
   return 8;
+}
+/**
+ * THE DURATION PLAN for Scene mode (owner, Nov 2): **4 × 6s + 1 × 8s = 32s** for a
+ * five-scene 30s video, generalised so any scene count still works:
+ *
+ *   - every clip is 6s (Veo's standard tier) except
+ *   - the LAST clip, which is 8s when the total still fits inside the 30s budget
+ *     plus the 2s join slack (it always does for n ≤ 5) — that long clip is what
+ *     gives the assembly material to fold into the joins.
+ *   - a single-scene video buys one 6s clip: with no join there is nothing to fold,
+ *     so the long tier would be pure waste.
+ *
+ * Pure + deterministic. Never exceeds VEO_MOTION_PLAN_CEILING_SECONDS (32s).
+ */
+export function planVeoClipDurations(sceneCount: number): number[] {
+  const n = Math.max(0, Math.min(Math.floor(Number(sceneCount) || 0), VEO_MAX_MOTION_WINDOWS));
+  if (n === 0) return [];
+  if (n === 1) return [VEO_CALL_SECONDS];
+  const shortClips = n - 1;
+  const total = shortClips * VEO_CALL_SECONDS + VEO_LONG_CLIP_SECONDS;
+  const last = total <= VEO_MOTION_PLAN_CEILING_SECONDS ? VEO_LONG_CLIP_SECONDS : VEO_CALL_SECONDS;
+  return [...Array(shortClips).fill(VEO_CALL_SECONDS), last];
+}
+/** Total billed seconds for a plan (cost + the 32s ceiling check). */
+export function planVeoClipDurationsTotal(sceneCount: number): number {
+  return planVeoClipDurations(sceneCount).reduce((a, b) => a + b, 0);
 }
 export const VEO_ASPECT_RATIO = '9:16';
 export const VEO_RESOLUTION = '720p';
@@ -166,7 +209,28 @@ export const VEO_ERRORS = {
   imageRejected:
     `${VEO_PROVIDER_TAG}: the input image was REJECTED — the clip could not be started from the scene's designed still. ` +
     `This is NOT a silent text-to-video fallback: the scene has no faithful motion rather than wrong motion.`,
+  /**
+   * LAST-FRAME REJECTED (owner, Nov 2 — scene-join rework). Clips 1..n-1 are told
+   * to END on the NEXT scene's designed picture via Veo's `lastFrame` input, so the
+   * two clips meet on the same image and FFmpeg can cut on the matching frame.
+   * If the provider refuses that steering image we say so BY NAME: we never quietly
+   * drop the target (a dropped target = a join that does not line up, silently).
+   */
+  lastFrameRejected:
+    `${VEO_PROVIDER_TAG}: the LAST-FRAME image was REJECTED — this clip could not be steered to end on the next scene's designed still. ` +
+    `The join target was NOT dropped and the call was NOT downgraded: the scene has no join-steered motion rather than an unaligned one.`,
 } as const;
+/** Loud, named failure for "the next scene's still (the join target) could not be read". */
+export function veoLastFrameMissingMessage(sceneKey: string, reason: string): string {
+  return (
+    `${VEO_PROVIDER_TAG}: scene ${sceneKey} has NO readable join target — ${reason}. ` +
+    `Clips 1..n-1 must end on the NEXT scene's designed still (Veo lastFrame); the target is never silently dropped and the call never falls back to text-to-video.`
+  );
+}
+/** Loud, named failure for "we had a join target but the provider would not take it". */
+export function veoLastFrameRejectedMessage(detail: string): string {
+  return `${VEO_ERRORS.lastFrameRejected} (${String(detail || 'no detail').slice(0, 240)})`;
+}
 /** Loud, named failure for "we had a still but the provider would not take it". */
 export function veoImageRejectedMessage(detail: string): string {
   return `${VEO_ERRORS.imageRejected} (${String(detail || 'no detail').slice(0, 240)})`;
@@ -200,6 +264,15 @@ export interface VeoGenerateOptions {
   generateAudio?: boolean;
   /** IMAGE-TO-VIDEO: the scene's designed still becomes the clip's FIRST FRAME. */
   image?: VeoInputImage;
+  /**
+   * JOIN STEERING (owner, Nov 2 — scene-join rework): the NEXT scene's designed
+   * still, sent as Veo's `lastFrame` so the clip is told to END on that picture.
+   * Documented on `VideoGenerationModelInstance` alongside `image`, same Image
+   * shape ({mimeType, bytesBase64Encoded | gcsUri}). It STEERS but does not land
+   * (measured: 21.91 dB against the target vs a true match of ~45 dB), which is
+   * exactly why the assembly still cuts on the best-matching frame pair.
+   */
+  lastFrame?: VeoInputImage;
 }
 export interface VeoVideoPayload { uri?: string; data?: string; }
 export interface VeoPollResult { done: boolean; error?: string; video?: VeoVideoPayload; }
@@ -221,6 +294,13 @@ export interface VeoSceneGenerateOptions {
    * text-to-video — callers that own a still MUST pass it.
    */
   imagePath?: string;
+  /**
+   * JOIN STEERING (owner, Nov 2): local path to the NEXT scene's designed still.
+   * Clips 1..n-1 pass it so the clip is asked to END on that picture; the LAST
+   * clip passes nothing. A path that exists in the plan but cannot be read is a
+   * LOUD failure — the target is never silently dropped.
+   */
+  lastFramePath?: string;
 }
 
 // ─── Service-account credential ──────────────────────────────────────────────
@@ -405,6 +485,14 @@ export function buildVeoPredictBody(prompt: string, options: VeoGenerateOptions 
       mimeType: options.image.mimeType,
     };
   }
+  // JOIN STEERING: `lastFrame` is the documented sibling of `image` on the same
+  // instance — the picture the clip is asked to END on. Same Image shape.
+  if (options.lastFrame && options.lastFrame.bytesBase64Encoded) {
+    instance.lastFrame = {
+      bytesBase64Encoded: options.lastFrame.bytesBase64Encoded,
+      mimeType: options.lastFrame.mimeType,
+    };
+  }
   const body: Record<string, unknown> = { instances: [instance] };
   const parameters: Record<string, unknown> = {};
   if (options.sampleCount !== undefined) parameters.sampleCount = options.sampleCount;
@@ -518,7 +606,7 @@ export class VeoVideoService {
    *   4. Poll (5s→10s backoff) until done / terminal error.
    *   5. Save the video (inline base64 — the Vertex path — or a signed https uri).
    */
-  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean }> {
+  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean; usedLastFrame?: boolean }> {
     const model = VEO_MODEL;
     const billedSeconds = opts.durationSeconds ?? VEO_CALL_SECONDS;
     let operationName: string | undefined = opts.existingOperationName;
@@ -542,6 +630,19 @@ export class VeoVideoService {
         return { success: false, error: msg, operationName };
       }
     }
+    // JOIN STEERING: the next scene's designed still (the picture this clip must
+    // END on). Loaded BEFORE the create for the same reason as the still: a bad
+    // target fails loud and free, and is NEVER silently dropped.
+    let lastFrameImage: VeoInputImage | undefined;
+    if (opts.lastFramePath) {
+      try {
+        lastFrameImage = loadVeoInputImage(opts.lastFramePath);
+      } catch (error: any) {
+        const msg = veoLastFrameMissingMessage(opts.sceneKey, `could not read the join target at ${opts.lastFramePath}: ${error?.message || 'unknown error'}`);
+        console.error(`[Veo] veo_last_frame_unreadable scene=${opts.sceneKey} path=${opts.lastFramePath} error=${error?.message}`);
+        return { success: false, error: msg, operationName };
+      }
+    }
     try {
       if (!operationName) {
         const body = buildVeoPredictBody(opts.prompt, {
@@ -551,9 +652,10 @@ export class VeoVideoService {
           durationSeconds: billedSeconds,
           generateAudio: false, // billed separately on Vertex; the pipeline narrates itself
           ...(inputImage ? { image: inputImage } : {}),
+          ...(lastFrameImage ? { lastFrame: lastFrameImage } : {}),
         });
         const createUrl = buildVeoCreateUrl(sa.project_id, model);
-        console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s image=${inputImage ? 'yes' : 'no'}`);
+        console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s image=${inputImage ? 'yes' : 'no'} lastFrame=${lastFrameImage ? 'yes' : 'no'}`);
         const token = await this.tokens.getAccessToken(sa);
         const createRes = await fetch(createUrl, {
           method: 'POST',
@@ -565,10 +667,14 @@ export class VeoVideoService {
           const text = await createRes.text().catch(() => '');
           // An image-bearing call rejected for image reasons gets its OWN message —
           // never a generic HTTP code, and never a quiet retry as text-to-video.
-          const mapped = inputImage && /image|mime|jpeg|png|base64/i.test(text)
-            ? veoImageRejectedMessage(`HTTP ${createRes.status}: ${text}`)
-            : classifyVeoHttpError(createRes.status, text, 'create', model);
-          console.error(`[Veo] veo_create_failed scene=${opts.sceneKey} status=${createRes.status} image=${inputImage ? 'yes' : 'no'} error=${mapped}`);
+          // A lastFrame-bearing call gets its OWN message too: the join target was
+          // not dropped, it was refused.
+          const mapped = lastFrameImage && /image|mime|jpeg|png|base64|last.?frame/i.test(text)
+            ? veoLastFrameRejectedMessage(`HTTP ${createRes.status}: ${text}`)
+            : inputImage && /image|mime|jpeg|png|base64/i.test(text)
+              ? veoImageRejectedMessage(`HTTP ${createRes.status}: ${text}`)
+              : classifyVeoHttpError(createRes.status, text, 'create', model);
+          console.error(`[Veo] veo_create_failed scene=${opts.sceneKey} status=${createRes.status} image=${inputImage ? 'yes' : 'no'} lastFrame=${lastFrameImage ? 'yes' : 'no'} error=${mapped}`);
           return { success: false, error: mapped, operationName };
         }
         const createJson = await createRes.json().catch(() => null);
@@ -590,8 +696,8 @@ export class VeoVideoService {
       if (poll.error) return { success: false, error: poll.error, operationName };
       // STEP 3: SAVE (inline base64 from Vertex, or a signed https uri)
       const videoPath = await this.saveVideo(poll.video!, sa, opts.sceneKey);
-      console.log(`[Veo] veo_scene_downloaded scene=${opts.sceneKey} path=${videoPath} billed=${billedSeconds}s usd=${veoCostUsd(billedSeconds)}`);
-      return { success: true, videoPath, operationName, billedSeconds, estimatedUsd: veoCostUsd(billedSeconds), usedImage: Boolean(inputImage) };
+      console.log(`[Veo] veo_scene_downloaded scene=${opts.sceneKey} path=${videoPath} billed=${billedSeconds}s usd=${veoCostUsd(billedSeconds)} lastFrame=${lastFrameImage ? 'yes' : 'no'}`);
+      return { success: true, videoPath, operationName, billedSeconds, estimatedUsd: veoCostUsd(billedSeconds), usedImage: Boolean(inputImage), usedLastFrame: Boolean(lastFrameImage) };
     } catch (error: any) {
       console.error(`[VeoVideoService] scene ${opts.sceneKey} failed: ${error.message}`);
       return { success: false, error: error.message, operationName };
