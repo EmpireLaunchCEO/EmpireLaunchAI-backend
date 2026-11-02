@@ -28,6 +28,10 @@ import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExpor
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
 import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences, containsLinkInBio, stripLinkInBioPhrases } from './creativeTransformation.js';
+// PLANNER OUTCOME (owner Nov 2): a bypassed planner must never look like a planned
+// video. These helpers classify what the planning call actually returned, record it
+// on the project, and produce the client-facing failure copy.
+import { PlanningFailedError, applyTemplateFill, classifyPlannerOutcome, describeNonPlanResponse, planPayloadFromDecision, plannerFailureNotice, runPlanningAttempts, suppliedScriptPlannerOutcome, usableSceneCount, type PlannerOutcome } from './plannerOutcome.js';
 import { normalizeAssemblyOverlays, applyAssemblyOverlays, resolveSceneVideoStarts, probeClipSeconds } from './assemblyOverlays.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
@@ -985,54 +989,123 @@ function compactCreativeSubject(idea: string, maxChars = 160): string {
   return `${firstSentence.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+/** META FRAMING (owner Nov 2). A client may open a brief with the REQUEST itself —
+ *  "A 30-second product video for Ember & Oak, a small hand-poured soy candle
+ *  business." The old arc took that head as the SUBJECT and spoke it back:
+ *  "Say hello to A 30-second product video for Ember & Oak,." Strip the framing so
+ *  the subject is the thing being advertised, never the request for a video. */
+const BRIEF_META_FRAME_RE = /^\s*(?:(?:please|hey|hi|ok|okay|so|can you|could you|would you|i'?d like|i would like|i want|i need|we want|we need|make|create|generate|produce|build|give me|show me)\b[\s,:-]*)*(?:(?:me|us)\s+)?(?:(?:a|an|the)\s+)?(?:(?:\d+(?:\.\d+)?)\s*(?:-|\s)?\s*(?:second|seconds|sec|secs|s|minute|minutes|min)\s*(?:-|\s)?\s*)?(?:(?:product|promo|promotional|marketing|brand|short|vertical|cinematic|social|tiktok|instagram)\s+)*(?:video|promo|promotional video|reel|ad|advert|advertisement|commercial|short|clip|teaser|tiktok)\s+(?:for|about|of|on|featuring|showcasing|that shows)\s+/i;
+
+/** Strip a leading "make me a 30-second product video for …" request framing. */
+export function stripBriefMetaFraming(text: string): string {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  for (let i = 0; i < 2; i++) {
+    const next = t.replace(BRIEF_META_FRAME_RE, '').replace(/^(?:a|an|the)\s+/i, '').trim();
+    if (!next || next === t) break;
+    t = next;
+  }
+  return t;
+}
+
+/** The honest output of a template that has nothing to work with. Never spoken —
+ *  the render is refused long before audio — but it must not pretend to be a plan. */
+const ARC_UNPLANNABLE_NARRATION = 'This brief could not be turned into a plan, so there is no video yet.';
+
+/** Claim-free arc beats. They assert NOTHING about the product, so they can never
+ *  invent a feature, a benefit or a family scene the brief never mentioned. */
+const ARC_FILLERS = [
+  'The essentials come together fast, and the process is simpler than it looks.',
+  'And this is where it clicks — the transformation you came for.',
+  "That's the payoff — real results, right in front of you.",
+  'Ready to make the move? You can get started today.',
+];
+
+/** The advertised thing, with the request framing removed. '' means "no subject",
+ *  which the arc treats as an honest refusal rather than a made-up one. */
+function arcSubject(idea: string): string {
+  const stripped = stripBriefMetaFraming(idea);
+  const compact = compactCreativeSubject(stripped);
+  let cleaned = String(compact || '').replace(/[\s,;:.!?—–-]+$/g, '').trim();
+  // 'this upgrade' is compactCreativeSubject's neutral placeholder — it names no
+  // product at all, so it is NOT a subject (a template that says "Say hello to this
+  // upgrade" claims to be about a product it never names).
+  if (!cleaned || /^this upgrade$/i.test(cleaned)) return '';
+  // "Ember & Oak, a small hand-poured soy candle business." → "Ember & Oak".
+  const head = cleaned.split(',')[0].trim();
+  if (head.length >= 3) cleaned = head;
+  // An echoed REQUEST is not a subject (the exact Ember & Oak defect).
+  if (BRIEF_META_FRAME_RE.test(cleaned) || isInternalBriefEcho(cleaned)) return '';
+  return cleaned;
+}
+
+/** The client's OWN finished sentences, in order — the only copy the template is
+ *  allowed to speak that it did not have to invent. */
+function arcBriefSentences(idea: string): string[] {
+  return String(stripBriefMetaFraming(idea) || '')
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.replace(/\s+/g, ' ').trim())
+    .filter(s => s.length >= 12)
+    .filter(s => !isInternalBriefEcho(s))
+    .filter(s => !isPlanSpeakNarration(s))
+    .filter(s => !CONSULTANT_META_PATTERN.test(s));
+}
+
 function buildArcScenes(idea: string, count: number, durationTarget: number): SceneScript[] {
-  const subject = compactCreativeSubject(idea);
+  const subject = arcSubject(idea);
+  // The request framing is gone, so the prompt names the product, not the brief.
+  const subjectForPrompt = subject || 'the product described in the brief';
+  const own = arcBriefSentences(idea)
+    .filter(s => !subject || !s.toLowerCase().startsWith(subject.toLowerCase()));
   const base = Math.floor(durationTarget / count);
   const rem = durationTarget - base * count;
+
+  // Narration is built ONLY from (a) the named subject, (b) the client's own
+  // sentences, (c) claim-free beats. Nothing here can echo the request or invent
+  // a detail, which is what the old template did in production on 2026-11-02.
+  const beats: string[] = [];
+  if (subject) beats.push(`Say hello to ${subject}.`);
+  else if (own.length) beats.push(own.shift() as string);
+  else beats.push(ARC_UNPLANNABLE_NARRATION);
+  while (beats.length < count - 1 && own.length) beats.push(own.shift() as string);
+  // NOTHING TO SAY: with no subject and no usable sentence, EVERY beat is the
+  // refusal. A template that has nothing to work with must not fall back to
+  // confident generic lines — that is how a wrong video ships looking planned.
+  const nothingToSay = !subject && own.length === 0;
+  let fill = 0;
+  while (beats.length < count) {
+    beats.push(nothingToSay ? ARC_UNPLANNABLE_NARRATION : ARC_FILLERS[fill++ % ARC_FILLERS.length]);
+  }
+
   return Array.from({ length: count }, (_, i) => {
     const f = count <= 1 ? 0.5 : i / (count - 1); // 0..1 story progress
-    // Distinct beats so every scene ADVANCES the narrative instead of repeating a
-    // handful of near-identical variants (quality bug from the old 3-group arc).
-    let narration: string;
+    const duration = base + (i < rem ? 1 : 0);
+    let narration = beats[i] ?? ARC_UNPLANNABLE_NARRATION;
+    // HARD ANTI-ECHO GUARD: whatever the brief said, the raw request must never be
+    // spoken back and plan-speak must never reach GPT-Audio.
+    if (BRIEF_META_FRAME_RE.test(narration) || isInternalBriefEcho(narration) || isPlanSpeakNarration(narration)) {
+      narration = nothingToSay ? ARC_UNPLANNABLE_NARRATION : ARC_FILLERS[i % ARC_FILLERS.length];
+    }
     let visualPrompt: string;
-    // FINISHED COPY ONLY (owner Sep 28): narration is the exact voiceover copy a
-    // viewer hears — polished, natural, customer-facing. NEVER plan-speak (no
-    // "Opening —", "Getting started:", "Now it comes together", "The payoff:",
-    // "Call to action:", step-by-step recitals, or descriptions of the video's
-    // own structure). The visualPrompt (internal) still carries the arc stage
-    // wording so the planner coverage checks stay deterministic.
     if (f < 0.25) {
-      // OWNER-OCT-8: the hook is TWO short sentences so capNarrationForScene's
-      // sentence-boundary logic can always deliver a COMPLETE sentence within a
-      // 5s/6s window (the old single long sentence truncated to dangling
-      // fragments like "Say hello to ... — it's" — the exact defect in the
-      // Oct 8 production video). Long subjects are still handled: the cap cut
-      // back to the first sentence's period keeps "Say hello to <subject>."
-      // complete even when the second sentence can't fit.
-      narration = `Say hello to ${subject}. It's about to make things a lot easier.`;
-      visualPrompt = `Cinematic establishing shot: hook intro of ${subject}, the subject shown clearly for the first time`;
+      visualPrompt = `Cinematic establishing shot: hook intro of ${subjectForPrompt}, the subject shown clearly for the first time`;
     } else if (f < 0.5) {
-      narration = 'The essentials come together fast, and the process is simpler than it looks.';
-      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${subject}, subject continues from the opening, early stage`;
+      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${subjectForPrompt}, subject continues from the opening, early stage`;
     } else if (f < 0.75) {
-      narration = 'And this is where it clicks — the transformation you came for.';
-      visualPrompt = `Cinematic wide shot: ${subject} delivering its key benefit, the transformation in progress, same continuous subject`;
+      visualPrompt = `Cinematic wide shot: ${subjectForPrompt} delivering its key benefit, the transformation in progress, same continuous subject`;
     } else if (f < 1) {
-      narration = "That's the payoff — real results, right in front of you.";
-      visualPrompt = `Cinematic close-up: the payoff result of ${subject}, same continuous subject, breakthrough moment`;
+      visualPrompt = `Cinematic close-up: the payoff result of ${subjectForPrompt}, same continuous subject, breakthrough moment`;
     } else {
-      narration = 'Ready to make the move? You can get started today.';
-      visualPrompt = `Cinematic closing shot: ${subject} final call-to-action, same continuous subject, confident ending`;
+      visualPrompt = `Cinematic closing shot: ${subjectForPrompt} final call-to-action, same continuous subject, confident ending`;
     }
     return {
       sceneNumber: i + 1,
-      duration: base + (i < rem ? 1 : 0),
+      duration,
       // Arc scenes are the NO-PLAN fallback — default to 'still' (gpt-image-2 +
       // Ken Burns, ~free) so a malformed/missing Hybrid director plan degrades to
       // ZERO Sora calls instead of N. Motion (the ONE important block) only comes
       // from the hybrid plan path or an explicit GPT visualType in parseScenes.
       visualType: 'still' as const,
-      narration: capNarrationForScene(narration, base + (i < rem ? 1 : 0)),
+      narration: capNarrationForScene(narration, duration),
       visualPrompt,
     };
   });
@@ -2688,6 +2761,13 @@ export class SceneVideoPipelineService {
     // Worst-case Sora spend ≈ $1.60/video — far inside the $50 subscription.
     const budget = soraCallBudget(duration);
     let generatedScript = input.script;
+    // PLANNER OUTCOME (owner Nov 2): the scene list's provenance is recorded on the
+    // project. Before this, a template-arc plan was indistinguishable from a model
+    // plan on the row, so a generic video shipped looking planned.
+    let plannerOutcome: PlannerOutcome = suppliedScriptPlannerOutcome();
+    let plannerDetail = '';
+    let plannerAttempts = 0;
+    let replanDiscarded = false;
     if (!generatedScript) {
       trace(`gpt52_script_start project=${projectId}`);
       try {
@@ -2734,8 +2814,21 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
           ? finishedEssenceBrief(plannerEssence)
           : stripInstructionResidue(cleanIdea);
         const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection, dictation: buildDictationSection(requested, sceneCount) });
-        const decision = await aiRouter.route({ userId: input.userId, request, mode: 'generate' });
-        generatedScript = decision.script || decision.parameters?.script;
+        // FIRST DOOR + SECOND DOOR. The planning call shares one model with the
+        // router, whose system prompt asks for a classification object. Production
+        // evidence (2026-10-11 a02014a3) shows the model answering with
+        // {"classification":"ai_assistant","prompt":"Generate a single JSON scene script…"}
+        // — no scenes — which used to fall through to the template arc with nothing
+        // but `generated=false` in the logs. runPlanningAttempts asks once more with
+        // the contract restated (decision-only: no image, no narration, no motion).
+        const planning = await runPlanningAttempts({
+          sceneCount,
+          call: (attempt, instruction) => aiRouter.route({ userId: input.userId, request: request + instruction, mode: 'generate' }),
+          trace: (message) => trace(`${message} project=${projectId}`),
+        });
+        plannerAttempts = planning.attempts;
+        plannerDetail = planning.detail;
+        generatedScript = planning.payload ?? undefined;
         // Planning-layer QC (deterministic, NO paid renders): every relayed component
         // must appear somewhere in the plan and the arc must cover hook → about → CTA.
         // If the first plan misses any of it, run ONE auto-correct re-plan pass that
@@ -2758,13 +2851,39 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         if (needsReplan) {
           trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)} avatarRoles=[${avatarRoleViolations.join(',')}]`);
           const replan = await aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate' });
-          generatedScript = replan.script || replan.parameters?.script;
-          trace(`gpt52_replan_end project=${projectId} replanned=${!!generatedScript}`);
+          // A FAILED REPLAN MUST NOT DESTROY A USABLE FIRST PLAN (production evidence
+          // 2026-10-11: the replan answered with a router decision, `generated=false`,
+          // and the good first plan was overwritten with undefined → template arc).
+          const replanPayload = planPayloadFromDecision(replan);
+          if (replanPayload) {
+            generatedScript = replanPayload;
+            trace(`gpt52_replan_end project=${projectId} replanned=true scenes=${usableSceneCount(replanPayload)}`);
+          } else {
+            replanDiscarded = true;
+            trace(`gpt52_replan_discarded project=${projectId} keeping=first-plan got=${describeNonPlanResponse(replan)}`);
+          }
         }
-        trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript}`);
-      } catch (error: any) { trace(`gpt52_script_failed project=${projectId} error=${error.message}`); }
+      } catch (error: any) {
+        plannerDetail = `planner call failed: ${error?.message || error}`;
+        trace(`gpt52_script_failed project=${projectId} error=${error.message}`);
+      }
+      plannerOutcome = classifyPlannerOutcome({
+        payload: generatedScript,
+        attempts: plannerAttempts,
+        detail: plannerDetail,
+        sceneCount: targetSceneCount(duration),
+        replanDiscarded,
+      });
+      trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript} source=${plannerOutcome.source} reason=${plannerOutcome.reason ?? 'none'} plannerScenes=${plannerOutcome.plannerScenes}/${targetSceneCount(duration)}${plannerOutcome.detail ? ` detail=${plannerOutcome.detail}` : ''}`);
     }
 const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
+    // TEMPLATE-FILL AUDIT (owner Nov 2): parseScenes pads a short plan with the
+    // deterministic arc, so a 3-of-5 plan silently ships two invented scenes. Those
+    // scenes are a planner bypass too, and are named as such.
+    plannerOutcome = applyTemplateFill(plannerOutcome, usableSceneCount(generatedScript), targetSceneCount(duration));
+    if (plannerOutcome.templateScenes > 0) {
+      trace(`planner_template_fill project=${projectId} scenes=${plannerOutcome.templateScenes}/${targetSceneCount(duration)} source=${plannerOutcome.source}`);
+    }
     // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
     // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
     // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
@@ -3055,7 +3174,16 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory);
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{})}});
+    // PLANNING GATE (owner Nov 2): no plan ⇒ no video. The row is still written (so
+    // the bypass is recorded and the client can see why) but it is written as failed,
+    // and the render never starts. This is the difference between "we could not plan
+    // your brief" and a confident-looking generic video.
+    const planningFailure = plannerOutcome.reason ? plannerFailureNotice(plannerOutcome) : null;
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:planningFailure?'failed':'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{})}});
+    if (planningFailure) {
+      trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
+      throw new PlanningFailedError(projectId, planningFailure);
+    }
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
@@ -3541,14 +3669,14 @@ if (!skipGeneration) {
       // strongly into the prompt so the subject is derived from it.
       const subjectPrompt = withSourceSubject(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
       if(scene.visualType==='still'){
-        // ENOENT BLOCKER FIX (owner's live test f3773f0a — all 5 scenes failed):
-        // renderImage with NO userId returns a LOCAL path (no premature R2 upload)
-        // so the r2-upload copy branch below and FFmpeg Ken Burns/zoompan assembly
-        // receive a REAL on-disk file. The old call passed userId, which made
-        // renderImage upload to R2 and return a PRESIGNED URL as `localPath` →
-        // `fs.copyFileSync('<url>', '<url>.r2-upload')` threw ENOENT. The scene
-        // upload branch uploads exactly once (provider 'gpt-image-2'). ensureLocalFile
-        // is a defense-in-depth guard for any caller path that still lands a URL.
+        // STILL RETRIEVABILITY (owner Nov 2): pass the userId so renderImage also
+        // writes the still to R2. A render's scene-1 still is otherwise unreachable
+        // after the run (temp/scene-assets lives inside the container), which makes
+        // "frame 0 vs the designed still" impossible to measure.
+        // HISTORY: the old ENOENT (owner's live test f3773f0a) came from
+        // `fs.copyFileSync('<presigned url>', …)`; ensureLocalFile below now
+        // DOWNLOADS whatever URL renderImage returns, so passing the userId is safe.
+        // The scene upload branch still uploads exactly once (provider 'gpt-image-2').
         if (isDirectImageUrl(scene.visualPrompt)) {
           // RENDER #7 (owner ADJUST #2 - "I am not a fan of the photos"): a
           // visualPromptOverrides[i] value that is a direct image URL is the scene's
@@ -3559,7 +3687,7 @@ if (!skipGeneration) {
           localPath = await ensureLocalFile(scene.visualPrompt, `direct image scene ${scene.sceneNumber}`);
           trace(`scene_direct_image id=${scene.id} number=${scene.sceneNumber}`);
         } else {
-          const result = await renderingEngine.renderImage(subjectPrompt, undefined, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
+          const result = await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
           sourceImageOutcome = result.sourceImage;
           if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
           localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
