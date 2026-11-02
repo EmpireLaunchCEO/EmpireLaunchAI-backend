@@ -11,11 +11,19 @@
  *       `instances[0].image` as `{ bytesBase64Encoded, mimeType }` (Google's
  *       documented `VideoGenerationModelInstance.Image`; verified live 2026-11-02
  *       with a real 4s/720p call, $0.12, 54.7s end to end).
- *   (2) EVERY SCENE MOVES — 5 scenes × 6s = 5 calls / 30s; 3 scenes = 3 calls / 18s.
- *   (3) SHORT BEAT → 4s tier (never 6s it cannot use); long beat → 8s.
- *   (4) NEVER MORE THAN THE VIDEO — total billed motion ≤ planned duration and ≤30s.
- *   (5) THE JOINS — measured on real frames: the assembly's xfade is not a hard cut,
- *       and a regression back to a plain concat FAILS this suite.
+ *   (2) EVERY SCENE MOVES, in the OWNER'S SHAPE (Nov 2): "we can do 4 6 seconds
+ *       calls and 1 8 second call" → a 5-scene 30s video buys 4 × 6s + 1 × 8s =
+ *       32s; 3 scenes buy 2 × 6s + 1 × 8s = 20s. Five designed scenes are KEPT.
+ *   (3) THE 8s CLIP goes to the LONGEST scene window (so the long take is TRIMMED
+ *       to its slot, never stretched); the 4|6|8 enum still governs the legacy
+ *       single-take path and the ceiling step-down.
+ *   (4) NEVER MORE THAN THE CEILING — total billed motion ≤ 30s budget + 2s join
+ *       slack = 32s, and never more than the video itself plus that slack. The 2s
+ *       over a 30s video is the material the joins fold away, not waste.
+ *   (5) THE JOINS — measured on real frames: the assembly's MATCH-CUT join is not a
+ *       hard cut and contains NO TRANSITION OF ANY KIND (no xfade, no dip to black,
+ *       no dissolve — the owner rejected the dissolve on Oct 12). A regression back
+ *       to a plain concat, or to the old fadeblack xfade, FAILS this suite.
  *   (6) NARRATION SYNC — a take is fitted to its scene's window (trim or gentle
  *       slow-down, never a frozen tail) so picture and narration cannot drift.
  *   (7) THE REAL REASON — a failed window surfaces credentials / service account /
@@ -41,6 +49,11 @@ import {
   VEO_LEGAL_DURATIONS,
   VEO_CALL_SECONDS,
   VEO_MOTION_BUDGET_SECONDS,
+  VEO_MOTION_JOIN_SLACK_SECONDS,
+  VEO_MOTION_PLAN_CEILING_SECONDS,
+  VEO_LONG_CLIP_SECONDS,
+  planVeoClipDurations,
+  planVeoClipDurationsTotal,
   VEO_MAX_MOTION_WINDOWS,
   VEO_MODEL,
   VEO_ERRORS,
@@ -154,24 +167,52 @@ test('IMAGE: generateSceneVideo sends the still on the wire and reports usedImag
 });
 
 // ═══ (2)(3)(4) the window plan ══════════════════════════════════════════════
-test('PLAN: a 5-scene 30s video buys FIVE 6s calls = 30s of motion', () => {
+test('PLAN: a 5-scene 30s video buys the OWNER\'S plan — 4 × 6s + 1 × 8s = 32s of motion', () => {
+  // Her exact words: "running 4 8 second calls is to much wasting. we can do 4 6
+  // seconds calls and 1 8 second call." The 2s over the 30s video is NOT waste —
+  // it is the material FFmpeg folds away when it cuts each join on its best-
+  // matching frame pair (sceneJoinService), so the delivered video still lands on
+  // its planned length.
   const script = [1, 2, 3, 4, 5].map(n => scene(n, 6));
   const windows = planVeoSceneWindows(script);
-  assert.equal(windows.length, 5, 'one call per scene — no "important windows only" election');
-  assert.deepEqual(windows.map(w => w.motionSeconds), [6, 6, 6, 6, 6]);
-  assert.equal(windows.reduce((a, w) => a + w.motionSeconds, 0), 30);
+  assert.equal(windows.length, 5, 'five designed scenes are KEPT — five calls, one per scene');
+  assert.deepEqual(windows.map(w => w.motionSeconds), [6, 6, 6, 6, 8],
+    '4 × 6s + 1 × 8s — the 8s clip is the LAST scene when every window is the same length');
+  assert.equal(windows.reduce((a, w) => a + w.motionSeconds, 0), 32, '32s of take for a 30s video');
   assert.deepEqual(windows.map(w => w.sceneNumber), [1, 2, 3, 4, 5], 'every scene moves');
-  assert.equal(veoCostUsd(30), 0.9, '30s × $0.03/s = $0.90 per 30s Scene video');
+  assert.deepEqual(windows.map(w => w.motionStartSeconds), [0, 6, 12, 18, 24], 'the windows tile the timeline');
+  assert.equal(veoCostUsd(32), 0.96, '32s × $0.03/s = $0.96 per 30s Scene video');
+  // The plan is pure and must never drift.
+  assert.deepEqual(planVeoClipDurations(5), [6, 6, 6, 6, 8]);
+  assert.equal(planVeoClipDurationsTotal(5), 32);
 });
 
-test('PLAN: a 3-scene 18s video buys THREE 6s calls = 18s of motion', () => {
+test('PLAN: the 8s clip goes to the LONGEST scene window — the long take is trimmed, never stretched', () => {
+  // Scene 3 is the long beat (8s) while the rest are short, so the 8s CALL must be
+  // scene 3's — not blindly the last one. Everything else stays a 6s take.
+  const script = [scene(1, 5), scene(2, 5), scene(3, 8), scene(4, 6), scene(5, 6)];
+  const windows = planVeoSceneWindows(script);
+  assert.deepEqual(windows.map(w => w.motionSeconds), [6, 6, 8, 6, 6],
+    'the longest scene (3) carries the 8s clip');
+  assert.equal(windows.reduce((a, w) => a + w.motionSeconds, 0), 32, 'the sum is unchanged by the swap');
+  assert.equal(windows.find(w => w.motionSeconds === 8)!.sceneNumber, 3);
+});
+
+test('PLAN: a 3-scene 18s video buys 2 × 6s + 1 × 8s = 20s (same shape, one fewer scene)', () => {
   const windows = planVeoSceneWindows([scene(1, 6), scene(2, 6), scene(3, 6)]);
   assert.equal(windows.length, 3);
-  assert.equal(windows.reduce((a, w) => a + w.motionSeconds, 0), 18);
-  assert.equal(veoCostUsd(18), 0.54);
+  assert.deepEqual(windows.map(w => w.motionSeconds), [6, 6, 8]);
+  assert.equal(windows.reduce((a, w) => a + w.motionSeconds, 0), 20);
+  assert.equal(veoCostUsd(20), 0.6);
+  // A single scene has no join to fold, so it buys the plain 6s take — the 8s
+  // tier there would be pure waste.
+  assert.deepEqual(planVeoClipDurations(1), [6]);
+  assert.deepEqual(planVeoSceneWindows([scene(1, 6)]).map(w => w.motionSeconds), [6]);
 });
 
-test('PLAN: a scene shorter than 6s takes the 4s tier — never 6s it cannot use', () => {
+test('PLAN: the per-call duration enum still snaps a lone scene, and every plan stays legal', () => {
+  // nearestLegalVeoSeconds still governs the legacy single-take path and the
+  // step-down guard, so its 4|6|8 contract is still pinned.
   assert.equal(nearestLegalVeoSeconds(3.0), 4);
   assert.equal(nearestLegalVeoSeconds(5.4), 4);
   assert.equal(nearestLegalVeoSeconds(5.99), 4);
@@ -179,24 +220,35 @@ test('PLAN: a scene shorter than 6s takes the 4s tier — never 6s it cannot use
   assert.equal(nearestLegalVeoSeconds(6.8), 6);
   assert.equal(nearestLegalVeoSeconds(7.0), 8);
   assert.equal(nearestLegalVeoSeconds(9.5), 8);
-  const windows = planVeoSceneWindows([scene(1, 5.4), scene(2, 6.5), scene(3, 7.5)]);
-  assert.deepEqual(windows.map(w => w.motionSeconds), [4, 6, 8]);
   assert.ok(VEO_LEGAL_DURATIONS.includes(4) && VEO_LEGAL_DURATIONS.includes(6) && VEO_LEGAL_DURATIONS.includes(8));
+  // Whatever the scene durations, EVERY window the planner emits is a legal call.
+  for (const durations of [[5.4, 6.5, 7.5], [6, 6, 6, 6, 6], [3, 3], [7, 7, 7, 7, 7], [2, 9, 4]]) {
+    const w = planVeoSceneWindows(durations.map((d, i) => scene(i + 1, d)));
+    for (const win of w) {
+      assert.ok((VEO_LEGAL_DURATIONS as readonly number[]).includes(win.motionSeconds),
+        `illegal call duration ${win.motionSeconds}s in plan ${JSON.stringify(durations)}`);
+    }
+  }
 });
 
-test('PLAN: total motion never exceeds the video, and never exceeds 30s', () => {
-  // 5 × 7s = 35s planned → each snaps to 8s, which would be 40s. Must step down.
+test('PLAN: total motion never exceeds the 32s ceiling (30s budget + 2s join slack)', () => {
+  // 5 × 7s = 35s planned. The old rule (each scene buys its own tier) would spend
+  // 40s; the owner's plan spends 32s and the joins fold the rest.
   const heavy = [1, 2, 3, 4, 5].map(n => scene(n, 7));
   const w = planVeoSceneWindows(heavy);
   const total = w.reduce((a, x) => a + x.motionSeconds, 0);
-  assert.ok(total <= 30, `total ${total}s must not exceed the 30s cap`);
-  assert.ok(total <= 35, 'and must not exceed the video itself');
+  assert.ok(total <= VEO_MOTION_PLAN_CEILING_SECONDS, `total ${total}s must not exceed the 32s ceiling`);
+  assert.ok(total <= 35 + VEO_MOTION_JOIN_SLACK_SECONDS, 'and must not exceed the video plus its join slack');
   assert.ok(w.length <= VEO_MAX_MOTION_WINDOWS);
+  // The ceiling is the budget plus the slack, and nothing more.
+  assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, 32);
+  assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, VEO_MOTION_BUDGET_SECONDS + VEO_MOTION_JOIN_SLACK_SECONDS);
   // A very short video cannot buy more motion than it has: a 6s video fits ONE
-  // 4s window, not two (8s of motion for a 6s video would be money for nothing).
+  // 6s window, not two (the ceiling is the video's own length + the join slack).
   const short = planVeoSceneWindows([scene(1, 3), scene(2, 3)]);
-  assert.equal(short.length, 1, 'only one 4s window fits a 6s video');
-  assert.ok(short.reduce((a, x) => a + x.motionSeconds, 0) <= 6, 'never more motion than the video itself');
+  assert.equal(short.length, 1, 'only one window fits a 6s video');
+  assert.ok(short.reduce((a, x) => a + x.motionSeconds, 0) <= 6 + VEO_MOTION_JOIN_SLACK_SECONDS,
+    'never more motion than the video itself plus its slack');
 });
 
 test('PLAN: spans carry one window per scene and applyVeoSceneMotion marks every scene motion', () => {
@@ -204,7 +256,7 @@ test('PLAN: spans carry one window per scene and applyVeoSceneMotion marks every
   const spans = planVeoSceneSpans(script);
   assert.equal(spans.length, 1, 'one span container holds every window');
   assert.equal(spans[0].windows.length, 5);
-  assert.equal(spans[0].totalSeconds, 30);
+  assert.equal(spans[0].totalSeconds, 32);
   const planned = applyVeoSceneMotion(script, spans);
   assert.equal(planned.filter(s => s.visualType === 'motion').length, 5, 'every scene is motion');
   assert.ok(planned.every(s => s.soraBlock === 0));
@@ -214,12 +266,20 @@ test('PLAN: spans carry one window per scene and applyVeoSceneMotion marks every
   assert.equal(planVeoSceneSpans([]).length, 0);
 });
 
-test('PLAN: capVeoMotionWindows keeps the whole 30s and demotes only what does not fit', () => {
+test('CAP: capVeoMotionWindows keeps the whole 4 × 6s + 1 × 8s plan and demotes only what does not fit', () => {
   const script = [1, 2, 3, 4, 5].map(n => scene(n, 6));
   const spans = planVeoSceneSpans(script);
-  const { spans: capped } = capVeoMotionWindows(script, spans);
-  assert.equal(capped[0].windows.length, 5, 'nothing demoted at 30s');
-  assert.equal(capped[0].totalSeconds, 30);
+  // The pipeline projects the plan onto the script BEFORE the cap, so the cap sees
+  // the same visualTypes the worker will act on.
+  const planned = applyVeoSceneMotion(script, spans);
+  const { script: kept, spans: capped } = capVeoMotionWindows(planned, spans);
+  assert.equal(capped[0].windows.length, 5, 'nothing demoted — 32s is exactly the ceiling');
+  assert.equal(capped[0].totalSeconds, 32, 'the 8s clip survives the cap');
+  assert.deepEqual(capped[0].windows.map(w => w.motionSeconds), [6, 6, 6, 6, 8]);
+  assert.equal(kept.filter(s => s.visualType === 'motion').length, 5, 'all five scenes still move');
+  // The default ceiling IS the owner's 32s — a 30s cap would demote the 8s clip and
+  // silently put the old 5 × 6s plan back.
+  assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, 32);
 });
 
 // ═══ (8) Faceless / Twin make ZERO Veo calls ═════════════════════════════════
@@ -255,42 +315,92 @@ function probeSeconds(f: string): number {
   return parseFloat(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', f]).toString().trim());
 }
 
-test('JOIN: two independently generated scene clips are joined by a DISSOLVE, not a visible hard cut', async () => {
-  // Two DIFFERENT designed stills — exactly the situation in a real 5-scene video,
-  // where every clip starts from its own frame and drifts over its 6s.
-  const stillA = path.join(TMP, 'scene-a.png');
-  const stillB = path.join(TMP, 'scene-b.png');
-  execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x101060:s=360x640:d=1', '-frames:v', '1', stillA]);
-  execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0xd0a020:s=360x640:d=1', '-frames:v', '1', stillB]);
-  const clipA = path.join(TMP, 'clip-a.mp4');
-  const clipB = path.join(TMP, 'clip-b.mp4');
-  for (const [still, out] of [[stillA, clipA], [stillB, clipB]] as const) {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-loop', '1', '-i', still, '-t', '2', '-r', '30',
-      '-vf', 'scale=360:640,format=yuv420p', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', out]);
-  }
-  // (a) the naive answer the owner vetoed: five clips stapled together
-  const hard = path.join(TMP, 'hard-cut.mp4');
-  const listFile = path.join(TMP, 'list.txt');
+/** Lowest luma in [from,to] seconds — a dip to black shows up here and nowhere else. */
+function minLuma(file: string, from: number, to: number): number {
+  const r = spawnSync('ffmpeg', [
+    '-hide_banner', '-i', file,
+    '-vf', `select='between(t,${from},${to})',signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+    '-f', 'null', '-',
+  ], { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' });
+  const text = String(r.stderr || '');
+  const vals = [...text.matchAll(/lavfi\.signalstats\.YAVG=([0-9.]+)/g)].map(m => parseFloat(m[1]));
+  if (!vals.length) throw new Error(`no luma samples from ffmpeg: ${text.slice(-400)}`);
+  return Math.min(...vals);
+}
+
+test('JOIN: two independently generated scene clips are joined by a MATCH-CUT — no transition of any kind', async () => {
+  // The owner's veto (Oct 12) killed the cross-dissolve ("transition flash"); the
+  // Nov 2 rework killed the dip-to-black that replaced it. What is left is NO
+  // TRANSITION: each clip's edge black is cut out and the two clips are cut on
+  // their best-matching frame pair, then butted together.
+  //
+  // The fixture is the real failure mode: clip A drifts AWAY from B's opening
+  // frame (it ends on the SHARED colour, which B only reaches 0.2s in), so the
+  // naive join is a visible jump while a 0.4s search finds an exact match.
+  const BLUE = '0x2050a0';   // A's opening picture
+  const SHARED = '0x40c040'; // the colour both clips converge on — the match
+  const WHITE = '0xf0f0f0';  // B's opening picture (the naive join's bad frame)
+  const colourClip = (out: string, parts: Array<[string, number]>): void => {
+    const inputs = parts.flatMap(([c, d]) => ['-f', 'lavfi', '-i', `color=c=${c}:s=360x640:d=${d}:r=30`]);
+    const graph = `${parts.map((_, i) => `[${i}:v]`).join('')}concat=n=${parts.length}:v=1:a=0,fps=30,format=yuv420p[v]`;
+    execFileSync('ffmpeg', ['-y', '-v', 'error', ...inputs, '-filter_complex', graph, '-map', '[v]',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '30', out]);
+  };
+  const clipA = path.join(TMP, 'mc-clip-a.mp4');
+  const clipB = path.join(TMP, 'mc-clip-b.mp4');
+  colourClip(clipA, [[BLUE, 1.4], [SHARED, 0.6]]); // ends on SHARED
+  colourClip(clipB, [[WHITE, 0.2], [SHARED, 1.8]]); // reaches SHARED 0.2s in
+  // (a) the naive answer: the two clips stapled together, untouched
+  const hard = path.join(TMP, 'mc-hard-cut.mp4');
+  const listFile = path.join(TMP, 'mc-list.txt');
   fs.writeFileSync(listFile, `file '${clipA}'\nfile '${clipB}'\n`);
   execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', hard]);
-  // (b) the pipeline's real assembler
-  const xfade = path.join(TMP, 'xfade.mp4');
-  await concatClips([clipA, clipB], xfade);
+  // (b) the pipeline's real assembler, in Scene mode
+  const matchCut = path.join(TMP, 'mc-joined.mp4');
+  const report = await concatClips([clipA, clipB], matchCut, {
+    join: 'match-cut', joinWorkDir: path.join(TMP, 'mc-cut'), joinLabel: 'fixture',
+  });
 
-  // Look at the 1.0s–2.4s window: the boundary lives inside it either way.
-  const hardDelta = { max: maxFrameDelta(hard, 1.0, 2.4) };
-  const xfadeDelta = { max: maxFrameDelta(xfade, 1.0, 2.4) };
-  // Report the real numbers in the failure message so a regression is diagnosable.
-  const msg = `hard-cut max frame delta=${hardDelta.max.toFixed(2)}  xfade max frame delta=${xfadeDelta.max.toFixed(2)}`;
-  console.log(`[JOIN] ${msg}  (delivered ${probeSeconds(xfade).toFixed(2)}s vs ${probeSeconds(hard).toFixed(2)}s hard-cut)`);
-  assert.ok(hardDelta.max > 40, `the hard-cut reference MUST spike (it is a jump cut): ${msg}`);
-  assert.ok(xfadeDelta.max < hardDelta.max * 0.6,
-    `the assembled join must be far smoother than a hard cut: ${msg}`);
-  assert.ok(xfadeDelta.max < 40, `the assembled join must not contain a frame-sized jump: ${msg}`);
-  // And the video is not longer/shorter than the assembler's own arithmetic.
+  // ── the report says exactly what the owner asked for ──────────────────────
+  assert.ok(report, 'a match-cut join must return its report (it is persisted on the project)');
+  assert.equal(report!.joinedBy, 'match-cut');
+  assert.equal(report!.transition, 'none', 'no xfade, no dip, no dissolve — NO transition');
+  assert.equal(report!.joins.length, 1);
+  const join = report!.joins[0];
+  assert.ok(join.bHeadDropFrames >= 1, `the join must cut B's opening frames away (got ${join.bHeadDropFrames})`);
+  assert.ok(join.bHeadDropFrames <= report!.searchFrames, 'and never more than the search window');
+  assert.ok(join.cutPsnr >= 30,
+    `the cut pair must read as the same picture (>=30 dB), got ${join.cutPsnr.toFixed(2)} dB`);
+  assert.ok(join.cutPsnr > join.naivePsnr,
+    `the search must beat the untouched join (cut ${join.cutPsnr} vs naive ${join.naivePsnr})`);
+  assert.equal(report!.visibleJoins, 0, 'no join may be delivered flagged as visibly cut');
+
+  // ── and the delivered frames agree ────────────────────────────────────────
+  const hardDelta = maxFrameDelta(hard, 1.9, 2.1);
+  const joinedDelta = maxFrameDelta(matchCut, 1.9, 2.1);
+  // The old fadeblack join dipped through BLACK at the seam; this one must not.
+  const seamMinLuma = minLuma(matchCut, 1.85, 2.15);
+  const msg = `hard-cut max delta=${hardDelta.toFixed(2)}  match-cut max delta=${joinedDelta.toFixed(2)}  `
+    + `seam min luma=${seamMinLuma.toFixed(2)}  cut=${join.cutPsnr} dB (naive ${join.naivePsnr} dB)`;
+  console.log(`[JOIN] ${msg}  (delivered ${probeSeconds(matchCut).toFixed(2)}s vs ${probeSeconds(hard).toFixed(2)}s hard-cut)`);
+  assert.ok(hardDelta > 40, `the hard-cut reference MUST spike (it is a jump cut): ${msg}`);
+  assert.ok(joinedDelta < hardDelta * 0.5, `the match-cut join must be far smoother than a hard cut: ${msg}`);
+  assert.ok(joinedDelta < 40, `the match-cut join must not contain a frame-sized jump: ${msg}`);
+  assert.ok(seamMinLuma > 40,
+    `there must be NO dip to black at the seam (the old fadeblack xfade was the whole problem): ${msg}`);
+
+  // ── the delivered LENGTH contract is unchanged by the rework ──────────────
+  // sum(clips) − 800ms per join: the match-cut FOLDS AWAY what the xfade used to
+  // OVERLAP, so every planner/delivery band downstream is untouched. The join ate
+  // 0.2s of real frames above; the exact-length pass takes the rest off the tail.
   const expected = 2 + 2 - 0.8;
-  assert.ok(Math.abs(probeSeconds(xfade) - expected) < 0.25,
-    `delivered length must be sum − overlaps (${expected}s), got ${probeSeconds(xfade)}s`);
+  assert.ok(Math.abs(probeSeconds(matchCut) - expected) < 0.15,
+    `delivered length must be sum − 800ms per join (${expected}s), got ${probeSeconds(matchCut)}s`);
+  assert.ok(Math.abs(report!.deliveredSeconds - expected) < 0.15,
+    `the report's deliveredSeconds must match the file (${report!.deliveredSeconds}s)`);
+  assert.ok(Math.abs(report!.targetSeconds - expected) < 0.02, 'the target was the 3.2s contract');
+  assert.ok(report!.correctionSeconds > 0.1,
+    'the exact-length pass must be the thing that closes the gap, not luck');
 });
 
 // ═══ (6) NARRATION SYNC ══════════════════════════════════════════════════════
@@ -315,8 +425,8 @@ test('SYNC: a take is FITTED to its scene window — trimmed when long, slowed w
 });
 
 test('SYNC: fitted windows sum to the planned video length — narration and picture agree', async () => {
-  const planned = [6.8, 6.8, 6.8, 6.8, 6.8]; // 5 scenes, 34s before dissolve compensation
-  const takes = [6, 6, 6, 6, 6];              // what Veo actually sold us
+  const planned = [6.8, 6.8, 6.8, 6.8, 6.8]; // 5 scenes, 34s before the per-join 800ms allowance
+  const takes = [6, 6, 6, 6, 6];              // a 6s take per window (the 8s clip is scene N's)
   let sum = 0;
   for (let i = 0; i < takes.length; i++) {
     const f = path.join(TMP, `sync-${i}.mp4`);
@@ -327,8 +437,10 @@ test('SYNC: fitted windows sum to the planned video length — narration and pic
   }
   assert.ok(Math.abs(sum - planned.reduce((a, b) => a + b, 0)) < 0.5,
     `fitted clips must sum to the planned length (34s), got ${sum}s`);
-  // And the assembled video lands on the planner's own band after dissolve overlap.
-  assert.ok(Math.abs((sum - 4 * 0.8) - 30.8) < 0.6, 'sum − 4×0.8s overlaps stays in the 29.5–30.5s band');
+  // And the assembled video lands on the planner's own band after the join allowance.
+  // The match-cut join FOLDS AWAY 800ms per join where the xfade used to OVERLAP it,
+  // so this arithmetic is deliberately unchanged by the rework.
+  assert.ok(Math.abs((sum - 4 * 0.8) - 30.8) < 0.6, 'sum − 4×0.8s per-join allowance stays in the 29.5–30.5s band');
 });
 
 // ═══ (7) THE REAL REASON reaches the client ══════════════════════════════════
