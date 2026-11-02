@@ -53,6 +53,10 @@ import {
   VEO_PROVIDER_TAG,
   VEO_CALL_SECONDS,
   VEO_MOTION_BUDGET_SECONDS,
+  VEO_MOTION_JOIN_SLACK_SECONDS,
+  VEO_MOTION_PLAN_CEILING_SECONDS,
+  VEO_LONG_CLIP_SECONDS,
+  planVeoClipDurations,
   VEO_MAX_MOTION_WINDOWS,
   VEO_ASPECT_RATIO,
   VEO_RESOLUTION,
@@ -707,12 +711,17 @@ test('REGRESSION GUARD: a full happy path never touches the retired host', async
   } finally { mock.restore(); restoreSa(); }
 });
 
-test('CONSTANTS: Vertex model id, lite tag, 6s enum, 12s motion budget, 9:16/720p, poll cap 120', () => {
+test('CONSTANTS: Vertex model id, lite tag, 4|6|8 enum, 30s budget + 2s join slack = 32s ceiling, 9:16/720p, poll cap 120', () => {
   assert.equal(VEO_MODEL, 'veo-3.1-lite-generate-001', 'the Vertex Lite model — never the retired -preview id');
   assert.equal(VEO_PROVIDER_TAG, 'veo-3.1-lite');
-  assert.equal(VEO_CALL_SECONDS, 6, 'enum 4|6|8 — production uses one 6s take per window');
+  assert.equal(VEO_CALL_SECONDS, 6, 'the standard take is 6s; the long tier is 8s (owner Nov 2)');
+  assert.equal(VEO_LONG_CLIP_SECONDS, 8, 'the one 8s call the owner\'s plan buys');
   assert.equal(VEO_MOTION_BUDGET_SECONDS, 30, 'the WHOLE video is the motion budget (owner Nov 2)');
-  assert.equal(VEO_MAX_MOTION_WINDOWS, 5, '30s / 6s = at most 5 paid calls per video');
+  assert.equal(VEO_MOTION_JOIN_SLACK_SECONDS, 2, 'the extra 2s FFmpeg folds into the joins');
+  assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, 32, '30s budget + 2s join slack — the paid-motion ceiling');
+  assert.deepEqual(planVeoClipDurations(5), [6, 6, 6, 6, 8], 'the owner\'s 4 × 6s + 1 × 8s plan');
+  assert.equal(planVeoClipDurations(5).reduce((a, b) => a + b, 0), 32, 'and it never exceeds the ceiling');
+  assert.equal(VEO_MAX_MOTION_WINDOWS, 5, 'at most 5 paid calls per video — one per designed scene');
   assert.equal(VEO_ASPECT_RATIO, '9:16');
   assert.equal(VEO_RESOLUTION, '720p');
   assert.equal(VEO_POLL_MAX_ATTEMPTS, 120, 'sanity cap only — never an elapsed-time abandon');
@@ -745,13 +754,27 @@ test('CAP: all 3 windows of an 18s video are KEPT — no "important windows only
   assert.equal(s2.reduce((a, s) => a + s.duration, 0), 18, 'time budget preserved');
 });
 
+test('CAP: the owner\'s 4 × 6s + 1 × 8s plan (32s) survives the cap untouched', () => {
+  // The default ceiling MUST be 32, not 30: a 30s cap would demote the 8s clip and
+  // quietly restore the old 5 × 6s plan the owner replaced.
+  const script = Array.from({ length: 5 }, (_, i) => motion(i + 1, `beat ${i + 1}`));
+  const windows: MotionWindow[] = [6, 6, 6, 6, 8].map((secs, i) => ({ sceneNumber: i + 1, motionStartSeconds: i * 6, motionSeconds: secs }));
+  const spans: SoraSpan[] = [{ soraBlock: 0, sceneNumbers: script.map(s => s.sceneNumber), totalSeconds: 32, windows, prompt: 't' }];
+  const { script: s2, spans: sp2 } = capVeoMotionWindows(script, spans);
+  assert.equal(sp2[0].windows.length, 5, 'all five calls kept');
+  assert.equal(sp2[0].totalSeconds, 32, '32s is exactly the ceiling — not one second more is allowed, not one less');
+  assert.deepEqual(sp2[0].windows.map(w => w.motionSeconds), [6, 6, 6, 6, 8]);
+  assert.equal(s2.filter(s => s.visualType === 'motion').length, 5, 'nothing demoted');
+});
+
 test('CAP: 6 windows (36s) are capped to 5 windows / 30s — the tail scene is demoted to a still', () => {
   const script = Array.from({ length: 6 }, (_, i) => motion(i + 1, `beat ${i + 1}`));
   const windows: MotionWindow[] = script.map((s, i) => ({ sceneNumber: s.sceneNumber, motionStartSeconds: i * 6, motionSeconds: 6 }));
   const spans: SoraSpan[] = [{ soraBlock: 0, sceneNumbers: script.map(s => s.sceneNumber), totalSeconds: 36, windows, prompt: 't' }];
   const { script: s2, spans: sp2 } = capVeoMotionWindows(script, spans);
   assert.equal(sp2[0].windows.length, 5, 'never more than 5 paid calls');
-  assert.equal(sp2[0].totalSeconds, 30, 'never more than 30 billed seconds');
+  // 5 × 6s = 30s is what fits: a 6th 6s call would reach 36s, past the 32s ceiling.
+  assert.equal(sp2[0].totalSeconds, 30, 'never more than the 32s ceiling allows (5 × 6s fits, 6 × 6s does not)');
   assert.equal(s2.filter(s => s.visualType === 'motion').length, 5);
   const demoted = s2.find(s => s.sceneNumber === 6)!;
   assert.equal(demoted.visualType, 'still', 'the 6th scene falls back to a still');
