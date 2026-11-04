@@ -440,6 +440,7 @@ export function normalizeAssemblyOverlays(
   const perScene = Array.isArray(r.perScene) ? (r.perScene as unknown[]) : null;
   if (perScene) {
     const groups: NonNullable<AssemblyOverlaySpec['perScene']> = [];
+    let anyContent = false;
     for (let i = 0; i < Math.min(perScene.length, sceneCount); i++) {
       const g = perScene[i] as Record<string, unknown> | null | undefined;
       const group: { lines?: string[]; bullets?: AssemblyBullet[]; panel?: AssemblyBulletPanel } = {};
@@ -474,10 +475,19 @@ export function normalizeAssemblyOverlays(
         if (panel && typeof panel === 'object' && (g as any)?.panel !== undefined) {
           group.panel = panel as AssemblyBulletPanel;
         }
-        groups.push(group);
+        anyContent = true;
       }
+      // SCENE INDEX IS LOAD-BEARING — an EMPTY group is still pushed. Compacting
+      // empties (`groups.push` only when non-empty) shifted every later scene
+      // down: `[{}, {bullets}, {}, {}, {}]` became `perScene[0]`, so the bullets
+      // drawn for scene 2 appeared over SCENE 1. `perScene[i]` must mean scene i,
+      // which is what the draw loop (applyAssemblyOverlays) and
+      // mergePerSceneBullets already assume.
+      groups.push(group);
     }
-    if (groups.length > 0) spec.perScene = groups;
+    // A spec whose every group is empty is still "nothing to draw" (⇒ null-ish),
+    // so the pixel-exact no-overlay path is unchanged.
+    if (anyContent) spec.perScene = groups;
   }
   if (typeof r.bottomBar === 'string' && r.bottomBar.trim().length > 0) {
     spec.bottomBar = r.bottomBar.trim();

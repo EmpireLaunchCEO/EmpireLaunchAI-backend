@@ -19,7 +19,7 @@ import {
   planVeoClipDurations,
   veoCostUsd,
 } from './veoVideoService.js';
-import { planMatchCutCuts, JOIN_GOOD_PSNR, JOIN_VISIBLE_PSNR, type MatchCutReport } from './sceneJoinService.js';
+import { planMatchCutCuts, JOIN_GOOD_PSNR, JOIN_VISIBLE_PSNR, assertClipPicture, type MatchCutReport } from './sceneJoinService.js';
 import { renderingEngine, type SourceImageOutcome } from './renderingEngine.js';
 import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
@@ -852,6 +852,13 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
     // xfade offsets are exact and audio can be crossfaded and mapped into the final.
     const probes = inputs.map(probe);
     const seconds = probes.map(p => p.seconds);
+    // ── INPUT PICTURE GATE (owner launch render #3, Nov 4 2026) ───────────────
+    // The graph below maps `[i:v]` for EVERY input, so a clip with no video stream
+    // dies inside ffmpeg with "Stream map '0:v:0' matches no streams" — the exact
+    // error that threw away three fully-paid renders. The join helpers now refuse
+    // to write such a clip; this is the BOUNDARY check, so no path (join, mode,
+    // retry, a future helper) can hand the concat a file without a picture.
+    inputs.forEach((f, i) => assertClipPicture(f, `concatClips input ${i}`, false));
     // With match-cut the neighbours SHARE NO TIME: the audio timeline advances by the
     // full kept length of every clip, so the overlap term is zero.
     const trUsed = matchCutReport ? 0 : tr;
@@ -3313,10 +3320,10 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // planner never turned the relayed benefit components into overlay lines.
     // Build the bullet panel deterministically from the component inventory
     // and MERGE it into the overlay spec (existing flash / bottomBar
-    // untouched). ONE scene-1 panel of <=4 lines: the overlay normalizer
-    // compacts empty perScene groups, so index 0 is the only position that
-    // survives the persisted-metadata round-trip — the proven render-#8
-    // shape the owner accepted.
+    // untouched). ONE scene-1 panel of <=4 lines (distributeBulletPanels). The
+    // normalizer now PRESERVES the scene index — empty groups are kept as
+    // placeholders — so a panel aimed at scene i really draws over scene i; it
+    // used to compact the empties and draw every panel over scene 1.
     const bulletLines = callerSuppliedOverlays ? [] : buildBulletOverlayLines(inventory, f4SellingPoints);
     if (bulletLines.length) {
       const bulletPanels = distributeBulletPanels(bulletLines, planned.length);

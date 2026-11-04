@@ -229,10 +229,72 @@ export function probeHasAudio(file: string): boolean {
   } catch { return false; }
 }
 
+/** ─── PICTURE INVARIANT (owner launch render #3, Nov 4 2026) ──────────────────
+ *  THE THIRD `-map` DISAGREEMENT — and the last one that can reach the concat.
+ *
+ *  In ffmpeg, as soon as ANY `-map` is given, ONLY the mapped streams are written.
+ *  `cutFrames` mapped the narration (`-map 0:a:0`) and nothing else, so it wrote an
+ *  AUDIO-ONLY file and the `-vf` picture chain was silently ignored; the exact-length
+ *  correction then called `trimTailSeconds` on that file and assembly died with
+ *  "Stream map '0:v:0' matches no streams" — AFTER every paid stage of the owner's
+ *  launch video. Oct 9 (xfade labels) and Nov 4 (bare `ad0`) were the same class.
+ *
+ *  So every helper below that WRITES a clip now probes what it actually wrote and
+ *  refuses to return a clip with no picture — and refuses to drop a narration the
+ *  source carried. A video-less clip can no longer reach the concat at all: the
+ *  failure is a named, precise error at the helper instead of a raw ffmpeg exit
+ *  code at the very end of an already-paid render. */
+export interface ClipStreams { hasVideo: boolean; hasAudio: boolean; types: string[]; }
+
+/** What streams does this file actually contain? (local ffprobe, deterministic) */
+export function probeStreams(file: string): ClipStreams {
+  let types: string[] = [];
+  try {
+    const out = execFileSync(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file],
+      { maxBuffer: 1024 * 1024 },
+    ).toString();
+    types = out.split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch { types = []; }
+  return { hasVideo: types.includes('video'), hasAudio: types.includes('audio'), types };
+}
+
+/** PURE half of the invariant: given what a clip actually contains, throw unless it
+ *  has a picture — and unless it still carries the narration its source had. */
+export function assertClipStreams(
+  streams: ClipStreams,
+  opts: { helper: string; file: string; expectAudio: boolean },
+): void {
+  const list = streams.types.length ? streams.types.join(',') : 'none';
+  if (!streams.hasVideo) {
+    throw new Error(
+      `CLIP_PICTURE_INVARIANT ${opts.helper} wrote a clip with NO video stream — file=${opts.file} streams=[${list}]. ` +
+      `A -map list that omits 0:v:0 makes ffmpeg write only the mapped streams and silently IGNORE the -vf chain ` +
+      `(that is what wrote audio-only match-cut clips and killed the launch render at "Stream map '0:v:0' matches no streams"). ` +
+      `Refusing to let a video-less clip reach the concat.`,
+    );
+  }
+  if (opts.expectAudio && !streams.hasAudio) {
+    throw new Error(
+      `CLIP_AUDIO_INVARIANT ${opts.helper} dropped the narration — file=${opts.file} streams=[${list}]. ` +
+      `The clip carried an audio stream before the cut, so it must carry one after it.`,
+    );
+  }
+}
+
+/** Probe the clip a helper just wrote and enforce the invariant on it. */
+export function assertClipPicture(file: string, helper: string, expectAudio: boolean): void {
+  assertClipStreams(probeStreams(file), { helper, file, expectAudio });
+}
+
 /** The audio half of a re-encode: carry the clip's narration through, or say
- *  explicitly that there is none. Never leaves the choice to ffmpeg's default. */
-function audioCarryArgs(file: string): string[] {
-  return probeHasAudio(file)
+ *  explicitly that there is none. Never leaves the choice to ffmpeg's default.
+ *  NOTE: this is only HALF a map list — every caller must pair it with
+ *  `-map 0:v:0`, because the presence of any `-map` suppresses ffmpeg's default
+ *  stream selection (the defect that cost the launch render). */
+function audioCarryArgs(carry: boolean): string[] {
+  return carry
     ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2']
     : ['-an'];
 }
@@ -270,16 +332,25 @@ export async function trimEdgeBlack(file: string, out: string): Promise<{ path: 
   const total = probeSecondsOf(file);
   const start = Math.max(0, edge.headSeconds - 1 / JOIN_FPS); // keep 1 frame of safety
   const keep = Math.max(0.1, total - start - Math.max(0, edge.tailSeconds - 1 / JOIN_FPS));
-  if (edge.headSeconds === 0 && edge.tailSeconds === 0) return { path: file, removedHead: 0, removedTail: 0, seconds: total };
+  const carry = probeHasAudio(file);
+  if (edge.headSeconds === 0 && edge.tailSeconds === 0) {
+    // Pass-through: nothing was written, but the clip that continues to the join is
+    // still held to the picture invariant (a video-less input must fail HERE).
+    assertClipPicture(file, 'trimEdgeBlack (pass-through)', carry);
+    return { path: file, removedHead: 0, removedTail: 0, seconds: total };
+  }
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y',
     // `-ss` BEFORE `-i` = input seek, so it applies to the audio stream too: the
     // narration stays frame-aligned with the picture it was fitted to.
     '-ss', start.toFixed(3), '-i', file, '-t', keep.toFixed(3),
-    '-map', '0:v:0', ...audioCarryArgs(file),
+    // PICTURE FIRST, ALWAYS: any `-map` suppresses ffmpeg's default selection, so
+    // 0:v:0 must be named explicitly next to the audio map (or the -vf is ignored).
+    '-map', '0:v:0', ...audioCarryArgs(carry),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);
+  assertClipPicture(out, 'trimEdgeBlack', carry);
   return { path: out, removedHead: edge.headSeconds, removedTail: edge.tailSeconds, seconds: probeSecondsOf(out) };
 }
 
@@ -318,6 +389,12 @@ export async function cutFrames(file: string, out: string, dropHeadFrames: numbe
   // where it was spoken relative to the picture. Without this the match-cut join
   // silently deleted the narration of every clip it touched.
   const carry = probeHasAudio(file);
+  // PICTURE + NARRATION, BOTH MAPPED EXPLICITLY. `-map 0:a:0` on its own is not
+  // "keep the audio as well" — it is "write ONLY the audio": ffmpeg's default
+  // stream selection is suppressed by the first `-map`, so the `-vf` picture chain
+  // is dropped and the output is an audio-only file. That file then died in
+  // `trimTailSeconds` ("Stream map '0:v:0' matches no streams") at the last step of
+  // the owner's launch render, after every paid stage had been spent.
   const audioArgs = carry
     ? [
         '-map', '0:a:0',
@@ -327,22 +404,27 @@ export async function cutFrames(file: string, out: string, dropHeadFrames: numbe
     : ['-an'];
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y', '-i', file,
+    '-map', '0:v:0',
     '-vf', `fps=${JOIN_FPS},trim=start_frame=${startFrame}:end_frame=${endFrame},setpts=PTS-STARTPTS`,
     ...audioArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);
+  // The cut must not be able to produce anything the concat cannot use.
+  assertClipPicture(out, 'cutFrames', carry);
   return out;
 }
 
 /** Trim `seconds` off the END of a clip (used for the exact-length correction). */
 export async function trimTailSeconds(file: string, out: string, keepSeconds: number): Promise<string> {
+  const carry = probeHasAudio(file);
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y', '-i', file,
     '-t', Math.max(0.1, keepSeconds).toFixed(3),
-    '-map', '0:v:0', ...audioCarryArgs(file),
+    '-map', '0:v:0', ...audioCarryArgs(carry),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);
+  assertClipPicture(out, 'trimTailSeconds', carry);
   return out;
 }
 

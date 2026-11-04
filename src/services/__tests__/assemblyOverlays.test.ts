@@ -42,8 +42,16 @@ test('normalizeAssemblyOverlays: clean spec / malformed dropped / null when empt
     5,
   );
   assert.ok(spec, 'spec present');
-  assert.equal(spec?.perScene?.length, 3, 'empty/malformed groups dropped');
+  // SCENE INDEX IS PRESERVED (fixed Nov 4): empty/malformed groups are KEPT as
+  // placeholders, so perScene[i] means scene i. Compacting them (the old
+  // behaviour, which this test used to assert) shifted every later scene down and
+  // drew scene 2's bullets over scene 1.
+  assert.equal(spec?.perScene?.length, 5, 'one group per scene — index preserved');
   assert.equal(spec?.perScene?.[0]?.lines?.length, 2);
+  assert.equal(spec?.perScene?.[1]?.lines?.length, 2);
+  assert.equal(spec?.perScene?.[2]?.lines, undefined, 'scene 3 carried no text → empty placeholder');
+  assert.equal(spec?.perScene?.[3]?.lines, undefined, 'scene 4 carried no text → empty placeholder');
+  assert.deepEqual(spec?.perScene?.[4]?.lines, ['Go to EmpireLaunchAI.com to get started today!!']);
   assert.equal(spec?.bottomBar, 'EmpireLaunchAI.com');
 
   // absent / empty → null (today's pixel-exact output, zero re-encode)
@@ -58,6 +66,19 @@ test('normalizeAssemblyOverlays: clean spec / malformed dropped / null when empt
     1,
   );
   assert.equal(trimmed?.perScene?.length, 1, 'perScene trimmed to sceneCount');
+});
+
+test('normalizeAssemblyOverlays: perScene keeps the SCENE INDEX (empty groups are NOT compacted)', () => {
+  // The launch-render shape: only scene 2 carries bullets.
+  const bullets = [{ text: 'You get 76 videos a month.', marker: '\u2713', at: 0.9 }];
+  const spec = normalizeAssemblyOverlays({ perScene: [{}, { bullets }, {}, {}, {}] }, 5);
+  assert.ok(spec?.perScene, 'perScene survived normalization');
+  assert.equal(spec.perScene.length, 5, 'one group per scene');
+  assert.equal(spec.perScene[0].bullets, undefined, 'scene 1 must stay empty — the bullets are scene 2\'s');
+  assert.equal(spec.perScene[1].bullets?.length, 1, 'the bullets belong to scene index 1');
+  assert.equal(spec.perScene[1].bullets?.[0].text, 'You get 76 videos a month.');
+  // Every group empty ⇒ still nothing to draw (the pixel-exact no-overlay path).
+  assert.equal(normalizeAssemblyOverlays({ perScene: [{}, {}, {}] }, 3), null);
 });
 
 test('resolveOverlayFont: a drawtext-usable font resolves on this runtime', () => {
