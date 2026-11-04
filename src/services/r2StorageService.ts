@@ -1,5 +1,6 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { Readable } from 'stream';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -187,6 +188,65 @@ export class R2StorageService {
       return { url, r2Key: result.key };
     }
     return { url: localPath };
+  }
+
+  /**
+   * Metadata for an object without transferring it. Used by the browser
+   * streaming route to learn the real byte size before answering a Range
+   * request (so `206`/`416` can be decided without downloading the file).
+   */
+  async headObject(key: string): Promise<{ size: number; contentType: string | null } | null> {
+    const client = getClient();
+    if (!client) return null;
+
+    try {
+      const head = await client.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+      const size = Number(head.ContentLength ?? 0);
+      if (!Number.isFinite(size) || size <= 0) return null;
+      return { size, contentType: head.ContentType ?? null };
+    } catch (error: any) {
+      console.error('[R2Storage] headObject failed:', error?.message || error);
+      return null;
+    }
+  }
+
+  /**
+   * Open a byte stream for an object, optionally a single byte range.
+   *
+   * Returns the live body stream (never a Buffer) so a 30s 720p mp4 is proxied
+   * to the browser without loading the whole file into memory. `range` must be
+   * a pre-validated `bytes=start-end` header — the caller computes it from
+   * headObject's size so R2 never has to answer with a 416.
+   */
+  async getObjectStream(
+    key: string,
+    range?: string,
+  ): Promise<{
+    body: Readable;
+    contentLength: number | null;
+    contentRange: string | null;
+    contentType: string | null;
+  } | null> {
+    const client = getClient();
+    if (!client) return null;
+
+    try {
+      const response = await client.send(new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        ...(range ? { Range: range } : {}),
+      }));
+      if (!response.Body) return null;
+      return {
+        body: response.Body as unknown as Readable,
+        contentLength: response.ContentLength ?? null,
+        contentRange: response.ContentRange ?? null,
+        contentType: response.ContentType ?? null,
+      };
+    } catch (error: any) {
+      console.error('[R2Storage] getObjectStream failed:', error?.message || error);
+      return null;
+    }
   }
 
   /** Download an object from R2 as a Buffer. */
