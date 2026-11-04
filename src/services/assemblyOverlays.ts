@@ -326,6 +326,106 @@ export function buildBottomBarEnableExpression(
   return `enable='${expr}'`;
 }
 
+/**
+ * ROUTE-LEVEL VALIDATION for a caller-supplied `onScreenOverlays` payload.
+ *
+ * `normalizeAssemblyOverlays` below is deliberately LENIENT: it drops malformed
+ * entries so a bad stored payload can never break a render. A REQUEST is a
+ * different thing — accepting it silently is how the owner's blinking bottom bar
+ * became unreachable from the product (the scene route never forwarded the object
+ * at all, and nothing tested the route). So the route validates first:
+ *   • anything malformed → a readable 400 and NOTHING is stored (never a
+ *     half-parsed object that renders a bar the client did not ask for);
+ *   • a valid payload is returned UNTOUCHED, for `createProject` to normalize and
+ *     persist to `metadata.onScreenOverlays` exactly as the approval route does.
+ *
+ * Accepts the documented shape only: { perScene?, bottomBar?, bottomBarBlink?,
+ * flash? } — see AssemblyOverlaySpec.
+ */
+export type OverlayValidation =
+  | { ok: true; value: Record<string, unknown> | undefined }
+  | { ok: false; error: string };
+
+export function validateOverlayPayload(raw: unknown): OverlayValidation {
+  if (raw === undefined || raw === null) return { ok: true, value: undefined };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      ok: false,
+      error:
+        'Invalid onScreenOverlays — expected an object like { perScene: [{ bullets: [{ text, marker, at }] }], bottomBar: "EmpireLaunchAI.com", bottomBarBlink: { onSeconds: 0.5, offSeconds: 0.4 }, flash: { text, durationSec } }',
+    };
+  }
+  const r = raw as Record<string, unknown>;
+  if (r.perScene !== undefined) {
+    if (!Array.isArray(r.perScene)) return { ok: false, error: 'Invalid onScreenOverlays.perScene — expected an array, one entry per scene (use {} for a scene with no text)' };
+    for (let i = 0; i < r.perScene.length; i++) {
+      const g = r.perScene[i];
+      if (g === undefined || g === null) continue;
+      if (typeof g !== 'object' || Array.isArray(g)) {
+        return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}] — expected an object ({} when the scene carries no text)` };
+      }
+      const group = g as Record<string, unknown>;
+      if (group.lines !== undefined && (!Array.isArray(group.lines) || (group.lines as unknown[]).some((l) => typeof l !== 'string'))) {
+        return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].lines — expected an array of strings` };
+      }
+      if (group.bullets !== undefined) {
+        if (!Array.isArray(group.bullets)) return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].bullets — expected an array of { text, marker?, at? }` };
+        for (let j = 0; j < group.bullets.length; j++) {
+          const b = (group.bullets as unknown[])[j];
+          if (!b || typeof b !== 'object' || Array.isArray(b)) {
+            return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].bullets[${j}] — expected { text, marker?, at? }` };
+          }
+          const bb = b as Record<string, unknown>;
+          if (typeof bb.text !== 'string' || !bb.text.trim()) {
+            return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].bullets[${j}].text — a bullet needs the words to show on screen` };
+          }
+          if (bb.at !== undefined && !Number.isFinite(Number(bb.at))) {
+            return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].bullets[${j}].at — expected a number of seconds` };
+          }
+          if (bb.marker !== undefined && typeof bb.marker !== 'string') {
+            return { ok: false, error: `Invalid onScreenOverlays.perScene[${i}].bullets[${j}].marker — expected a string such as "✓"` };
+          }
+        }
+      }
+    }
+  }
+  if (r.bottomBar !== undefined) {
+    if (typeof r.bottomBar !== 'string' || !r.bottomBar.trim()) {
+      return { ok: false, error: 'Invalid onScreenOverlays.bottomBar — expected the text to burn into the bottom of the video, e.g. "EmpireLaunchAI.com"' };
+    }
+  }
+  if (r.bottomBarBlink !== undefined && r.bottomBarBlink !== null) {
+    const blink = r.bottomBarBlink as Record<string, unknown>;
+    if (typeof blink !== 'object' || Array.isArray(blink)) {
+      return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink — expected { onSeconds, offSeconds }' };
+    }
+    const on = Number(blink.onSeconds);
+    const off = Number(blink.offSeconds);
+    if (!Number.isFinite(on) || !Number.isFinite(off)) {
+      return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink — onSeconds and offSeconds must both be numbers of seconds' };
+    }
+    if (on <= 0) return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink.onSeconds — must be greater than 0 (a bar that is never visible cannot be burned in)' };
+    if (off < 0) return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink.offSeconds — must be 0 or more' };
+    if (on > 10 || off > 10) return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink — onSeconds and offSeconds must be 10 seconds or less' };
+    if (r.bottomBar === undefined) {
+      return { ok: false, error: 'Invalid onScreenOverlays.bottomBarBlink — a blink cadence needs bottomBar text to blink; send both or neither' };
+    }
+  }
+  if (r.flash !== undefined && r.flash !== null) {
+    const flash = r.flash as Record<string, unknown>;
+    if (typeof flash !== 'object' || Array.isArray(flash)) {
+      return { ok: false, error: 'Invalid onScreenOverlays.flash — expected { text, durationSec? }' };
+    }
+    if (typeof flash.text !== 'string' || !flash.text.trim()) {
+      return { ok: false, error: 'Invalid onScreenOverlays.flash.text — expected the words to flash at the end, e.g. "GO TO EMPIRELAUNCHAI.COM"' };
+    }
+    if (flash.durationSec !== undefined && !Number.isFinite(Number(flash.durationSec))) {
+      return { ok: false, error: 'Invalid onScreenOverlays.flash.durationSec — expected a number of seconds' };
+    }
+  }
+  return { ok: true, value: r };
+}
+
 /** Pure: validate + normalize an untrusted `onScreenOverlays` metadata payload.
  *  Returns a clean spec (or null when there is nothing to draw). Malformed
  *  entries are dropped, never thrown — the acceptance render must not die on a
@@ -458,7 +558,14 @@ export function applyAssemblyOverlays(
   spec: AssemblyOverlaySpec,
   sceneStarts: number[],
   sceneSeconds: number[],
-  opts?: { fontPath?: string },
+  opts?: {
+    fontPath?: string;
+    /** OBSERVABILITY ONLY (owner Nov 4): receive the REAL filtergraph this pass
+     *  hands to ffmpeg. Used by the fixture that proves a requested blink cadence
+     *  reaches the encoder — asserting on the graph ffmpeg is actually given, not
+     *  on a helper called in isolation. Never changes what is drawn. */
+    onFilter?: (graph: string) => void;
+  },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const font = opts?.fontPath ?? resolveOverlayFont();
@@ -590,6 +697,7 @@ export function applyAssemblyOverlays(
         resolve();
         return;
       }
+      try { opts?.onFilter?.(vf.join(',')); } catch { /* observability never breaks a render */ }
       const args = [
         '-hide_banner', '-loglevel', 'error', '-y',
         '-i', inputFile,
