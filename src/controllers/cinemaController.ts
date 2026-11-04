@@ -178,7 +178,7 @@ export class CinemaController {
    */
   async createNeuralTwin(req: Request, res: Response): Promise<void> {
     try {
-      const { photoPath, script, voiceStyle, mood, conversation, conversationHistory } = req.body;
+      const { photoPath, script, voiceStyle, mood, voice, conversation, conversationHistory } = req.body;
       const userId = resolveUserId(req) || 'system';
 
       if (!photoPath && !req.body.photoUrl) {
@@ -233,6 +233,7 @@ export class CinemaController {
         script,
         voiceStyle,
         mood: moodVal,
+        voice: ['female', 'male', 'none'].includes(String(voice || '').toLowerCase()) ? String(voice).toLowerCase() as 'female' | 'male' | 'none' : undefined,
         duration: durationVal,
         conversation: conv,
       });

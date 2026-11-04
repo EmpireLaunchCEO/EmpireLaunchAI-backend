@@ -80,10 +80,17 @@ test('the enforced script (not the raw cooked pitch) feeds the twin downstream p
     /generateLipSyncReasoning\(finalTwinScript\)/,
     'lip-sync reasoning must read the ENFORCED script'
   );
+  // Twin rebuild: frames are one-per-PLANNED-SEGMENT, so the plan (built from
+  // finalTwinScript, asserted below) is what the frame builder receives.
   assert.match(
     SERVICE_SRC,
-    /generateTalkingFrames\(\s*facialDna,\s*lipSyncData,\s*finalTwinScript,/,
-    'talking frames must render the ENFORCED script text'
+    /buildTwinPlan\(\s*finalTwinScript,/,
+    'the shared twin plan must be built from the ENFORCED script'
+  );
+  assert.match(
+    SERVICE_SRC,
+    /generateTalkingFrames\(\s*facialDna,\s*lipSyncData,\s*twinPlan\.plan,/,
+    'talking frames must render the ENFORCED script text (via the plan built from it)'
   );
   assert.match(
     SERVICE_SRC,
@@ -105,7 +112,7 @@ test('the enforced script (not the raw cooked pitch) feeds the twin downstream p
 test('cinemaController (/api/cinema/create-twin) plumbs conversation or legacy conversationHistory into createNeuralTwin', () => {
   assert.match(
     CINEMA_CTRL_SRC,
-    /const\s*\{\s*photoPath,\s*script,\s*voiceStyle,\s*mood,\s*conversation,\s*conversationHistory\s*\}\s*=\s*req\.body;/,
+    /const\s*\{\s*photoPath,\s*script,\s*voiceStyle,\s*mood,\s*(?:voice,\s*)?conversation,\s*conversationHistory\s*\}\s*=\s*req\.body;/,
     'cinema twin handler must read BOTH conversation and legacy conversationHistory from the body'
   );
   assert.match(
@@ -127,7 +134,7 @@ test('cinemaController (/api/cinema/create-twin) plumbs conversation or legacy c
 test('empireStudioController (/api/studio/cinema/twin) plumbs conversation (same shape) into createNeuralTwin', () => {
   assert.match(
     STUDIO_CTRL_SRC,
-    /const\s*\{\s*photoUrl,\s*script,\s*voiceId,\s*conversation\s*\}\s*=\s*req\.body;/,
+    /const\s*\{\s*photoUrl,\s*script,\s*voiceId,\s*(?:voice,\s*mood,\s*duration,\s*voiceStyle,\s*)?conversation\s*\}\s*=\s*req\.body;/,
     'studio twin handler must read conversation from the body'
   );
   assert.match(
@@ -137,7 +144,7 @@ test('empireStudioController (/api/studio/cinema/twin) plumbs conversation (same
   );
   assert.match(
     STUDIO_CTRL_SRC,
-    /createNeuralTwin\(\{[\s\S]*?voiceId,\s*conversation:\s*conv,\s*\}\);/,
+    /createNeuralTwin\(\{[\s\S]*?voiceId,[\s\S]*?conversation:\s*conv,\s*\}\);/,
     'studio engine call must pass the normalized conversation through'
   );
 });
