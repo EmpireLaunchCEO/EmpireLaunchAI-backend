@@ -1000,7 +1000,12 @@ const BRIEF_META_FRAME_RE = /^\s*(?:(?:please|hey|hi|ok|okay|so|can you|could yo
 export function stripBriefMetaFraming(text: string): string {
   let t = String(text || '').replace(/\s+/g, ' ').trim();
   for (let i = 0; i < 2; i++) {
-    const next = t.replace(BRIEF_META_FRAME_RE, '').replace(/^(?:a|an|the)\s+/i, '').trim();
+    const framed = t.replace(BRIEF_META_FRAME_RE, '');
+    // The article belongs to the request framing ("make me A 30-second video for
+    // Ember & Oak"). Stripping it when NO framing matched mangles a real subject:
+    // "a clean brief subject" became "clean brief subject", and the arc then said
+    // "Say hello to clean brief subject." Only strip it when framing was removed.
+    const next = (framed === t ? t : framed.replace(/^(?:a|an|the)\s+/i, '')).trim();
     if (!next || next === t) break;
     t = next;
   }
