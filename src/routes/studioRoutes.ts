@@ -1078,7 +1078,16 @@ router.post('/video-project', async (req: Request, res: Response) => {
       components,
     });
     return res.status(202).json({ status: 'processing', projectId });
-  } catch (error: any) { process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`); return res.status(500).json({ status: 'error', error: error.message }); }
+  } catch (error: any) {
+    process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`);
+    // PLANNING FAILURE (owner Nov 2): the brief could not be planned, so no video was
+    // made. Answer with the client-facing reason and the recorded project id — never a
+    // generic 500, and never a 202 for a render that will not happen.
+    if (error?.code === 'PLANNING_FAILED') {
+      return res.status(422).json({ status: 'error', error: error.clientMessage, code: error.code, projectId: error.projectId });
+    }
+    return res.status(500).json({ status: 'error', error: error.message });
+  }
 });
 router.get('/video-project/:id', async (req: Request, res: Response) => {
   try { const userId = await resolveUserId(typeof req.query.userId === 'string' ? req.query.userId : ((req as any).userId || req.headers['x-user-id']) as string); const result = userId ? await sceneVideoPipelineService.getProject(req.params.id, userId) : null; if (!result) return res.status(404).json({ status: 'error', error: 'Project not found' }); return res.json(result); }

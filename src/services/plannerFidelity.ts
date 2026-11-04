@@ -201,7 +201,13 @@ export function injectMoodIntoVisualPrompts(
   const mood = String(moodPositive ?? '').trim();
   if (!mood || !Array.isArray(script) || script.length === 0) return { script, injectedScenes: [] };
   const hasStress = STRESS_RE.test(mood);
-  const hasPayoff = /famil|relax|peace|calm|comfort/i.test(mood);
+  // OWNER NOV 2 — the payoff clause is ONLY the resolution of a stated before-state.
+  // Without one it is pure invention: the Ember & Oak brief asked for a video that
+  // would "feel calm and cinematic", and this appended "the payoff shows them relaxed
+  // and enjoying time with family" to scene 5 — a family that appears nowhere in the
+  // brief. A tone word ("calm", "comfort") is not a story, so it can no longer unlock
+  // the clause; only an explicit stressed/overworked beat can.
+  const hasPayoff = hasStress && /famil|relax|peace|calm|comfort/i.test(mood);
   if (!hasStress && !hasPayoff) return { script, injectedScenes: [] };
   const next = script.map((s) => ({ ...s }));
   const injectedScenes: number[] = [];
