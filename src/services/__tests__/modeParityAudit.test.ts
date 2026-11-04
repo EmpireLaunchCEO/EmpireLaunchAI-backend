@@ -53,7 +53,7 @@ import {
 } from '../sceneVideoPipelineService.js';
 import { extractCreativeEssence, finishedEssenceSentences, capNarrationForScene } from '../creativeTransformation.js';
 import { appendNoTextGuard } from '../renderingEngine.js';
-import { VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS } from '../veoVideoService.js';
+import { VEO_CALL_SECONDS, VEO_MOTION_BUDGET_SECONDS, VEO_MAX_MOTION_WINDOWS, VEO_MOTION_PLAN_CEILING_SECONDS } from '../veoVideoService.js';
 import { soraCallBudget } from '../soraVideoService.js';
 
 /** OCT 10 owner brief — VERBATIM (the acceptance re-render input; 496 chars). */
@@ -281,7 +281,10 @@ test('scene mode: OCT10 brief — durations compensated identically, F4 holds WI
   assert.ok(r.planned.some(s => /EmpireLaunch AI/i.test(s.narration)), 'subject spoken (scene)');
 });
 
-test('capVeoMotionWindows: hard caps motion windows at ≤2 (demotes the tail to stills)', () => {
+test('capVeoMotionWindows: hard caps motion windows at the requested limit (demotes the tail to stills)', () => {
+  // MECHANISM pin. The DEFAULT cap is main's owner-approved 4x6s + 1x8s = 32s
+  // (pinned in the next test); here the limit is passed explicitly so this test
+  // proves the demotion logic itself and cannot drift with the budget.
   // Build 4 motion scenes with windows (2 spans × 2 windows) — constraining shape.
   const script: SceneScript[] = [1, 2, 3, 4].map(n => ({
     sceneNumber: n, duration: 8, visualType: 'motion' as const, soraBlock: Math.floor((n - 1) / 2),
@@ -291,9 +294,9 @@ test('capVeoMotionWindows: hard caps motion windows at ≤2 (demotes the tail to
   assert.ok(spans.length >= 2, 'fixture expects ≥2 spans');
   const windowsBefore = spans.reduce((a, sp) => a + (sp.windows?.length ?? 0), 0);
   assert.ok(windowsBefore > 2, `fixture expects >2 windows before cap (got ${windowsBefore})`);
-  const cap = capVeoMotionWindows(script, spans);
+  const cap = capVeoMotionWindows(script, spans, 2, 12);
   const windowsAfter = cap.spans.reduce((a, sp) => a + (sp.windows?.length ?? 0), 0);
-  assert.ok(windowsAfter <= 2, `capVeoMotionWindows must keep ≤2 windows (got ${windowsAfter})`);
+  assert.ok(windowsAfter <= 2, `capVeoMotionWindows must keep ≤2 windows when told to (got ${windowsAfter})`);
   // Demoted scenes became stills in the returned script
   const demoted = cap.script.filter(s => s.visualType === 'still');
   assert.ok(demoted.length === script.length - windowsAfter, 'demoted scenes must become stills (no paid motion)');
@@ -304,11 +307,16 @@ test('capVeoMotionWindows: hard caps motion windows at ≤2 (demotes the tail to
   }
 });
 
-test('capVeoMotionWindows default = floor(VEO_MOTION_BUDGET/VEO_CALL) = 2 (canonical 2×6s bill)', () => {
-  assert.equal(VEO_CALL_SECONDS, 6);
-  assert.equal(VEO_MOTION_BUDGET_SECONDS, 12);
+test('capVeoMotionWindows default = VEO_MAX_MOTION_WINDOWS windows within the 30s budget + 2s join slack (owner Nov 2 plan)', () => {
+  // MAIN WINS HERE (outside Twin's path — Twin spends zero Veo). Owner Nov 2:
+  // the WHOLE video moves — 4x6s + 1x8s = 32s (30s budget + 2s join slack),
+  // replacing the old 12s / 2-window cap this audit originally pinned.
+  assert.equal(VEO_CALL_SECONDS, 6, 'standard take is 6s');
+  assert.equal(VEO_MOTION_BUDGET_SECONDS, 30, 'the whole video is the motion budget');
+  assert.equal(VEO_MAX_MOTION_WINDOWS, 5, '5 scenes = 5 windows');
+  assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, 32, '30s budget + 2s join slack');
   const maxWindows = Math.max(1, Math.floor(VEO_MOTION_BUDGET_SECONDS / VEO_CALL_SECONDS));
-  assert.equal(maxWindows, 2, 'canonical Scene motion budget = 2 Veo calls');
+  assert.equal(maxWindows, VEO_MAX_MOTION_WINDOWS, 'canonical Scene motion budget = 5 Veo windows');
 });
 
 // ═══════════════════════════════ F2: SHARED ASSEMBLY PATH ═══════════════════════════════

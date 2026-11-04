@@ -84,9 +84,15 @@ export class CinemaController {
         return;
       }
 
-      // Store securely
-      const storedPath = cinemaEngineService.storeUpload(filePath, 'photo');
+      // Store securely AND publish to R2 (owner Oct 30 — uploaded photos were
+      // ignored). The local copy is on the ephemeral container disk: it dies on
+      // redeploy and cannot be fetched by URL, which is why every upload used to
+      // be silently dropped by the image model. `photoUrl` is now the durable R2
+      // URL; `photoPath` stays for Neural Twin's on-disk facial-DNA read.
       const userId = resolveUserId(req) || 'anonymous';
+      const stored = await cinemaEngineService.storeUploadAndPublish(filePath, 'photo', userId);
+      const storedPath = stored.localPath;
+      const photoUrl = stored.publicUrl || storedPath;
 
       // Save to creations table so it shows up in Operations page
       await db.insert(schema.creations).values({
@@ -95,13 +101,25 @@ export class CinemaController {
         type: 'facial_dna',
         title: `Photo - ${path.basename(storedPath)}`,
         status: 'completed',
-        fileUrl: storedPath,
-        metadata: { fileSize: (req as any).file?.size, originalName: (req as any).file?.originalname },
+        fileUrl: photoUrl,
+        metadata: {
+          fileSize: (req as any).file?.size,
+          originalName: (req as any).file?.originalname,
+          photoPath: storedPath,
+          ...(stored.r2Key ? { r2Key: stored.r2Key } : {}),
+          ...(stored.r2Error ? { r2Error: stored.r2Error } : {}),
+        },
       }).onConflictDoNothing();
 
       res.json({
         success: true,
-        photoUrl: storedPath,
+        photoUrl,
+        photoPath: storedPath,
+        ...(stored.r2Key ? { photoR2Key: stored.r2Key } : {}),
+        durable: Boolean(stored.publicUrl),
+        ...(stored.publicUrl
+          ? {}
+          : { warning: `Photo saved locally only (${stored.r2Error || 'storage unavailable'}) — it may not survive a redeploy.` }),
         filename: path.basename(storedPath),
         message: 'Photo uploaded successfully. Ready for Neural Twin generation.',
       });
@@ -160,7 +178,7 @@ export class CinemaController {
    */
   async createNeuralTwin(req: Request, res: Response): Promise<void> {
     try {
-      const { photoPath, script, voiceStyle, mood, voice } = req.body;
+      const { photoPath, script, voiceStyle, mood, voice, conversation, conversationHistory } = req.body;
       const userId = resolveUserId(req) || 'system';
 
       if (!photoPath && !req.body.photoUrl) {
@@ -191,6 +209,23 @@ export class CinemaController {
         durationVal = d;
       }
 
+      // Conversation memory (owner Oct 19, ALL-MODES bar): union prior USER turns
+      // into dictation extraction in the twin engine so earlier asks (dictated
+      // opening, end flash, bullets, mood) are remembered — never dropped.
+      // Accept `conversation` or legacy `conversationHistory` from the cinema tab.
+      const convRaw = Array.isArray(conversation)
+        ? conversation
+        : Array.isArray(conversationHistory)
+          ? conversationHistory
+          : undefined;
+      const conv: { role?: string; content?: unknown }[] | undefined = Array.isArray(convRaw)
+        ? (convRaw as any[])
+            .filter((m) => m && typeof m === 'object' && typeof (m as any).content === 'string')
+            .map((m: any) => ({
+              role: typeof m.role === 'string' ? m.role : 'user',
+              content: m.content,
+            }))
+        : undefined;
       const result = await cinemaEngineService.createNeuralTwin({
         userId,
         photoPath,
@@ -200,6 +235,7 @@ export class CinemaController {
         mood: moodVal,
         voice: ['female', 'male', 'none'].includes(String(voice || '').toLowerCase()) ? String(voice).toLowerCase() as 'female' | 'male' | 'none' : undefined,
         duration: durationVal,
+        conversation: conv,
       });
 
       // Save to creations table so it shows up in Operations page

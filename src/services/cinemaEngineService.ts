@@ -15,6 +15,8 @@ import {
   generateSceneAudio, type SceneScript,
 } from './sceneVideoPipelineService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho, extractCreativeEssence, finishedEssenceSentences } from './creativeTransformation.js';
+import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
+import { TWIN_CANONICAL_BULLETS, appendBandToSvg, grammarizeYouBenefitSplice, sanitizeComponentSpliceFromNarration, twinBandMarkup, twinMoodStripMarkup } from './plannerFidelity.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { JsonOutputParser } from '@langchain/core/output_parsers';
@@ -31,6 +33,7 @@ export interface TwinCreationRequest {
   mood?: string;       // owner-locked mood (shared VIDEO_MOODS set)
   voice?: 'female' | 'male' | 'none'; // shared-pipeline voice contract (mode-parity re-plumb): 'none' = silent by design; undefined = auto (nova)
   duration?: number;   // requested twin video length (seconds); honored via segment planning (zero-video-API Faceless-style engine — Twin never uses a video API)
+  conversation?: { role?: string; content?: unknown }[]; // optional prior user turns — unioned into requestedVisuals extraction so dictation asks are remembered (owner Oct 19)
 }
 
 export interface CinemaAsset {
@@ -58,7 +61,7 @@ export interface FacialDNA {
 
 // ─── Shared-Pipeline Twin Helpers (owner Oct 11 "fix twin" re-plumb) ─────────
 // The Neural Twin now plans through the SAME deterministic gauntlet the
-// faceless/scene path runs in createProject (mode-parity audit d390c9b9): exact
+// faceless/scene path runs in the shared planner, per mode-parity audit d390c9b9: exact
 // dissolve-compensated time budget, F4 narration guarantee (every finished-essence
 // selling point SPOKEN), avatar-role/consistency enforcement, and the F4 visual ban
 // (benefit text never in a visualPrompt). Pure + zero paid calls — tests are the dry-run.
@@ -257,7 +260,7 @@ export class CinemaEngineService {
    * Pipeline: Extract Facial DNA → Generate frames → Lip-sync → Compose video
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
-    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration, voice } = request;
+    const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration, voice, conversation } = request;
     // CREATIVE TRANSFORMATION (owner Sep 28): the twin's script must be a FINISHED
     // pitch to potential clients, never a recital of the owner's typed brief or
     // the chat's internal structure. transformTwinScriptToPitch rewrites
@@ -265,6 +268,39 @@ export class CinemaEngineService {
     // reasons", "CTA", meta talk) into a client-directed pitch built from the
     // creative essence, and leaves already-finished user scripts verbatim.
     const safeScript = transformTwinScriptToPitch(script);
+    // DICTATION FIDELITY (owner Oct 19 — task 08041dff, ALL MODES): the twin
+    // path does NOT run the shared planner/buildDictationSection, so its asks
+    // (dictated opening, on-screen bullets, end-flash domain, mood/never-guard,
+    // conversation) are extracted from the user's own script + conversation and
+    // ENFORCED deterministically on the final twin script — verbatim opening
+    // prefix, bullets as presented lines, exact end-flash CTA, pain point
+    // scrubbed (never inverted), positive mood clause closing the pitch. The
+    // enforcement is pure/idempotent: finished user scripts are left verbatim.
+    const talkText = userConversationText(conversation);
+    const requestedVisuals = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
+    // DEFECT 2 — TWIN SCRIPT SEAM (owner Oct 30, project 399ef884: "that line
+    // just annoys me"). The twin seam glues its own copy the same way the shared
+    // planner does, so the SAME deterministic sanitizer runs on the transformed
+    // pitch BEFORE enforceTwinDictation appends the owner's dictated lines.
+    // Order matters: after enforcement her dictated bullet contents are script
+    // lines by design (verbatim lock) and must never be removed; before it, only
+    // the model's own pitch copy is at risk — which is exactly the text that
+    // must read as a sentence. No asks → byte-exact no-op.
+    const twinSplicePass = sanitizeComponentSpliceFromNarration(safeScript, {
+      phrases: requestedVisuals.bullets ?? [],
+      protect: [requestedVisuals.dictatedOpening, requestedVisuals.endFlash?.text],
+    });
+    const enforced = enforceTwinDictation(twinSplicePass.text, requestedVisuals);
+    // F4 grammatical splice (owner af053a01 — "…the transformation you 76 video
+    // creations a month."): stitch "you <number> …" factor fragments into a
+    // grammatical factor sentence via the SHARED deterministic fixer. Whole-script
+    // pass; no-op unless the splice is present; creative freedom elsewhere intact.
+    const finalTwinScript = grammarizeYouBenefitSplice(enforced.script);
+    // MOOD VISUALS (owner Oct 26 — "stressed at work → relaxing with family"):
+    // the request `mood` field was previously DEAD (destructured, never used).
+    // Thread the positive clause into the frame SVG mood strip; the stressed
+    // before-state shows only as a cool palette (never stated — never-guard).
+    const moodPositive = requestedVisuals.mood?.positive || mood || '';
     const assetId = uuidv4();
     const outputPath = path.join(this.cinemaDir, `twin_${assetId}.mp4`);
     const inputPath = photoPath || photoUrl || '';
@@ -300,7 +336,10 @@ export class CinemaEngineService {
       // talking-head stills (sharp, local) + FFmpeg compose — which is already
       // zero video API and was the pre-existing fallback. Cost ledger never sees
       // a Sora spend for Twin.
-      const lipSyncData = await this.generateLipSyncReasoning(safeScript);
+      // MAIN FIX PRESERVED (lead review 21:40Z Oct 26): the twin downstream
+      // pipeline consumes the ENFORCED script (finalTwinScript), never the raw
+      // cooked pitch — dictation guarantees must actually reach the mouth.
+      const lipSyncData = await this.generateLipSyncReasoning(finalTwinScript);
       // SHARED-PIPELINE RE-PLUMB (owner Oct 11 — "yes, fix twin"): the twin now
       // runs through the SAME deterministic plan gauntlet + TTS + assembler as
       // Faceless/Scene (mode-parity audit d390c9b9). GAP2 (zero F4 / zero TTS),
@@ -311,8 +350,18 @@ export class CinemaEngineService {
       const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
         ? Math.min(duration, 30)
         : Math.max(5, Math.min(30, Math.round(String(safeScript || '').trim().split(/\s+/).filter(Boolean).length / 2.5)));
-      const twinPlan = buildTwinPlan(safeScript, targetDuration, twinVoice);
-      const framePaths = await this.generateTalkingFrames(facialDna, lipSyncData, twinPlan.plan, this.cinemaDir, assetId);
+      const twinPlan = buildTwinPlan(finalTwinScript, targetDuration, twinVoice);
+      // MAIN-SIDE PLANNER FIDELITY (owner Oct 26–30) is preserved: the owner's
+      // dictated on-screen bullets + end-state domain band + mood strip are still
+      // passed through to the frame builder (TWIN_CANONICAL_BULLETS / moodPositive),
+      // exactly as main calls it. The plan itself is built from finalTwinScript, so
+      // the enforced/dictated script is what both the frames and the TTS carry.
+      // Frame COUNT and per-segment length come from the shared plan instead of
+      // main's 2fps duration estimate (Twin intent: one frame per planned segment,
+      // so frames == narration == plan math).
+      const framePaths = await this.generateTalkingFrames(
+        facialDna, lipSyncData, twinPlan.plan, this.cinemaDir, assetId, TWIN_CANONICAL_BULLETS, moodPositive
+      );
       const audioPaths: string[] = [];
       if (twinVoice !== 'none') {
         for (let i = 0; i < twinPlan.plan.length; i++) {
@@ -379,12 +428,12 @@ export class CinemaEngineService {
         thumbnailUrl: `/assets/cinema/facial_dna/${path.basename(inputPath)}`,
         status: 'completed',
         metadata: {
-          script: safeScript,
+          script: finalTwinScript,
           scriptOriginal: isInternalBriefEcho(script) ? String(script || '') : undefined,
           scriptTransformed: isInternalBriefEcho(script),
           facialDna,
           lipSyncComplexity: lipSyncData.phonemeComplexity,
-          engine: 'faceless-engine (talking-head · shared F4/F1/TTS pipeline)',
+          engine: 'faceless-engine (talking-head · shared F4/F1/TTS pipeline · zero video API, no Sora/Veo)',
           mode: 'twin',
           voice: twinVoice || 'auto',
           tone: twinTone,
@@ -394,6 +443,8 @@ export class CinemaEngineService {
           sellingPoints: twinPlan.sellingPoints,
           narrationRoles: twinPlan.narrationRoles,
           avatarLook: twinPlan.avatarLook || undefined,
+          requestedVisuals,
+          twinDictationApplied: enforced.applied,
         },
         variants: exportVariants,
       };
@@ -568,7 +619,12 @@ export class CinemaEngineService {
     lipSyncData: any,
     plan: SceneScript[],
     outputDir: string,
-    assetId: string
+    assetId: string,
+    // MAIN-SIDE planner-fidelity inputs (owner Oct 26–30): dictated bullets band +
+    // mood strip. Frame count/length now come from the shared plan (one frame per
+    // planned segment), which subsumes main's `duration`-driven 2fps frame count.
+    bullets: string[] = [],
+    moodPositive = ''
   ): Promise<string[]> {
     const framePaths: string[] = [];
     // ONE 1080x1920 frame per PLANNED SEGMENT (plan = shared-pipeline SceneScript[]),
@@ -580,10 +636,21 @@ export class CinemaEngineService {
     for (let i = 0; i < plan.length; i++) {
       const emotion = emotions[i % emotions.length];
       const mouthOpen = 0.25 + 0.15 * Math.sin(i * 0.9); // subtle mouth variation (visual only)
+      // F1 NO-TEXT BASE (Twin rebuild): buildTwinFrameSvg has NO <text> elements —
+      // no script line, no captions, no emotion label (audit GAP3 closed).
       const svg = buildTwinFrameSvg(facialDna, emotion, mouthOpen);
+      // PLANNER FIDELITY — twin on-screen bullets + end-state domain (shared
+      // seam, main): twin's ONLY on-screen text channel is the SVG frame; append
+      // the owner's dictated bullets as a bottom band (end frames: domain band =
+      // "flashing at the bottom" end state, no strobe). Zero LLM; pure. This is a
+      // DETERMINISTIC OVERLAY on top of the no-text base frame, so F1 still holds
+      // for everything the frame itself is built from.
+      const moodStrip = twinMoodStripMarkup(moodPositive, i, plan.length);
+      const band = twinBandMarkup({ bullets, domain: 'EmpireLaunchAi.com', frameIndex: i, totalFrames: plan.length });
+      const svgTarget = appendBandToSvg(appendBandToSvg(svg, moodStrip), band);
       const framePath = path.join(outputDir, `twin_${assetId}_seg${String(i).padStart(2, '0')}.png`);
 
-      await sharp(Buffer.from(svg))
+      await sharp(Buffer.from(svgTarget))
         .resize(1080, 1920)
         .toFile(framePath);
 
@@ -736,6 +803,58 @@ export class CinemaEngineService {
     const targetPath = path.join(targetDir, storedName);
     fs.copyFileSync(filePath, targetPath);
     return targetPath;
+  }
+  /**
+   * Store an upload AND publish it to R2 (owner Oct 30 — "uploaded photos are
+   * ignored").
+   *
+   * `storeUpload` returns a LOCAL FILESYSTEM PATH. That path lives on Railway's
+   * ephemeral container disk, so it dies on the next redeploy and any resumed or
+   * regenerated project then points at a file that no longer exists. It also
+   * cannot be fetched by URL. So the upload is ALSO pushed to R2 and the durable
+   * URL is what callers persist as the project's source image.
+   *
+   * The local path is still returned (`photoPath`) because Neural Twin's facial
+   * DNA extraction reads the file from disk.
+   *
+   * Never throws: if R2 is unavailable the caller gets `publicUrl: null` plus the
+   * reason, and can fall back to the local path (which the renderer now reads
+   * directly) while telling the client what happened.
+   */
+  async storeUploadAndPublish(
+    filePath: string,
+    type: 'photo' | 'video',
+    userId: string,
+  ): Promise<{ localPath: string; publicUrl: string | null; r2Key?: string; r2Error?: string }> {
+    const localPath = this.storeUpload(filePath, type);
+    const MIME_BY_EXT: Record<string, string> = {
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.pdf': 'application/pdf',
+      '.mp4': 'video/mp4',
+      '.mov': 'video/quicktime',
+      '.webm': 'video/webm',
+      '.mkv': 'video/x-matroska',
+      '.avi': 'video/x-msvideo',
+    };
+    const mime = MIME_BY_EXT[path.extname(localPath).toLowerCase()] || 'image/jpeg';
+    if (!r2Storage.isAvailable) {
+      console.warn(`[CinemaEngine] upload stored locally only (R2 not configured): ${localPath}`);
+      return { localPath, publicUrl: null, r2Error: 'R2 not configured' };
+    }
+    const upload = await r2Storage.uploadFile(localPath, userId || 'anonymous', 'cinema/uploads', mime);
+    if (!upload.success || !upload.key) {
+      console.warn(`[CinemaEngine] upload R2 publish failed (local path kept): ${localPath} error=${upload.error}`);
+      return { localPath, publicUrl: null, r2Error: upload.error || 'R2 upload failed' };
+    }
+    // Prefer a long-lived URL: R2_PUBLIC_URL when the bucket is public, otherwise a
+    // presigned link. Presigned links expire (~1h) but the render path re-signs
+    // R2 URLs via refreshR2Url before use, so a stale link never drops the photo.
+    const publicUrl = process.env.R2_PUBLIC_URL
+      ? r2Storage.getFileUrl(upload.key)
+      : (await r2Storage.getSignedUrl(upload.key)) || r2Storage.getFileUrl(upload.key);
+    console.log(`[CinemaEngine] upload published to R2 key=${upload.key} local=${localPath}`);
+    return { localPath, publicUrl, r2Key: upload.key };
   }
 }
 

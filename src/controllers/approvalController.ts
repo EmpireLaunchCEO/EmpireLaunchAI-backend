@@ -3,7 +3,7 @@ import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { usageService } from '../services/usageService.js';
-import { sceneVideoPipelineService } from '../services/sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, normalizeNarrationScript, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
 import {
   FACELESS_MOODS,
@@ -162,6 +162,76 @@ export const createApproval = async (req: Request, res: Response) => {
       }
       enrichedPayload.mood = mood;
       enrichedPayload.duration = duration;
+      // RENDER #5 PREP (owner script): optional VERBATIM narration-script override —
+      // an array of lines (or a newline/`|`-delimited string). Her exact voiceover
+      // copy is spoken verbatim (never rephrased by the transformation layer); F4's
+      // expected-set becomes HER lines, and scenes are sized so every line is fully
+      // spoken. Absent / empty = no override (standard pipeline).
+      const narrationScriptRaw = req.body.narrationScript !== undefined ? req.body.narrationScript : (payload as any)?.narrationScript;
+      const narrationScript = normalizeNarrationScript(narrationScriptRaw) ?? undefined;
+      if (narrationScriptRaw !== undefined && !narrationScript) {
+        return res.status(400).json({ error: 'Invalid faceless narrationScript — expected non-empty lines (array or newline/| string)' });
+      }
+      enrichedPayload.narrationScript = narrationScript ?? undefined;
+      // RENDER #7 (owner ADJUST #2): OPT-IN on-screen overlays (per-scene bullet
+      // lines + persistent bottom-bar text) and screenshot/visual prompt overrides,
+      // forwarded to the scene pipeline exactly like narrationScript. Absent /
+      // null = default OFF (pure `-c copy` passthrough assembly, existing prompts).
+      const onScreenOverlaysRaw = req.body.onScreenOverlays !== undefined ? req.body.onScreenOverlays : (payload as any)?.onScreenOverlays;
+      const visualPromptOverridesRaw = req.body.visualPromptOverrides !== undefined ? req.body.visualPromptOverrides : (payload as any)?.visualPromptOverrides;
+      const onScreenOverlays = onScreenOverlaysRaw !== undefined && onScreenOverlaysRaw !== null
+        ? onScreenOverlaysRaw
+        : undefined;
+      if (onScreenOverlays !== undefined && (typeof onScreenOverlays !== 'object' || Array.isArray(onScreenOverlays))) {
+        return res.status(400).json({ error: 'Invalid faceless onScreenOverlays — expected { perScene?: {lines:string[]}[], bottomBar?: string }' });
+      }
+      const visualPromptOverrides = Array.isArray(visualPromptOverridesRaw)
+        ? visualPromptOverridesRaw.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
+        : visualPromptOverridesRaw !== undefined && visualPromptOverridesRaw !== null
+          ? visualPromptOverridesRaw
+          : undefined;
+      if (visualPromptOverrides !== undefined && !Array.isArray(visualPromptOverrides)) {
+        return res.status(400).json({ error: 'Invalid faceless visualPromptOverrides — expected an array of non-empty strings (scene-number-1 aligned)' });
+      }
+      enrichedPayload.onScreenOverlays = onScreenOverlays ?? undefined;
+      enrichedPayload.visualPromptOverrides = Array.isArray(visualPromptOverrides) && visualPromptOverrides.length
+        ? visualPromptOverrides
+        : undefined;
+      // RENDER #8 (owner ADJUST #3, OPT-IN): explicit per-scene durations
+      // ({sceneNumber: seconds} or 0-based array) + screenshot cover-fit flag,
+      // forwarded to the scene pipeline with the rest of the render payload.
+      const sceneDurationOverridesRaw = req.body.sceneDurationOverrides !== undefined
+        ? req.body.sceneDurationOverrides
+        : (payload as any)?.sceneDurationOverrides;
+      if (sceneDurationOverridesRaw !== undefined && sceneDurationOverridesRaw !== null) {
+        const okShape = (Array.isArray(sceneDurationOverridesRaw) && sceneDurationOverridesRaw.length > 0)
+          || (typeof sceneDurationOverridesRaw === 'object' && !Array.isArray(sceneDurationOverridesRaw));
+        if (!okShape) {
+          return res.status(400).json({ error: 'Invalid faceless sceneDurationOverrides — expected { sceneNumber: seconds } or a number[]' });
+        }
+        enrichedPayload.sceneDurationOverrides = sceneDurationOverridesRaw;
+      }
+      if (req.body.stillCoverFit !== undefined && req.body.stillCoverFit !== null) {
+        enrichedPayload.stillCoverFit = req.body.stillCoverFit === true;
+      }
+      // UPLOADED-PHOTO PLACEMENT (owner Oct 30): where the client's photo goes —
+      // "background for the whole video", one scene, these scenes, "from this point
+      // on", or "don't use it". Validated through the ONE shared helper (an explicit
+      // object beats the deterministic chat parser); malformed input is a 400 with a
+      // readable message so a half-parsed placement is NEVER stored. Absent ⇒
+      // unchanged legacy behaviour (scene 1 only).
+      const sourceImagePlacementRaw = req.body.sourceImagePlacement !== undefined
+        ? req.body.sourceImagePlacement
+        : (payload as any)?.sourceImagePlacement;
+      const sourceImagePlacementInput = resolveSourceImagePlacementInput(sourceImagePlacementRaw, {
+        ...(Number.isFinite(duration) ? { durationSeconds: duration } : {}),
+      });
+      if (!sourceImagePlacementInput.ok) {
+        return res.status(400).json({ error: sourceImagePlacementInput.error });
+      }
+      if (sourceImagePlacementInput.placement) {
+        enrichedPayload.sourceImagePlacement = sourceImagePlacementInput.placement;
+      }
       // Feed mood into the per-scene prompt so the video's tone reflects it.
       // OWNER-OCT-8 FIX: pass `mood` as its OWN pipeline field instead of
       // appending an instruction sentence to the idea text. The appended hint
@@ -169,6 +239,24 @@ export const createApproval = async (req: Request, res: Response) => {
       // raw-brief chunk that was echoed into metadata.components and injected
       // VERBATIM into visualPrompts (project abca11ed). The pipeline adds the
       // mood hint to the planner prompt from input.mood — no text append needed.
+      // Owner (Oct 19 + Oct 26): the Faceless launch relays the FULL consultant
+      // conversation so the pipeline plans from every user turn — never just the
+      // first message or the refined summary alone. createProject's
+      // requestedVisuals extraction reads input.conversation; keep every valid
+      // {role, content} message (mirrors the studio video-project route).
+      const conversation = Array.isArray(req.body.conversation)
+        ? req.body.conversation
+            .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+            .map((m: any) => ({ role: m.role as 'user' | 'assistant', content: m.content as string }))
+        : undefined;
+      // Owner (Oct 26): the studio app also relays the concrete components the
+      // client/owner named in chat (facelessRelayedComponents). Mirror the
+      // studio video-project route (studioRoutes.ts): keep non-empty strings
+      // only, and forward them so the planner's component inventory sees them —
+      // never silently dropped on the Faceless path.
+      const components = Array.isArray(req.body.components)
+        ? req.body.components.filter((c: any) => typeof c === 'string' && c.trim().length > 0)
+        : undefined;
       const facelessIdea = description.trim();
       try {
         facelessProjectId = await sceneVideoPipelineService.createProject({
@@ -185,6 +273,24 @@ export const createApproval = async (req: Request, res: Response) => {
           // Faceless renders scenes as gpt-image-2 stills animated with FFmpeg Ken Burns
           // (zoompan) — never Sora motion — per the owner-approved cost model.
           mode: 'faceless',
+          narrationScript,
+          // RENDER #7 OPT-IN: drawn at assembly only (never baked into AI frames).
+          onScreenOverlays,
+          visualPromptOverrides,
+          // RENDER #8 OPT-IN (owner ADJUST #3): explicit per-scene durations +
+          // screenshot cover-fit (photos more screen-fitting).
+          sceneDurationOverrides: (enrichedPayload as any).sceneDurationOverrides,
+          stillCoverFit: (enrichedPayload as any).stillCoverFit,
+          // Uploaded-photo placement (owner Oct 30): validated above through the one
+          // shared helper; persisted to metadata.sourceImagePlacement. Absent ⇒
+          // scene 1 only (unchanged legacy behaviour).
+          sourceImagePlacement: (enrichedPayload as any).sourceImagePlacement ?? undefined,
+          // FULL consultant conversation relayed by the studio app (owner Oct 19 +
+          // Oct 26) — createProject extraction runs idea + userConversationText(conversation).
+          conversation,
+          // Concrete relayed components (owner Oct 26) — forwarded so the planner's
+          // component inventory includes them (mirrors studio video-project route).
+          ...(components?.length ? { components } : {}),
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {

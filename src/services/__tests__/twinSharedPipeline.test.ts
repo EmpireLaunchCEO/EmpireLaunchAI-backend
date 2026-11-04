@@ -133,9 +133,14 @@ test('REAL GRAPH: shared twin compose (renderClip + concatClips) outputs an AUDI
     for (const [p, bg] of frameSpecs) {
       await sharp({ create: { width: 270, height: 480, channels: 3, background: bg } }).png().toFile(p);
     }
-    // synthetic 6s tone standing in for GPT-Audio TTS (zero paid calls)
+    // synthetic tone standing in for GPT-Audio TTS (zero paid calls). It is 2.5s,
+    // NOT the full window: main's shared concatClips now enforces the
+    // NARRATION_OVERLAP_INVARIANT (owner Oct 12 "lines must never play on top of
+    // each other") — with an 800ms xfade, scene 2 starts at 3.2s, so scene 1's
+    // speech must END before that. A tone filling its whole 4s window is an
+    // overfit script, not a twin defect, and the assembler correctly refuses it.
     const tone = path.join(dir, 'tone.mp3');
-    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6', '-y', tone]);
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2.5', '-y', tone]);
     // segments planned at [4s, 5s] → delivered = 4 + 5 − 0.8 xfade = 8.2s
     const seg0 = path.join(dir, 'seg0.mp4');
     const seg1 = path.join(dir, 'seg1.mp4');
