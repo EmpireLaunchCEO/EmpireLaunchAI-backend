@@ -211,6 +211,32 @@ export function probeSecondsOf(file: string): number {
     return Number.isFinite(n) && n > 0 ? n : 0;
   } catch { return 0; }
 }
+/** Does this clip carry an audio stream? Deterministic local ffprobe.
+ *  WHY THIS EXISTS (owner Nov 4 launch render): every re-encode in this module
+ *  used to pass `-an`, so the match-cut join silently STRIPPED the narration out
+ *  of every clip it touched. The assembler then saw 1-of-5 clips with audio,
+ *  emitted `-map ad0`, and the render died at the very last (already-paid) step
+ *  with "Invalid stream specifier: ad0". A cut is a cut of the PICTURE — the
+ *  narration belongs to the clip and must survive it. */
+export function probeHasAudio(file: string): boolean {
+  try {
+    const out = execFileSync(
+      'ffprobe',
+      ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file],
+      { maxBuffer: 1024 * 1024 },
+    ).toString().trim();
+    return out.length > 0;
+  } catch { return false; }
+}
+
+/** The audio half of a re-encode: carry the clip's narration through, or say
+ *  explicitly that there is none. Never leaves the choice to ffmpeg's default. */
+function audioCarryArgs(file: string): string[] {
+  return probeHasAudio(file)
+    ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2']
+    : ['-an'];
+}
+
 export function probeFrameCount(file: string): number {
   try {
     const out = execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 4 * 1024 * 1024 }).toString().trim();
@@ -247,8 +273,10 @@ export async function trimEdgeBlack(file: string, out: string): Promise<{ path: 
   if (edge.headSeconds === 0 && edge.tailSeconds === 0) return { path: file, removedHead: 0, removedTail: 0, seconds: total };
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y',
+    // `-ss` BEFORE `-i` = input seek, so it applies to the audio stream too: the
+    // narration stays frame-aligned with the picture it was fitted to.
     '-ss', start.toFixed(3), '-i', file, '-t', keep.toFixed(3),
-    '-map', '0:v:0', '-an',
+    '-map', '0:v:0', ...audioCarryArgs(file),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);
@@ -285,10 +313,22 @@ export async function cutFrames(file: string, out: string, dropHeadFrames: numbe
   if (!total) throw new Error(`match-cut join: could not measure ${path.basename(file)} — refusing to guess a cut point`);
   const startFrame = Math.max(0, Math.min(dropHeadFrames, total - 2));
   const endFrame = Math.max(startFrame + 1, total - Math.max(0, dropTailFrames));
+  // NARRATION SURVIVES THE CUT: the audio is trimmed on the SAME 30fps timeline
+  // (startFrame/30 .. endFrame/30) and its timestamps reset, so the line stays
+  // where it was spoken relative to the picture. Without this the match-cut join
+  // silently deleted the narration of every clip it touched.
+  const carry = probeHasAudio(file);
+  const audioArgs = carry
+    ? [
+        '-map', '0:a:0',
+        '-af', `atrim=start=${(startFrame / JOIN_FPS).toFixed(3)}:end=${(endFrame / JOIN_FPS).toFixed(3)},asetpts=N/SR/TB`,
+        '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+      ]
+    : ['-an'];
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y', '-i', file,
     '-vf', `fps=${JOIN_FPS},trim=start_frame=${startFrame}:end_frame=${endFrame},setpts=PTS-STARTPTS`,
-    '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
+    ...audioArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);
   return out;
@@ -299,7 +339,7 @@ export async function trimTailSeconds(file: string, out: string, keepSeconds: nu
   await runFfmpeg([
     '-hide_banner', '-nostats', '-y', '-i', file,
     '-t', Math.max(0.1, keepSeconds).toFixed(3),
-    '-map', '0:v:0', '-an',
+    '-map', '0:v:0', ...audioCarryArgs(file),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(JOIN_FPS),
     '-movflags', '+faststart', out,
   ]);

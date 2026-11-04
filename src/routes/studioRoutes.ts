@@ -14,6 +14,7 @@ import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
+import { validateOverlayPayload } from '../services/assemblyOverlays.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 import { usageService } from '../services/usageService.js';
 
@@ -1057,6 +1058,17 @@ router.post('/video-project', async (req: Request, res: Response) => {
     if (!placementInput.ok) {
       return res.status(400).json({ status: 'error', error: placementInput.error });
     }
+    // ON-SCREEN OVERLAYS (owner Nov 4 — her launch video's blinking bottom bar).
+    // The assembly pass has honoured `metadata.onScreenOverlays` since render #7,
+    // but THIS route never forwarded it, so the only scene endpoint could not carry
+    // an overlay spec at all: the bar was unreachable from the product, not broken
+    // in the renderer. Validated here the way the approval route validates it —
+    // malformed input is a readable 400 and nothing is stored (never a half-parsed
+    // object that draws something the client did not ask for).
+    const overlaysInput = validateOverlayPayload((req.body as any).onScreenOverlays);
+    if (!overlaysInput.ok) {
+      return res.status(400).json({ status: 'error', error: overlaysInput.error });
+    }
     const projectId = await sceneVideoPipelineService.createProject({
       userId: resolvedUserId,
       title: title || idea.slice(0, 80),
@@ -1069,6 +1081,9 @@ router.post('/video-project', async (req: Request, res: Response) => {
       tone,
       mood,
       sourceImages,
+      // Persisted by createProject to metadata.onScreenOverlays (normalized), and
+      // consumed by the assembly pass (bottomBar / bottomBarBlink / perScene / flash).
+      ...(overlaysInput.value ? { onScreenOverlays: overlaysInput.value } : {}),
       // Uploaded-photo placement (owner Oct 30): validated above through the ONE
       // shared helper ({mode:'background'|'scene'|'none', sceneNumbers:[...],
       // requestedSeconds?, anchor, fit, treatment, stated}), persisted to
@@ -1085,6 +1100,12 @@ router.post('/video-project', async (req: Request, res: Response) => {
     // generic 500, and never a 202 for a render that will not happen.
     if (error?.code === 'PLANNING_FAILED') {
       return res.status(422).json({ status: 'error', error: error.clientMessage, code: error.code, projectId: error.projectId });
+    }
+    // SUPPLIED SCRIPT vs CHAT (owner Nov 4): the two inputs genuinely disagree about
+    // the words to speak. Answer with the conflict in plain words instead of
+    // silently picking one and rendering the wrong narration.
+    if (error?.code === 'SCRIPT_CONFLICT') {
+      return res.status(422).json({ status: 'error', error: error.clientMessage || error.message, code: error.code });
     }
     return res.status(500).json({ status: 'error', error: error.message });
   }

@@ -636,6 +636,137 @@ export interface ConcatOptions {
   /** Short label so join artefacts are identifiable in logs/temp. */
   joinLabel?: string;
 }
+/**
+ * SUPPLIED-SCRIPT vs CONVERSATION CONFLICT (owner Nov 4 launch render).
+ *
+ * A caller-supplied `script` is the finished plan: its narration is what the client
+ * wrote and what must be spoken. The chat-text extractors
+ * (`requestedVisuals.dictatedOpening` / bullets / endFlash, F4) are a heuristic
+ * over the consultant transcript, and on the launch render they OVERWROTE it —
+ * dropping two of the owner's three points and truncating a third before a single
+ * word was voiced. So when a script is supplied its narration wins and the
+ * extractors are not allowed to touch it.
+ *
+ * But "wins" is not the same as "ignore the conflict": if the transcript
+ * explicitly dictates an opening that appears NOWHERE in the supplied narration,
+ * the two inputs genuinely disagree and picking one silently is how the owner's
+ * words got lost. That case fails loudly instead.
+ *
+ * Pure + exported (unit-tested): returns a client-facing message, or null.
+ */
+export function detectSuppliedScriptConflict(args: {
+  narration: string[];
+  dictatedOpening?: string | null;
+}): string | null {
+  const opening = String(args.dictatedOpening || '').trim();
+  if (!opening || !args.narration.length) return null;
+  const key = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const spoken = key(args.narration.join(' '));
+  const wanted = key(opening);
+  if (!wanted) return null;
+  if (spoken.includes(wanted)) return null;
+  return (
+    `Your script and your chat disagree about the opening line. The script says it starts with "${args.narration[0]}" ` +
+    `but the chat asks to open with "${opening}". Fix one of them (or send only your own words in the chat) and we will render it exactly.`
+  );
+}
+
+/**
+ * RESOLVE A SCENE'S NARRATION FOR THE ASSEMBLY PASS (owner Nov 4 launch render).
+ *
+ * Every scene clip must carry its OWN narration track. The assembler therefore
+ * resolves the audio from the LIVE scene row at the moment it builds the clip —
+ * never from a snapshot taken before narration was generated (that is how the
+ * launch render produced five silent clips while five narration MP3s sat next to
+ * them), and never from a temp path alone (a deploy/restart wipes temp/, and the
+ * audio is still in R2 under `audioUrl`).
+ *
+ * Order: live local path → download the live `audioUrl` → null (no audio was ever
+ * generated for this scene, which is legitimate only when the project has no
+ * voice; the caller decides, and fails loudly if narration was expected).
+ */
+export async function resolveSceneNarrationAudio(args: {
+  sceneId: string;
+  sceneNumber: number;
+  liveMetadata: Record<string, any> | undefined | null;
+  audioUrl?: string | null;
+  workDir: string;
+}): Promise<{ path: string; source: 'local' | 'downloaded' } | null> {
+  const meta = args.liveMetadata || {};
+  const local = String(meta.audioLocalPath || '').trim();
+  if (local && fs.existsSync(local)) return { path: local, source: 'local' };
+  const remote = String(args.audioUrl || meta.audioUrl || '').trim();
+  if (!remote) return null;
+  try {
+    fs.mkdirSync(args.workDir, { recursive: true });
+    const dest = path.join(args.workDir, `narration-${args.sceneNumber}${path.extname(new URL(remote).pathname) || '.mp3'}`);
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return { path: dest, source: 'downloaded' };
+    const downloaded = await ensureLocalFile(remote, `scene ${args.sceneNumber} narration`);
+    fs.copyFileSync(downloaded, dest);
+    try { if (downloaded !== dest) fs.unlinkSync(downloaded); } catch {}
+    return { path: dest, source: 'downloaded' };
+  } catch (err: any) {
+    trace(`scene_narration_download_failed scene=${args.sceneNumber} id=${args.sceneId} error=${err?.message}`);
+    return null;
+  }
+}
+
+/**
+ * STRUCTURAL AUDIO-GRAPH INVARIANT — the concat command's `-map` arguments must
+ * match the filtergraph it is given, for EVERY join type and EVERY combination of
+ * audio-bearing inputs.
+ *
+ * This has now cost two renders:
+ *   • Oct 9  — the xfade graph referenced `[adN]` labels it never declared
+ *              ("Invalid stream specifier: ad0");
+ *   • Nov 4  — the match-cut graph mapped the single surviving narration track as
+ *              the bare token `ad0` instead of the filtergraph label `[ad0]`, and
+ *              every paid stage of the owner's launch video was thrown away at the
+ *              final assembly step.
+ *
+ * Both were *silent at build time* and only surfaced inside ffmpeg. This check runs
+ * where the command is assembled, so the failure is a precise error naming the
+ * graph and the maps instead of a raw ffmpeg exit code — and, just as importantly,
+ * a graph with NO audio can never reference audio at all.
+ *
+ * Pure + exported: unit-testable without spawning ffmpeg.
+ */
+export function assertAudioGraphIntegrity(input: {
+  filterComplex: string;
+  videoMap: string;
+  audioMap: string | null;
+  /** labels of the narration tracks the graph actually declares, e.g. ['ad0','ad1'] */
+  audioLabels: string[];
+}): void {
+  const { filterComplex: fc, videoMap, audioMap, audioLabels } = input;
+  const fail = (why: string): never => {
+    throw new Error(
+      `CONCAT_GRAPH_INVARIANT ${why} — videoMap=${videoMap} audioMap=${audioMap ?? 'none'} labels=[${audioLabels.join(',')}] graph=${fc}`,
+    );
+  };
+  const labelRe = (l: string) => new RegExp(`\\[${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`);
+  const bracketed = /^\[[A-Za-z0-9_]+\]$/;
+  // ── VIDEO: always a declared filtergraph output ─────────────────────────────
+  if (!bracketed.test(videoMap)) fail('video map is not a bracketed filtergraph label');
+  if (!labelRe(videoMap.slice(1, -1)).test(fc)) fail('video map names a label the filtergraph never declares');
+  // ── NO AUDIO ANYWHERE: the command must be audio-free, top to bottom ────────
+  const audioRefs = fc.match(/\[ad\d+\]|\[aout\]/g) ?? [];
+  if (!audioMap) {
+    if (audioLabels.length) fail('narration labels declared but no audio map');
+    if (audioRefs.length) fail(`no input carries audio but the graph references ${[...new Set(audioRefs)].join(',')}`);
+    return;
+  }
+  // ── AUDIO: the map must be a filtergraph LABEL, and the graph must produce it ─
+  if (!bracketed.test(audioMap)) {
+    fail('audio map is not a bracketed filtergraph label (an unbracketed token is read as a stream specifier, not a filter output)');
+  }
+  if (!labelRe(audioMap.slice(1, -1)).test(fc)) fail('audio map names a label the filtergraph never declares');
+  if (!audioLabels.length) fail('audio map set but no narration track was declared');
+  for (const l of audioLabels) {
+    if (!labelRe(l).test(fc)) fail(`declared narration track [${l}] never appears in the filtergraph`);
+  }
+}
+
 export function concatClips(inputs: string[], output: string, opts?: ConcatOptions): Promise<MatchCutReport | undefined> { return (async () => {
 
   // Smooth dissolve transitions (xfade) instead of hard cuts. All clips are
@@ -781,6 +912,10 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
     // ("Invalid stream specifier: ad0") because these definitions were never
     // joined into -filter_complex while the final concat referenced their labels.
     const aParts: string[] = [];
+    /** Labels of the narration tracks that were ACTUALLY declared in the graph.
+     *  The `-map` arguments are derived from THIS array and nothing else, so a map
+     *  can never name a label the filtergraph does not produce. */
+    const aIns: string[] = [];
     let audioMap: string | null = null;
     if (anyAudio) {
       // AUDIO FIT + BOUNDARY PLACEMENT (owner Oct 9 — F2 "last words cut short"):
@@ -792,7 +927,6 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
       // track out to the video total and amix them on the shared timeline —
       // full loudness at the scene boundary, zero bleed either direction.
       let aIdx = 0;
-      const aIns: string[] = [];
       let sumPrev = 0;
       // SINGLE-VOICE GUARANTEE (RENDER #5 ADJUST — owner Oct 12 "6s voice-overlap"):
       // every narration after the first is placed at the LATER of (its own scene's
@@ -882,7 +1016,12 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
         sumPrev += win;
       }
       if (aIns.length === 1) {
-        audioMap = aIns[0].replace(/^\[|\]$/g, '');
+        // BRACKETS KEPT (owner Nov 4 launch render): stripping them turned
+        // `-map [ad0]` into `-map ad0`, which ffmpeg reads as a STREAM SPECIFIER,
+        // not a filtergraph output — "Invalid stream specifier: ad0. / Stream map
+        // 'ad0' matches no streams." and the whole render failed after every paid
+        // stage. The label is a filter output; it is always mapped as one.
+        audioMap = aIns[0];
       } else if (aIns.length > 1) {
         audioFilter.push(`${aIns.join('')}amix=inputs=${aIns.length}:duration=longest:normalize=0,atrim=0:${totalSec}[aout]`);
         audioMap = '[aout]';
@@ -890,6 +1029,16 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
     }
     return void (async()=>{
       const fc = [...filter, ...aParts, ...audioFilter].join(';');
+      // STRUCTURAL INVARIANT (third time is not allowed to happen): the maps and
+      // the graph are checked against each other HERE, for BOTH join types, before
+      // ffmpeg is ever spawned. Oct 9 broke the xfade graph this way; Nov 4 broke
+      // the match-cut graph the same way, at the cost of a full $2.46 render.
+      assertAudioGraphIntegrity({
+        filterComplex: fc,
+        videoMap: videoMapLabel,
+        audioMap,
+        audioLabels: aIns.map((l) => l.slice(1, -1)),
+      });
       const args:string[] = [];
       inputs.forEach(i=>{ args.push('-i',i); });
       args.push('-filter_complex', fc, '-map', videoMapLabel);
@@ -2914,11 +3063,40 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     //    becomes HER lines (8/8), and scenes are sized from spoken rooms so
     //    every line is FULLY spoken (tighten pauses, never words). Visuals stay
     //    brief-derived (subject exact / no-text / portrait) — untouched here. ──
-    const narrationOverride = normalizeNarrationScript(input.narrationScript);
+    // ── SUPPLIED-SCRIPT AUTHORITY (owner Nov 4 — her launch render) ──────────
+    // When the caller supplies a `script`, the plan below IS that script, so its
+    // per-scene narration is the copy that must be spoken. Everything downstream
+    // that rewrites narration from the CHAT transcript (dictatedOpening, the
+    // bullets/F4 injectors, the component-splice sanitizer) is gated on this flag:
+    // on the launch render those passes replaced her opening with "This is my
+    // launch video for EmpireLaunchAI", dropped two of her three points and
+    // truncated a third — all before a single word was voiced.
+    const suppliedNarration = input.script
+      ? planned.map((sc) => String(sc.narration || '').trim()).filter(Boolean)
+      : [];
+    const narrationAuthoritative = suppliedNarration.length > 0;
+    if (narrationAuthoritative) {
+      const conflict = detectSuppliedScriptConflict({
+        narration: suppliedNarration,
+        dictatedOpening: requested.dictatedOpening,
+      });
+      if (conflict) {
+        const err: any = new Error(`SCRIPT_CONVERSATION_CONFLICT ${conflict}`);
+        err.code = 'SCRIPT_CONFLICT';
+        err.clientMessage = conflict;
+        throw err;
+      }
+      trace(`script_authoritative project=${projectId} lines=${suppliedNarration.length} — chat extractors may not rewrite narration`);
+    }
+    const narrationOverride = normalizeNarrationScript(input.narrationScript) ?? (narrationAuthoritative ? suppliedNarration : null);
     // LINK-IN-BIO DEFAULT BAN carve-out: an explicit request in the client's own
     // raw input (brief/components) or the owner's dictated script counts.
     const linkInBioAllowed = containsLinkInBio([cleanIdea, ...(Array.isArray(input.components) ? input.components : [])].filter(Boolean).join('\n')) || narrationOverride !== null;
-    const overridePlan = narrationOverride ? applyNarrationOverride(planned, narrationOverride, duration) : null;
+    // A supplied script already carries its own line→scene assignment; re-mapping
+    // it through applyNarrationOverride would move her words to different scenes.
+    const overridePlan = narrationOverride && !narrationAuthoritative
+      ? applyNarrationOverride(planned, narrationOverride, duration)
+      : null;
     if (overridePlan) {
       planned.splice(0, planned.length, ...overridePlan.script);
       trace(`narration_override project=${projectId} lines=${narrationOverride!.length} mapping=[${overridePlan.mapping.map(m => m.length).join(',')}] sizes=[${overridePlan.script.map(s => s.duration).join(',')}] delivered=${deliveredVideoDuration(overridePlan.script)}`);
@@ -2979,7 +3157,9 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         return false;
       });
     const f4Voice = (input.voice ?? '') !== 'none';
-    const f4Narr = f4Voice
+    // SUPPLIED-SCRIPT AUTHORITY: with a script, F4 only VERIFIES that every line is
+    // spoken — it may not splice anything into narration the client wrote.
+    const f4Narr = f4Voice && !narrationAuthoritative
       ? injectSellingPointsIntoNarration(planned, f4SellingPoints)
       : { script: planned, injected: [], stillMissing: verifySellingPointsSpoken(planned, f4SellingPoints).missing };
     if (f4Narr.script !== planned) planned.splice(0, planned.length, ...f4Narr.script);
@@ -3085,12 +3265,14 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // restores any hook phrase the verbatim opening erased (appended AFTER
     // her line as a grammatical sentence — never before it).
     const fidelity = enforcePlannerFidelity(planned, {
-      dictatedOpening: requested.dictatedOpening,
+      // A supplied script's opening is already the client's own words; enforcing a
+      // CHAT-derived opening over it is exactly the overwrite being fixed.
+      dictatedOpening: narrationAuthoritative ? undefined : requested.dictatedOpening,
       moodPositive: requested.mood?.positive,
     });
     if (fidelity.script !== planned) planned.splice(0, planned.length, ...fidelity.script);
     if (fidelity.trace.length) trace(`planner_fidelity project=${projectId} ${fidelity.trace.join(' ')}`);
-    if (f4Voice) {
+    if (f4Voice && !narrationAuthoritative) {
       const fidelityReinject = injectSellingPointsIntoNarration(planned, f4SellingPoints, { skipSceneZero: true });
       if (fidelityReinject.script !== planned) planned.splice(0, planned.length, ...fidelityReinject.script);
       if (fidelityReinject.injected.length) trace(`planner_fidelity_reinject project=${projectId} injected=[${fidelityReinject.injected.join(' | ')}]`);
@@ -3107,10 +3289,12 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // creations a month.") and clean narration are byte-exact no-ops. The
     // on-screen bullet panel is untouched (it lives in the overlay spec below).
     // Pure; zero LLM/DB/paid calls.
-    const splicePass = sanitizePlanComponentSplices(planned, {
-      phrases: [...inventory, ...f4SellingPoints],
-      protect: [requested.dictatedOpening, requested.endFlash?.text],
-    });
+    const splicePass = narrationAuthoritative
+      ? { script: planned, changedScenes: [] as number[], removed: [] as string[] }
+      : sanitizePlanComponentSplices(planned, {
+          phrases: [...inventory, ...f4SellingPoints],
+          protect: [requested.dictatedOpening, requested.endFlash?.text],
+        });
     if (splicePass.changedScenes.length) {
       planned.splice(0, planned.length, ...splicePass.script);
       trace(`planner_fidelity_splice project=${projectId} scenes=[${splicePass.changedScenes.join(',')}] removed=[${splicePass.removed.join(' | ')}]`);
@@ -3118,6 +3302,11 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // RENDER #7 OVERLAYS + SCREENSHOT OVERRIDES (owner ADJUST #2 — OPT-IN metadata;
     // absent = pixel-exact current output). Normalized here so the persisted record
     // is clean and the worker's assembly pass has a boundary-checked spec.
+    // A CALLER-SUPPLIED overlay spec is authoritative (owner Nov 4): the chat-derived
+    // brief spec, the planner-fidelity bullet panel and the chat-parsed flash timing
+    // must never be merged on top of it — that is how her three bullets became four
+    // and her 1.0s end flash became 1.5s while the request said otherwise.
+    const callerSuppliedOverlays = input.onScreenOverlays !== undefined && input.onScreenOverlays !== null;
     let onScreenOverlaysMeta: unknown = normalizeAssemblyOverlays(input.onScreenOverlays ?? buildBriefOverlaySpec(requested, planned.length), planned.length) ?? undefined;
     // PLANNER FIDELITY BULLETS (owner af053a01 — ZERO on-screen text in the
     // delivered video): the owner asked for bullet points ON SCREEN; the
@@ -3128,7 +3317,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // compacts empty perScene groups, so index 0 is the only position that
     // survives the persisted-metadata round-trip — the proven render-#8
     // shape the owner accepted.
-    const bulletLines = buildBulletOverlayLines(inventory, f4SellingPoints);
+    const bulletLines = callerSuppliedOverlays ? [] : buildBulletOverlayLines(inventory, f4SellingPoints);
     if (bulletLines.length) {
       const bulletPanels = distributeBulletPanels(bulletLines, planned.length);
       onScreenOverlaysMeta = mergePerSceneBullets(onScreenOverlaysMeta, bulletPanels, planned.length);
@@ -3146,7 +3335,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       conversationText: userConversationText(input.conversation),
       finalSceneSeconds: planned[planned.length - 1]?.duration,
     });
-    onScreenOverlaysMeta = applyFlashTimingToOverlaySpec(onScreenOverlaysMeta, flashTiming);
+    if (!callerSuppliedOverlays) onScreenOverlaysMeta = applyFlashTimingToOverlaySpec(onScreenOverlaysMeta, flashTiming);
     if (flashTiming.stated || flashTiming.emphasis) {
       trace(`planner_fidelity_flash project=${projectId} durationSec=${flashTiming.durationSec} stated=${flashTiming.stated} emphasis=${flashTiming.emphasis}`);
     }
@@ -3184,7 +3373,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // and the render never starts. This is the difference between "we could not plan
     // your brief" and a confident-looking generic video.
     const planningFailure = plannerOutcome.reason ? plannerFailureNotice(plannerOutcome) : null;
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:planningFailure?'failed':'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:planningFailure?'failed':'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
@@ -3391,10 +3580,29 @@ if (!skipGeneration) {
       // the renderClip call below — SEAMLESS STITCHING, owner Sep 17).
       let kbCam: number | null = null;
       let kbDir: 'zoom-in' | 'pan-left' | 'pan-right' = 'zoom-in';
+      // NARRATION IS RESOLVED PER SCENE, AT ASSEMBLY TIME (owner Nov 4 launch
+      // render): the old loop read `metadata.audioLocalPath` off the scene list it
+      // had in hand, so a scene whose audio was written later — or whose temp file
+      // did not survive a restart — was rendered SILENT while its narration MP3 sat
+      // right next to it. A silent clip is not a recoverable detail: it is the whole
+      // product. Each scene's audio is therefore re-resolved from the LIVE row here,
+      // and a scene that should speak but has no audio FAILS the render loudly
+      // instead of shipping silence.
+      const missingNarration: number[] = [];
       for (const scene of complete) {
-        const local=String((scene.metadata as any)?.localPath||'');
+        const liveMeta = await liveSceneMetadata(scene.id, {});
+        const local=String(liveMeta.localPath||'');
         if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber}`); continue; }
-        const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`); const audioLocal=String((scene.metadata as any)?.audioLocalPath||'');
+        const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`);
+        const narration = await resolveSceneNarrationAudio({
+          sceneId: scene.id,
+          sceneNumber: scene.sceneNumber,
+          liveMetadata: liveMeta,
+          audioUrl: (scene as any).audioUrl,
+          workDir: path.join(dir, 'narration'),
+        });
+        const audioLocal = narration?.path || '';
+        if (!audioLocal && shouldGenerateSceneNarration(scene.narration, voice)) missingNarration.push(scene.sceneNumber);
         // Every scene is rendered through renderClip so the delivered clip is
         // exactly scene.duration seconds: stills loop to length, and motion clips
         // use `-stream_loop -1` to pad short Sora shots up to their target (the
@@ -3436,6 +3644,14 @@ if (!skipGeneration) {
         clips.push(clip);
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
+      if (missingNarration.length) {
+        // LOUD, NOT SILENT: these scenes were planned to speak and no audio could be
+        // resolved for them. Rendering anyway delivers a video that loses its
+        // narration — the most expensive possible outcome, because it looks done.
+        throw new Error(
+          `SCENE_NARRATION_MISSING scenes=[${missingNarration.join(',')}] — the narration for ${missingNarration.length === 1 ? 'this scene' : 'these scenes'} could not be resolved (no local file and no downloadable audioUrl). Refusing to assemble a silent video.`,
+        );
+      }
       // SCENE MODE JOINS BY MATCH-CUT (owner Nov 2): no transition at all — the
       // join service removes edge black and cuts each boundary on its best-matching
       // frame pair. Faceless and Twin keep the dissolve (their stills are unrelated
