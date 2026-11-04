@@ -14,6 +14,10 @@
  *  - Per-scene bullet groups are drawn with 60ms fade in/out windows aligned to
  *    each scene's dissolve-compensated global start (same math as concatClips).
  *  - A persistent bottom bar (text on a translucent band) spans the whole video.
+ *    OWNER (Nov 2, launch video): the bar can BLINK at a stated cadence
+ *    ("0.5 seconds on, 0.4 seconds off") via `bottomBarBlink` — still burned in
+ *    for the whole video, still one drawtext/drawbox pair, still one re-encode.
+ *    Absent `bottomBarBlink` = the persistent bar, byte-identical to before.
  *
  * Pure helpers (resolveSceneVideoStarts / escapeDrawtext / normalizeAssemblyOverlays)
  * are deterministic and unit-tested; the ffmpeg pass is covered by a small real
@@ -73,11 +77,24 @@ export interface AssemblyEndFlash {
   fontSize?: number;
 }
 
+/** BLINKING BOTTOM BAR (OWNER, Nov 2 — her launch video): the bar text
+ *  ("EmpireLaunchAI.com") is BURNED IN for the whole video but BLINKS at a
+ *  stated cadence — her words: "0.5 seconds on, 0.4 seconds off". Absent =
+ *  the persistent bar (today's output, unchanged). */
+export interface BottomBarBlink {
+  /** seconds the bar is ON (visible) in each cycle */
+  onSeconds: number;
+  /** seconds the bar is OFF (invisible) in each cycle */
+  offSeconds: number;
+}
+
 export interface AssemblyOverlaySpec {
   /** Bullet groups, one entry per source scene (index-aligned with the concatClips inputs). */
   perScene?: { lines?: string[]; bullets?: AssemblyBullet[]; panel?: AssemblyBulletPanel }[];
   /** Persistent bottom-bar text (e.g. 'EmpireLaunchAI.com'). */
   bottomBar?: string;
+  /** Optional blink cadence for the bottom bar. ABSENT ⇒ persistent (unchanged). */
+  bottomBarBlink?: BottomBarBlink;
   /** End flash (render #8, owner ADJUST #3). */
   flash?: AssemblyEndFlash;
 }
@@ -204,6 +221,111 @@ export function resolveBulletPanel(panel: AssemblyBulletPanel | undefined): Requ
   return { x, y, w, h, bg: String(panel?.bg || DEEP_NAVY_PANEL_BG) };
 }
 
+/** ── BLINKING BOTTOM BAR (OWNER, Nov 2) ─────────────────────────────────────
+ *  "EmpireLaunchAI.com" must be burned into the whole launch video but BLINK at
+ *  her stated cadence (0.5s on / 0.4s off). Implemented as a repeated
+ *  `enable='between(t,…)+between(t,…)…'` on the EXISTING bottom-bar
+ *  drawbox+drawtext pair: no per-frame PNG, no second encode pass, no extra
+ *  filter in the graph — the same two filters, gated by a periodic expression.
+ *
+ *  Window policy (deterministic, unit-tested):
+ *   • the first ON window starts at t=0 (the bar is there on the first frame);
+ *   • ON windows repeat every (onSeconds + offSeconds) for the whole duration;
+ *   • the LAST ON window is always a FULL `onSeconds` long and ENDS on the final
+ *     frame, so the bar is visible on the very last frame — a duration that is
+ *     not a whole multiple of the cycle can never leave the video ending inside
+ *     an OFF gap or with a stubbed-off ON window. The only cost is that the
+ *     final OFF gap may be shorter than `offSeconds` (cadence is exact
+ *     everywhere else).
+ *  All arithmetic is done in integer milliseconds so repeated float addition
+ *  can never drift the cadence.
+ */
+const BLINK_MIN_ON_SECONDS = 0.05;
+const BLINK_MAX_ON_SECONDS = 10;
+const BLINK_MAX_OFF_SECONDS = 10;
+
+/** Pure: validate an untrusted blink cadence. Returns null (= persistent bar,
+ *  i.e. today's output) for anything malformed — a bad metadata payload can
+ *  never break a render. `onSeconds <= 0` is invalid too: "never visible"
+ *  contradicts a bar that must be burned into the video. */
+export function normalizeBottomBarBlink(raw: unknown): BottomBarBlink | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const on = Number(r.onSeconds);
+  const off = Number(r.offSeconds);
+  if (!Number.isFinite(on) || !Number.isFinite(off)) return null;
+  if (on <= 0 || off < 0) return null;
+  return {
+    onSeconds: Math.min(BLINK_MAX_ON_SECONDS, Math.max(BLINK_MIN_ON_SECONDS, on)),
+    offSeconds: Math.min(BLINK_MAX_OFF_SECONDS, Math.max(0, off)),
+  };
+}
+
+/** Pure: the ON windows ([start,end] in integer milliseconds) of a blinking bar
+ *  over a video of `totalSeconds`. Guarantees: windows[0] starts at 0, windows
+ *  never overlap, none is longer than onSeconds, and the last one ends exactly
+ *  on the final frame with its full ON length. */
+export function resolveBottomBarBlinkWindowsMs(
+  totalSeconds: number,
+  blink: BottomBarBlink,
+): Array<[number, number]> {
+  const totalMs = Math.max(0, Math.round((Number.isFinite(totalSeconds) ? totalSeconds : 0) * 1000));
+  const onMs = Math.max(1, Math.round((Number.isFinite(blink.onSeconds) ? blink.onSeconds : 0) * 1000));
+  const offMs = Math.max(0, Math.round((Number.isFinite(blink.offSeconds) ? blink.offSeconds : 0) * 1000));
+  if (totalMs <= 0) return [[0, 0]];
+  // No OFF gap ⇒ indistinguishable from the persistent bar; one window keeps the
+  // filter expression exactly as today.
+  if (offMs === 0) return [[0, totalMs]];
+  const periodMs = onMs + offMs;
+  const windows: Array<[number, number]> = [];
+  for (let start = 0; start < totalMs; start += periodMs) {
+    windows.push([start, Math.min(start + onMs, totalMs)]);
+  }
+  const last = windows[windows.length - 1];
+  const tailNeedsFixing = last && (last[1] < totalMs || last[1] - last[0] < Math.min(onMs, totalMs));
+  if (tailNeedsFixing && totalMs >= onMs) {
+    // Replace the periodic tail with ONE full-length ON window that ends on the
+    // final frame: drop every periodic window it would overlap, then append it.
+    const tailStart = totalMs - onMs;
+    while (windows.length > 0 && windows[windows.length - 1][1] > tailStart) windows.pop();
+    windows.push([tailStart, totalMs]);
+  }
+  return windows;
+}
+
+/** Pure: the ON windows in SECONDS (same guarantees as the ms resolver). */
+export function resolveBottomBarBlinkWindows(
+  totalSeconds: number,
+  blink: BottomBarBlink,
+): Array<[number, number]> {
+  return resolveBottomBarBlinkWindowsMs(totalSeconds, blink).map(
+    ([a, b]): [number, number] => [a / 1000, b / 1000],
+  );
+}
+
+/** Pure: the ffmpeg `enable=` expression for the bottom bar. With no (or an
+ *  invalid) cadence it returns EXACTLY the string this module has always
+ *  emitted — `enable='between(t,0,<total>)'` — so every existing caller's
+ *  filtergraph is byte-identical. With a cadence it is the same predicate
+ *  repeated per ON window, OR-ed with `+` (any non-zero value = draw). */
+export function buildBottomBarEnableExpression(
+  totalSeconds: number,
+  blink?: BottomBarBlink | null,
+): string {
+  // NOTE: the persistent branch formats the value EXACTLY as this module always
+  // has (no coercion) so every existing caller's filtergraph is byte-identical.
+  const persistent = `enable='between(t,0,${totalSeconds.toFixed(3)})'`;
+  const norm = normalizeBottomBarBlink(blink);
+  if (!norm) return persistent;
+  const total = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : 0;
+  const windows = resolveBottomBarBlinkWindowsMs(total, norm);
+  if (windows.length <= 1) return persistent;
+  const expr = windows
+    .map(([a, b]) => `between(t,${(a / 1000).toFixed(3)},${(b / 1000).toFixed(3)})`)
+    .join('+');
+  return `enable='${expr}'`;
+}
+
 /** Pure: validate + normalize an untrusted `onScreenOverlays` metadata payload.
  *  Returns a clean spec (or null when there is nothing to draw). Malformed
  *  entries are dropped, never thrown — the acceptance render must not die on a
@@ -259,6 +381,11 @@ export function normalizeAssemblyOverlays(
   }
   if (typeof r.bottomBar === 'string' && r.bottomBar.trim().length > 0) {
     spec.bottomBar = r.bottomBar.trim();
+    // BLINK cadence rides on the bar: it is meaningless without bar text, so it
+    // is only carried when the bar itself survived normalization. A malformed
+    // cadence is DROPPED (⇒ persistent bar), never thrown.
+    const blink = normalizeBottomBarBlink(r.bottomBarBlink);
+    if (blink) spec.bottomBarBlink = blink;
   }
   // END FLASH (ADJUST #3): text required; duration/bg/fg/fontSize optional.
   const flashRaw = (r.flash ?? {}) as Record<string, unknown> | null;
@@ -410,9 +537,13 @@ export function applyAssemblyOverlays(
         });
       });
       // Persistent bottom bar (translucent band + centered domain text), whole video.
+      // BLINKING (OWNER, Nov 2): with `bottomBarBlink` the SAME two filters are
+      // gated by a periodic `enable=` expression (0.5s on / 0.4s off for her
+      // launch video) — no extra filter, no PNG per frame, no second encode.
+      // Absent cadence ⇒ the exact persistent expression this module always used.
       if (spec.bottomBar) {
         const bf = writeTextFile(spec.bottomBar);
-        const enable = `enable='between(t,0,${total.toFixed(3)})'`;
+        const enable = buildBottomBarEnableExpression(total, spec.bottomBarBlink);
         vf.push(
           `drawbox=x=0:y=1752:w=1080:h=168:color=black@0.72:t=fill:${enable}`,
           `drawtext=fontfile='${font}':textfile='${bf}':expansion=none:fontsize=60:fontcolor=white:x=(w-text_w)/2:y=1782:${enable}`,
