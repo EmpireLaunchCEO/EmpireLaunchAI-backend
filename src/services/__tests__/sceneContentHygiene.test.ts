@@ -63,7 +63,11 @@ test('parseScenes: plan-speak GPT candidate narration is swapped to the finished
     })),
   };
   const plan = parseScenePlan(raw as any, 'a clean brief subject', 30, 'scene');
-  assert.equal(plan[0].narration, "Say hello to a clean brief subject. It's about to make things a lot easier.");
+  // The arc names the subject and stops there. The old second sentence
+  // ("It's about to make things a lot easier.") was an invented claim the
+  // 2026-11-02 template fix deliberately removed, so it must NOT come back.
+  assert.equal(plan[0].narration, "Say hello to a clean brief subject.");
+  assert.equal(/lot easier/i.test(plan[0].narration), false);
   assert.equal(isPlanSpeakNarration(plan[0].narration), false);
 });
 
