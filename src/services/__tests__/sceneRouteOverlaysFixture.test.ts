@@ -200,9 +200,12 @@ test('OVERLAYS → FILTERGRAPH: the 0.5s/0.4s cadence reaches the real ffmpeg co
     );
     // The BAR's own enable expression (the black@0.72 band at y=1752) — not the
     // end flash's window, which is a different overlay on the same file.
-    const barFilter = graph.split(',').find((f) => f.includes('y=1752') && f.includes('color=black@0.72'));
-    assert.ok(barFilter, `the bottom bar band is missing from the graph: ${graph}`);
-    const barWindows = [...barFilter!.matchAll(/between\(t,([\d.]+),([\d.]+)\)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    // NB: the graph's filters are comma-joined and each `enable='...'` contains
+    // commas of its own, so the band is located by its own unique prefix rather
+    // than by splitting the string.
+    const band = graph.match(/color=black@0\.72:t=fill:enable='([^']*)'/);
+    assert.ok(band, `the bottom bar band is missing from the graph: ${graph}`);
+    const barWindows = [...band![1].matchAll(/between\(t,([\d.]+),([\d.]+)\)/g)].map((m) => [Number(m[1]), Number(m[2])]);
     assert.ok(barWindows.length >= 4, `expected the bar to blink several times over 3s, got ${JSON.stringify(barWindows)}`);
     // ON windows are 0.5s long and the LAST one must end on the final frame — a bar
     // that blinks itself off at the end would leave the owner's domain missing.
