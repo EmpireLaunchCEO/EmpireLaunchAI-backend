@@ -5,6 +5,7 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { collectApprovalSweepIds } from '../services/deleteApprovalSweep.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
+import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody } from '../services/videoStreamService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
@@ -19,6 +20,9 @@ import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 import { usageService } from '../services/usageService.js';
 
 const router = Router();
+
+// Postgres `uuid` columns reject anything else with a 500 — guard before querying.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Keep rejected fire-and-forget pipeline promises visible in Railway logs. This
 // is installed once at module load (rather than once per request) to avoid
@@ -867,6 +871,136 @@ router.get('/download/:id', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[StudioRoute] Download proxy failed:', err.message);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/studio/video/:projectId/stream — PLAY a finished video in a browser ─
+//
+// The one link the owner can actually open. A finished render lives only in R2,
+// and the public site answers `/*.mp4` with HTML — so a link handed to her used
+// to open a web page instead of her video. This route proxies the bytes with
+// `video/mp4`, `Content-Disposition: inline` and real byte-range support, which
+// is what a browser checks before it offers a play button.
+//
+// AUTH: OWNERSHIP-SCOPED, exactly like GET /api/studio/download/:id above.
+// A project id is not a credential — user privacy is a non-negotiable, so a
+// caller must say who they are (session userId, ?userId=, or x-user-id) and the
+// project query filters on (id, userId) for that resolved user. A project that
+// belongs to someone else answers with the SAME 404 as an unknown id: a 403
+// would confirm the id is real. This route still only reads bytes of one
+// already-rendered project — it never writes, lists, deletes or spends — and no
+// other route's auth is touched.
+router.get('/video/:projectId/stream', async (req: Request, res: Response) => {
+  const projectId = String(req.params.projectId || '');
+  try {
+    // 1. Who is asking? Same three doors /download/:id accepts.
+    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    const identified = authorizeStreamAccess({ rawUid: uid });
+    if (identified.kind === 'deny') return res.status(identified.status).json(identified.body);
+
+    // 2. Resolve it to a real user row (never with an empty id — resolveUserId
+    //    auto-creates a row for an unknown uuid, so it is only ever called with
+    //    an id the caller actually supplied).
+    const resolvedUserId = await resolveUserId(String(uid));
+    const authorised = authorizeStreamAccess({ rawUid: uid, resolvedUserId });
+    if (authorised.kind === 'deny') return res.status(authorised.status).json(authorised.body);
+    const ownerUserId = authorised.userId; // non-null by construction
+
+    // 3. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
+    //    which would surface as a 500. Answer the honest 404 instead.
+    if (!UUID_RE.test(projectId)) {
+      return res.status(404).json(streamNotFoundBody());
+    }
+
+    // 4. The project, scoped to the caller. Someone else's project simply does
+    //    not exist here — the query cannot return it, so nothing can leak.
+    const [project] = await db.select()
+      .from(schema.videoProjects)
+      .where(and(
+        eq(schema.videoProjects.id, projectId),
+        eq(schema.videoProjects.userId, ownerUserId),
+      ))
+      .limit(1);
+
+    // 5. Belt and braces: the same gate decides, so an edit that drops the
+    //    scope from the query above cannot silently reopen the route.
+    const ownerCheck = authorizeStreamAccess({
+      rawUid: uid,
+      resolvedUserId: ownerUserId,
+      projectOwnerId: project?.userId ?? null,
+    });
+    if (ownerCheck.kind === 'deny') return res.status(ownerCheck.status).json(ownerCheck.body);
+
+    const target = resolveStreamTarget(project ?? null);
+    if (target.kind === 'not-found' || target.kind === 'no-video') {
+      return res.status(target.status).json(target.body);
+    }
+
+    if (!r2Storage.isAvailable) {
+      return res.status(503).json({
+        status: 'error',
+        error: "Video storage isn't configured on this server, so the file can't be played right now.",
+        reason: 'R2 not configured',
+        id: projectId,
+      });
+    }
+
+    // Size first, so a Range request can be answered with 206/416 without
+    // pulling the whole file through the backend.
+    const head = await r2Storage.headObject(target.r2Key);
+    if (!head) {
+      return res.status(502).json({
+        status: 'error',
+        error: "This video's file is missing from storage, so there is nothing to play.",
+        reason: 'Media missing from storage',
+        id: projectId,
+      });
+    }
+
+    const plan = buildStreamHeaders({
+      id: projectId,
+      size: head.size,
+      rangeHeader: typeof req.headers.range === 'string' ? req.headers.range : null,
+    });
+
+    if (plan.status === 416) {
+      for (const [k, v] of Object.entries(plan.headers)) res.setHeader(k, v);
+      return res.status(416).end();
+    }
+
+    const range = parseByteRange(typeof req.headers.range === 'string' ? req.headers.range : null, head.size);
+    const object = await r2Storage.getObjectStream(target.r2Key, s3RangeHeader(range));
+    if (!object) {
+      return res.status(502).json({
+        status: 'error',
+        error: "This video's file could not be read from storage right now.",
+        reason: 'R2 read failed',
+        id: projectId,
+      });
+    }
+
+    for (const [k, v] of Object.entries(plan.headers)) res.setHeader(k, v);
+    res.status(plan.status);
+
+    // HEAD (curl -I, some players): headers only, never pipe the body.
+    if (req.method === 'HEAD') {
+      (object.body as any).destroy?.();
+      return res.end();
+    }
+
+    object.body.on('error', (streamErr: any) => {
+      console.error('[StudioRoute] Video stream failed mid-flight:', streamErr?.message || streamErr);
+      if (!res.headersSent) {
+        res.status(502).json({ status: 'error', error: 'Video stream failed', id: projectId });
+      } else {
+        res.destroy(streamErr);
+      }
+    });
+    return object.body.pipe(res);
+  } catch (err: any) {
+    console.error('[StudioRoute] Video stream failed:', err?.message || err);
+    if (res.headersSent) return res.destroy(err);
+    return res.status(500).json({ status: 'error', error: err?.message || 'Video stream failed', id: projectId });
   }
 });
 
