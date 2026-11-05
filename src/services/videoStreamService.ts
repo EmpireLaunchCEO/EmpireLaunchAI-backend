@@ -106,6 +106,97 @@ export function extractR2KeyFromUrl(storedUrl: string | null | undefined): strin
 }
 
 /**
+ * The single 404 body for "no such video for YOU".
+ *
+ * Returned for an unknown id AND for a project that belongs to a different
+ * user, deliberately identical: a distinct 403 would confirm that the id is
+ * real, which is exactly the existence leak the ownership check exists to stop.
+ */
+export function streamNotFoundBody(): Record<string, unknown> {
+  return {
+    status: 'error',
+    error: 'No video project with that id.',
+    reason: 'That video id does not exist. Check the link.',
+  };
+}
+
+/** The 401 body when the caller did not say who they are (mirrors /download/:id). */
+export function streamUserIdRequiredBody(): Record<string, unknown> {
+  return {
+    status: 'error',
+    error: 'userId required',
+    reason: 'Pass your user id as ?userId=..., an x-user-id header, or a signed-in session.',
+  };
+}
+
+/** The 401 body when the supplied id resolves to no known user (mirrors /download/:id). */
+export function streamUserNotFoundBody(): Record<string, unknown> {
+  return {
+    status: 'error',
+    error: 'User not found',
+    reason: 'That user id does not resolve to an account.',
+  };
+}
+
+export type StreamAccess =
+  | { kind: 'allow'; userId: string }
+  /** The caller supplied an id; nothing beyond that has been checked yet. */
+  | { kind: 'pass' }
+  | { kind: 'deny'; status: 401 | 404; body: Record<string, unknown> };
+
+/**
+ * OWNERSHIP GATE for GET /api/studio/video/:projectId/stream.
+ *
+ * A project id is NOT a credential. User privacy is a non-negotiable, so the
+ * stream route is scoped to the owner exactly like GET /api/studio/download/:id
+ * — the query filters on (id, userId) and this decision mirrors it:
+ *
+ *   no user id supplied        -> 401 'userId required'
+ *   id does not resolve        -> 401 'User not found'
+ *   no project for this owner  -> 404, the SAME body as an unknown id
+ *   project belongs to another -> 404, identical (never confirms existence)
+ *   project belongs to caller  -> allow
+ *
+ * `projectOwnerId` is null whenever the scoped query matched no row, so
+ * "wrong owner" and "unknown id" are indistinguishable here by construction.
+ * Keeping the rule pure lets all five branches be tested with no DB, and means
+ * a future edit that drops the scope from the query still cannot open the door.
+ *
+ * The route calls this more than once per request, so the difference between
+ * "not established yet" and "established as nothing" is explicit:
+ *   resolvedUserId === undefined  -> caller id not resolved yet  (kind 'pass')
+ *   resolvedUserId === null / ''  -> resolved to nobody          (401)
+ *   projectOwnerId === undefined  -> project not looked up yet   (allow)
+ *   projectOwnerId === null / ''  -> no row for this owner       (404)
+ * Getting that wrong in the other direction is what produced a route that
+ * answered 401 to the owner's own video; the tests pin all five branches.
+ */
+export function authorizeStreamAccess(input: {
+  rawUid?: unknown;
+  resolvedUserId?: string | null;
+  projectOwnerId?: string | null;
+}): StreamAccess {
+  const raw = Array.isArray(input.rawUid)
+    ? String(input.rawUid[0] ?? '').trim()
+    : (typeof input.rawUid === 'string' ? input.rawUid.trim() : '');
+  if (!raw) return { kind: 'deny', status: 401, body: streamUserIdRequiredBody() };
+
+  if (input.resolvedUserId === undefined) return { kind: 'pass' };
+
+  const resolved = typeof input.resolvedUserId === 'string' ? input.resolvedUserId.trim() : '';
+  if (!resolved) return { kind: 'deny', status: 401, body: streamUserNotFoundBody() };
+
+  if (input.projectOwnerId === undefined) return { kind: 'allow', userId: resolved };
+
+  const owner = typeof input.projectOwnerId === 'string' ? input.projectOwnerId.trim() : '';
+  if (!owner || owner !== resolved) {
+    return { kind: 'deny', status: 404, body: streamNotFoundBody() };
+  }
+
+  return { kind: 'allow', userId: resolved };
+}
+
+/**
  * Decide what a project id resolves to for streaming.
  *
  * Order of preference for the file: `final_video_url`, then the metadata
@@ -114,15 +205,7 @@ export function extractR2KeyFromUrl(storedUrl: string | null | undefined): strin
  */
 export function resolveStreamTarget(project: StreamProjectLike | null | undefined): StreamTarget {
   if (!project) {
-    return {
-      kind: 'not-found',
-      status: 404,
-      body: {
-        status: 'error',
-        error: 'No video project with that id.',
-        reason: 'That video id does not exist. Check the link.',
-      },
-    };
+    return { kind: 'not-found', status: 404, body: streamNotFoundBody() };
   }
 
   const meta = asObject(project.metadata);

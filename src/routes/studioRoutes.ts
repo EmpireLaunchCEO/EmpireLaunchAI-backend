@@ -5,7 +5,7 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { collectApprovalSweepIds } from '../services/deleteApprovalSweep.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
-import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader } from '../services/videoStreamService.js';
+import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody } from '../services/videoStreamService.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
@@ -882,28 +882,54 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 // `video/mp4`, `Content-Disposition: inline` and real byte-range support, which
 // is what a browser checks before it offers a play button.
 //
-// AUTH CHOICE: read-only, public-by-unguessable-id (a v4 uuid), NO token wall.
-// The owner has no session on the Railway backend origin, so any auth here
-// would mean "no video for the owner" — the exact failure this route exists to
-// remove. The endpoint can only read bytes of one already-rendered project; it
-// never writes, deletes, lists or spends. No other route's auth is touched.
+// AUTH: OWNERSHIP-SCOPED, exactly like GET /api/studio/download/:id above.
+// A project id is not a credential — user privacy is a non-negotiable, so a
+// caller must say who they are (session userId, ?userId=, or x-user-id) and the
+// project query filters on (id, userId) for that resolved user. A project that
+// belongs to someone else answers with the SAME 404 as an unknown id: a 403
+// would confirm the id is real. This route still only reads bytes of one
+// already-rendered project — it never writes, lists, deletes or spends — and no
+// other route's auth is touched.
 router.get('/video/:projectId/stream', async (req: Request, res: Response) => {
   const projectId = String(req.params.projectId || '');
   try {
-    // A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
-    // which would surface as a 500. Answer the honest 404 instead.
+    // 1. Who is asking? Same three doors /download/:id accepts.
+    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    const identified = authorizeStreamAccess({ rawUid: uid });
+    if (identified.kind === 'deny') return res.status(identified.status).json(identified.body);
+
+    // 2. Resolve it to a real user row (never with an empty id — resolveUserId
+    //    auto-creates a row for an unknown uuid, so it is only ever called with
+    //    an id the caller actually supplied).
+    const resolvedUserId = await resolveUserId(String(uid));
+    const authorised = authorizeStreamAccess({ rawUid: uid, resolvedUserId });
+    if (authorised.kind === 'deny') return res.status(authorised.status).json(authorised.body);
+    const ownerUserId = authorised.userId; // non-null by construction
+
+    // 3. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
+    //    which would surface as a 500. Answer the honest 404 instead.
     if (!UUID_RE.test(projectId)) {
-      return res.status(404).json({
-        status: 'error',
-        error: 'No video project with that id.',
-        reason: 'That video id does not exist. Check the link.',
-      });
+      return res.status(404).json(streamNotFoundBody());
     }
 
+    // 4. The project, scoped to the caller. Someone else's project simply does
+    //    not exist here — the query cannot return it, so nothing can leak.
     const [project] = await db.select()
       .from(schema.videoProjects)
-      .where(eq(schema.videoProjects.id, projectId))
+      .where(and(
+        eq(schema.videoProjects.id, projectId),
+        eq(schema.videoProjects.userId, ownerUserId),
+      ))
       .limit(1);
+
+    // 5. Belt and braces: the same gate decides, so an edit that drops the
+    //    scope from the query above cannot silently reopen the route.
+    const ownerCheck = authorizeStreamAccess({
+      rawUid: uid,
+      resolvedUserId: ownerUserId,
+      projectOwnerId: project?.userId ?? null,
+    });
+    if (ownerCheck.kind === 'deny') return res.status(ownerCheck.status).json(ownerCheck.body);
 
     const target = resolveStreamTarget(project ?? null);
     if (target.kind === 'not-found' || target.kind === 'no-video') {
