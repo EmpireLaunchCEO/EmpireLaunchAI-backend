@@ -736,3 +736,26 @@ export const referrals = sqliteTable('referrals', {
   salespersonName: text('salesperson_name').notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
+/**
+ * Stripe webhook events — SQLite mirror of stripe_webhook_events (dev/local
+ * parity). Primary key is the Stripe event id, so a retried delivery cannot
+ * apply the same payment twice.
+ */
+export const stripeWebhookEvents = sqliteTable('stripe_webhook_events', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),
+  status: text('status').notNull(),
+  reason: text('reason'),
+  userId: text('user_id'),
+  brandSlot: integer('brand_slot'),
+  paymentLinkId: text('payment_link_id'),
+  stripeSessionId: text('stripe_session_id'),
+  stripeCustomerId: text('stripe_customer_id'),
+  customerEmail: text('customer_email'),
+  amountTotal: integer('amount_total'),
+  currency: text('currency'),
+  mode: text('mode'),
+  payload: text('payload', { mode: 'json' }),
+  receivedAt: integer('received_at', { mode: 'timestamp' }).notNull(),
+  processedAt: integer('processed_at', { mode: 'timestamp' }),
+});

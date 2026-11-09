@@ -322,6 +322,32 @@ export const subscriptions = pgTable('subscriptions', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 /**
+ * Stripe webhook events — the idempotency ledger for `POST /api/webhooks/stripe`.
+ *
+ * `id` is the Stripe event id (`evt_...`) and the primary key, so a Stripe retry
+ * conflicts instead of paying a client twice. One row per delivery, including the
+ * ones we could not attribute to a user (`status = 'unmatched'`) — a real payment
+ * is never dropped. `payload` keeps the whole event for a human to read later.
+ */
+export const stripeWebhookEvents = pgTable('stripe_webhook_events', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),
+  status: text('status').notNull(), // 'processing' | 'applied' | 'unmatched' | 'ignored' | 'failed'
+  reason: text('reason'),
+  userId: uuid('user_id'), // no FK: an unmatched payment has no user yet
+  brandSlot: integer('brand_slot'),
+  paymentLinkId: text('payment_link_id'),
+  stripeSessionId: text('stripe_session_id'),
+  stripeCustomerId: text('stripe_customer_id'),
+  customerEmail: text('customer_email'),
+  amountTotal: integer('amount_total'),
+  currency: text('currency'),
+  mode: text('mode'),
+  payload: jsonb('payload'),
+  receivedAt: timestamp('received_at').defaultNow().notNull(),
+  processedAt: timestamp('processed_at'),
+});
+/**
  * Referrals — salesperson attribution for commission payouts.
  * A row is recorded once per client+referral when a completed checkout
  * carries a `referral` (salesperson first name). "Still a customer"

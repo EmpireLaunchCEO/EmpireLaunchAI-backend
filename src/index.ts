@@ -16,6 +16,8 @@ import analyticsRoutes from './routes/analyticsRoutes.js';
 import socialCommerceRoutes from './routes/socialCommerceRoutes.js';
 import campaignRoutes from './routes/campaignRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
+import stripeWebhookRoutes from './routes/stripeWebhookRoutes.js';
+import { STRIPE_WEBHOOK_PATH } from './services/stripeWebhookService.js';
 import blueprintRoutes from './routes/blueprintRoutes.js';
 import neuralDiscoveryRoutes from './routes/neuralDiscoveryRoutes.js';
 import onboardingRoutes from './routes/onboardingRoutes.js';
@@ -136,6 +138,13 @@ app.use((helmet as any)({
 }));
 app.use(cors());
 app.use(morgan('dev'));
+
+// Stripe payment webhook — MUST be mounted before the global express.json().
+// Signature verification needs the exact raw bytes Stripe signed; a body that has
+// been through a JSON parser can never match. It also sits before the rate limiter
+// so a Stripe retry is never answered 429. Nothing else touches this path.
+app.use(STRIPE_WEBHOOK_PATH, stripeWebhookRoutes);
+
 app.use(express.json());
 app.use(globalRateLimiter);
 
