@@ -6,6 +6,7 @@ import { dnaVaultService, DnaStrand } from '../services/dnaVaultService.js';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { reasoningEngine } from '../services/reasoningEngine.js';
 import { usageService } from '../services/usageService.js';
+import { isTwinUnavailableError, twinRefusalBody } from '../services/twinAccess.js';
 import { v4 as uuidv4 } from 'uuid';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
@@ -96,6 +97,13 @@ export class EmpireStudioController {
       });
       res.json(asset);
     } catch (error: unknown) {
+      // NEURAL TWIN IS PARKED (owner Nov 9): the second Twin entry point answers
+      // with the same plain-language 403, never a 500 — the door is closed here
+      // as well as in /api/cinema/create-twin.
+      if (isTwinUnavailableError(error)) {
+        res.status(403).json(twinRefusalBody());
+        return;
+      }
       const msg = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: msg });
     }

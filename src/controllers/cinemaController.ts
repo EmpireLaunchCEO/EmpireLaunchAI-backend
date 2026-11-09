@@ -5,6 +5,7 @@ import path from 'path';
 import { cinemaEngineService } from '../services/cinemaEngineService.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { usageService, WEEKLY_SCENE_LIMIT, WEEKLY_FACELESS_LIMIT, WEEKLY_TWIN_LIMIT, MONTHLY_DESIGN_LIMIT } from '../services/usageService.js';
+import { isTwinUnavailableError, twinRefusalBody } from '../services/twinAccess.js';
 import { creationEngine } from '../services/creationEngine.js';
 import { neuralActionEngine } from '../services/neuralActionEngine.js';
 import { db, schema } from '../db/index.js';
@@ -308,6 +309,13 @@ export class CinemaController {
         asset: result,
       });
     } catch (error: any) {
+      // NEURAL TWIN IS PARKED (owner Nov 9): a non-owner asking for a Twin gets
+      // the plain-language reason, not a 500. The renderer is the choke point —
+      // this only translates its typed refusal into the client-facing answer.
+      if (isTwinUnavailableError(error)) {
+        res.status(403).json(twinRefusalBody());
+        return;
+      }
       res.status(500).json({ error: error.message });
     }
   }
