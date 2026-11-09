@@ -3761,7 +3761,18 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // paid media call, so the client gets a plain-language failure instead of $2.46 of
     // render that silently drops what she asked for. `componentsVerified` is read
     // nowhere in the app, so nothing downstream can be surprised by the failed row.
-    const componentsFailure = componentsNotPlacedNotice(qc.missingComponents);
+    // THE BRIEF SENTENCE IS THE SUBJECT, NOT A PLACEABLE COMPONENT (fixed after the
+    // full suite: "A launch video for EmpireLaunchAI." was inventoried as one required
+    // item, could never appear verbatim in the plan, and so the gate answered 422 on
+    // every supplied-script request — no video at all). Items the client RELAYED (an
+    // explicit component, a named thing in chat) still gate; the brief's own sentence
+    // chunks are what the planner turns into scenes and are covered by the assignment
+    // check (2b), so they are audited in componentsMissing but never block.
+    const briefFraming = new Set(
+      chunkText(stripInstructionResidue(cleanIdea)).map(c => c.toLowerCase()),
+    );
+    const gateMissing = qc.missingComponents.filter(c => !briefFraming.has(c.toLowerCase()));
+    const componentsFailure = componentsNotPlacedNotice(gateMissing);
     // PLANNING GATE (owner Nov 2): no plan ⇒ no video. The row is still written (so
     // the bypass is recorded and the client can see why) but it is written as failed,
     // and the render never starts. This is the difference between "we could not plan
