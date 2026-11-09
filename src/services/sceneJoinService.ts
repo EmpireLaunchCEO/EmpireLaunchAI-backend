@@ -64,6 +64,10 @@ export const BLACK_MIN_DURATION = 0.08;
 /** A detected black run longer than this is NOT a join dip — it is a broken clip.
  *  Fail loud instead of silently lopping seconds off a scene. */
 export const BLACK_MAX_TRIM_SECONDS = 1.5;
+/** The most of itself a single clip may give to the exact-length correction before
+ *  the other clips are asked first (defect 3b — the tail is no longer the donor of
+ *  first resort). The fallback pass still meets the length contract exactly. */
+export const TAIL_CORRECTION_SHARE = 0.25;
 
 export interface BlackRun { startSec: number; endSec: number; durationSec: number; }
 export interface EdgeBlack { headSeconds: number; tailSeconds: number; runs: BlackRun[]; note?: string; }
@@ -182,6 +186,59 @@ export function chooseMatchPair(
     }
   }
   return best;
+}
+
+export interface JoinDecision {
+  /** One entry per join, in video order; undefined only when a strip had no frames. */
+  pairs: Array<MatchPair | undefined>;
+  /** Frames each join was ALLOWED to spend — the fair share it was reserved. */
+  allowances: number[];
+  /** Frames actually spent on match cuts across all joins. */
+  spentFrames: number;
+  /** Slack the plan bought and the cuts did NOT need. */
+  unusedFrames: number;
+  /** Joins that had to be left uncut even though slack existed (should be empty). */
+  starvedJoins: number[];
+}
+
+/**
+ * Decide every join's cut under ONE shared frame budget, FAIRLY (owner Nov 5 —
+ * defect 3).
+ *
+ * The old loop handed the whole remaining budget to each join in video order, so
+ * join 0 could spend all of it for a fractionally better match and every later
+ * join was silently given a 0-frame allowance — which was recorded as
+ * `quality:'visible'`, a bad cut reported as a fine one. Reachable in production:
+ * one join can spend up to 22 frames and a four-join plan can want 88, while black
+ * trimming shrinks the slack the plan actually has.
+ *
+ * Now each join is reserved `floor(slack / joinsRemaining)` before it spends, so no
+ * join can starve the ones after it. PSNR is still the objective WITHIN that
+ * allowance. Pure: frames in, decisions out — no ffmpeg, no files.
+ */
+export function planJoinCuts(
+  strips: Array<{ tail: Buffer[]; head: Buffer[] }>,
+  slackFrames: number,
+): JoinDecision {
+  const budget = Math.max(0, Math.floor(Number.isFinite(slackFrames) ? slackFrames : 0));
+  let slack = budget;
+  const pairs: Array<MatchPair | undefined> = [];
+  const allowances: number[] = [];
+  const starvedJoins: number[] = [];
+  for (let i = 0; i < strips.length; i++) {
+    const remaining = strips.length - i;
+    const allowance = Math.min(slack, Math.floor(slack / remaining));
+    allowances.push(allowance);
+    const { tail, head } = strips[i];
+    if (!tail?.length || !head?.length) { pairs.push(undefined); continue; }
+    const pair = chooseMatchPair(tail, head, allowance);
+    pairs.push(pair);
+    if (!pair) continue;
+    slack -= pair.totalDropFrames;
+    if (pair.totalDropFrames === 0) starvedJoins.push(i);
+  }
+  const spentFrames = pairs.reduce((a, p) => a + (p ? p.totalDropFrames : 0), 0);
+  return { pairs, allowances, spentFrames, unusedFrames: Math.max(0, budget - spentFrames), starvedJoins };
 }
 
 // ─── FFmpeg-backed helpers ───────────────────────────────────────────────────
@@ -459,6 +516,10 @@ export interface MatchCutReport {
   deliveredSeconds: number;
   correctionSeconds: number;
   frameRate: number;
+  /** Frames each join was reserved before it spent (defect 3 — fair share). */
+  joinFrameAllowances: number[];
+  /** Slack the plan bought that the match cuts did not need. */
+  unusedSlackFrames: number;
 }
 
 export interface MatchCutPlan { paths: string[]; report: MatchCutReport; }
@@ -505,7 +566,10 @@ export async function planMatchCutCuts(
     : kept;
   // The slack the plan bought (32s of take for a 30s video) — cuts may never spend
   // more than this, or the delivered video would come out SHORT.
-  let slackFrames = Math.max(0, Math.floor((kept - target) * JOIN_FPS));
+  const slackFrames = Math.max(0, Math.floor((kept - target) * JOIN_FPS));
+  // Decode every join's search window FIRST, then decide all the cuts together under
+  // one FAIR budget (planJoinCuts). Nothing here may spend the budget in join order.
+  const strips: Array<{ tail: Buffer[]; head: Buffer[] }> = [];
   for (let i = 0; i + 1 < deblacked.length; i++) {
     const [tailFrames, headFrames] = await Promise.all([
       extractFrameStrip(deblacked[i], 'tail', searchFrames),
@@ -514,13 +578,17 @@ export async function planMatchCutCuts(
     if (tailFrames.length < 2 || headFrames.length < 2) {
       throw new Error(`match-cut join: could not decode frames at the ${i}→${i + 1} join (tail=${tailFrames.length} head=${headFrames.length}) — refusing to cut blind`);
     }
-    const pair = chooseMatchPair(tailFrames, headFrames, slackFrames);
+    strips.push({ tail: tailFrames, head: headFrames });
+  }
+  const decision = planJoinCuts(strips, slackFrames);
+  for (let i = 0; i < decision.pairs.length; i++) {
+    const pair = decision.pairs[i];
+    const { tail, head } = strips[i];
     if (!pair) {
-      // Only reachable when the slack is already spent: join with NO cut rather than
-      // breaking the length contract. Recorded honestly.
+      // A strip with no decodable frames — unreachable in practice (thrown above).
       joins.push({
-        from: i, to: i + 1, naivePsnr: frameDifference(tailFrames[tailFrames.length - 1], headFrames[0]).psnr,
-        cutPsnr: frameDifference(tailFrames[tailFrames.length - 1], headFrames[0]).psnr,
+        from: i, to: i + 1, naivePsnr: frameDifference(tail[tail.length - 1], head[0]).psnr,
+        cutPsnr: frameDifference(tail[tail.length - 1], head[0]).psnr,
         aTailDropFrames: 0, bHeadDropFrames: 0, cutSeconds: 0, quality: 'visible',
         blackHeadSeconds: black[i + 1].headSeconds, blackTailSeconds: black[i].tailSeconds,
       });
@@ -528,7 +596,6 @@ export async function planMatchCutCuts(
     }
     dropTail[i] = pair.aTailDropFrames;
     dropHead[i + 1] = pair.bHeadDropFrames;
-    slackFrames -= pair.totalDropFrames;
     joins.push({
       from: i, to: i + 1,
       naivePsnr: pair.naivePsnr,
@@ -542,6 +609,11 @@ export async function planMatchCutCuts(
     });
     kept -= pair.totalDropFrames / JOIN_FPS;
   }
+  if (decision.starvedJoins.length) {
+    // Loud, never silent: a join that spent nothing while slack existed is exactly
+    // the "bad cut reported as a fine one" this fix exists to stop.
+    console.warn(`[sceneJoin] joins left uncut while ${decision.unusedFrames} slack frames remained: [${decision.starvedJoins.join(',')}]`);
+  }
 
   // 3. APPLY THE CUTS (frame-exact)
   const cutPaths: string[] = [];
@@ -551,24 +623,31 @@ export async function planMatchCutCuts(
     cutPaths.push(await cutFrames(deblacked[i], out, dropHead[i], dropTail[i]));
   }
 
-  // 4. EXACT LENGTH — the delivered total must be the planned total. The remaining
-  //    slack is taken off the LAST clip's tail (the one that carries the 8s call),
-  //    then progressively earlier clips if that one runs out. Never a freeze.
+  // 4. EXACT LENGTH — the delivered total must be the planned total. The arithmetic
+  //    is unchanged (the total removed is exactly the excess), but WHICH clip gives is
+  //    now spread instead of taken off the tail first (owner Nov 5 — defect 3b: the
+  //    last scene was starved twice, once by the greedy join budget and again here).
+  //    Pass 1 lets no clip give more than TAIL_CORRECTION_SHARE of itself; pass 2
+  //    falls back to the old unbounded walk so the length contract is still met.
   const have = cutPaths.map((f) => probeSecondsOf(f));
   const sum = have.reduce((a, b) => a + b, 0);
   let correctionSeconds = 0;
   if (sum > target + 0.02) {
     let excess = sum - target;
-    for (let i = cutPaths.length - 1; i >= 0 && excess > 0.02; i--) {
-      const keep = Math.max(0.5, have[i] - excess);
-      const removed = have[i] - keep;
-      if (removed <= 0.02) continue;
-      const out = path.join(workDir, `${tag}exact-${i}.mp4`);
-      cutPaths[i] = await trimTailSeconds(cutPaths[i], out, keep);
-      have[i] = probeSecondsOf(cutPaths[i]);
-      correctionSeconds += removed;
-      excess -= removed;
-    }
+    const trimPass = async (minKeep: (len: number) => number, suffix: string): Promise<void> => {
+      for (let i = cutPaths.length - 1; i >= 0 && excess > 0.02; i--) {
+        const keep = Math.max(0.5, minKeep(have[i]), have[i] - excess);
+        const removed = have[i] - keep;
+        if (removed <= 0.02) continue;
+        const out = path.join(workDir, `${tag}${suffix}-${i}.mp4`);
+        cutPaths[i] = await trimTailSeconds(cutPaths[i], out, keep);
+        have[i] = probeSecondsOf(cutPaths[i]);
+        correctionSeconds += removed;
+        excess -= removed;
+      }
+    };
+    await trimPass((len) => len * (1 - TAIL_CORRECTION_SHARE), 'exact');
+    await trimPass(() => 0, 'exact2');
   }
   const deliveredSeconds = have.reduce((a, b) => a + b, 0);
   const worstCutPsnr = joins.length ? Math.min(...joins.map((j) => j.cutPsnr)) : 99;
@@ -584,6 +663,8 @@ export async function planMatchCutCuts(
     deliveredSeconds: Math.round(deliveredSeconds * 1000) / 1000,
     correctionSeconds: Math.round(correctionSeconds * 1000) / 1000,
     frameRate: JOIN_FPS,
+    joinFrameAllowances: decision.allowances,
+    unusedSlackFrames: decision.unusedFrames,
   };
   return { paths: cutPaths, report };
 }

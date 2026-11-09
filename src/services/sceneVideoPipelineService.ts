@@ -1931,6 +1931,84 @@ export interface ArcFlags { hook: boolean; about: boolean; cta: boolean }
 const INVENTORY_CAP = 14;               // bounded so the prompt stays focused
 const COMPONENT_MAX_CHARS = 160;        // longest inventory item we emit
 const COMPONENT_PREFER_MAX_CHARS = 100; // long chunks are cut at the last word ≤ this
+
+/* ─── DIRECTIVE vs CONTENT (owner Nov 5 — defect 1) ─────────────────────
+ * The inventory is built from the client's OWN WORDS, and those words carry
+ * INSTRUCTIONS as well as SUBJECTS. "make it look premium" is a note about how the
+ * video should FEEL; "add a photo of my dog" names something that must be ON
+ * SCREEN. Until this predicate existed the only defence was a blocklist of literal
+ * chat phrases (stripInstructionResidue / isChatResidueText), so any instruction
+ * nobody had listed became a "missing component" and was appended VERBATIM to a
+ * scene's visualPrompt — painted into the still, then into the video. Classify by
+ * grammatical MOOD, not by blocklist: an instruction is STYLE GUIDANCE for the
+ * planner, a subject is CONTENT the video must contain. */
+const STYLE_VOCAB = new Set<string>([
+  // how it should feel / look
+  'premium', 'cheap', 'expensive', 'luxury', 'luxurious', 'elegant', 'minimal', 'minimalist',
+  'clean', 'modern', 'bold', 'playful', 'sleek', 'professional', 'polished', 'calm', 'cinematic',
+  'dramatic', 'upbeat', 'energetic', 'energy', 'vibe', 'vibes', 'mood', 'tone', 'feel', 'feels',
+  'feeling', 'style', 'styled', 'aesthetic', 'look', 'looks', 'cohesive', 'cohesion', 'consistent',
+  'consistency', 'punchy', 'snappy', 'subtle', 'simple', 'brighter', 'darker', 'colorful',
+  'colourful', 'warm', 'cool', 'crisp', 'smooth', 'natural', 'fun', 'funny', 'serious', 'friendly',
+  'professional', 'polish', 'quality', 'high', 'low', 'soft', 'hard', 'loud', 'quiet',
+  // pacing, structure and copy language
+  'pace', 'pacing', 'tempo', 'fast', 'faster', 'slow', 'slower', 'shorter', 'longer', 'short',
+  'long', 'tight', 'tighter', 'tighten', 'seconds', 'second', 'secs', 'minutes', 'duration',
+  'length', 'intro', 'outro', 'hook', 'opening', 'ending', 'transition', 'transitions', 'captions',
+  'caption', 'text', 'texts', 'narration', 'voiceover', 'voice', 'script', 'copy', 'wording',
+  'word', 'words', 'phrase', 'phrases', 'line', 'lines', 'video', 'videos', 'scene', 'scenes',
+  'story', 'edit', 'editing', 'edits', 'reel', 'reels',
+  // palette language (the colour itself is captured as its own canonical token)
+  'palette', 'colours', 'colors', 'colour', 'color', 'scheme', 'font', 'fonts',
+]);
+/** The instruction verb a directive opens with (stripped repeatedly, so "don't use
+ *  the word cheap" loses both "don't" and "use" before the subject test). */
+const DIRECTIVE_LEAD_RE = /^(?:please\s+|also\s+|and\s+|just\s+)?(?:make|ensure|keep|use|add|include|put|avoid|don'?t|do\s+not|never|always|remove|drop|change|swap|replace|try|let'?s|go\s+with|show|give|i\s+want|i'?d\s+like|i\s+need|we\s+want|more|less|it\s+should|should|must|needs?\s+to|tighten|shorten|speed\s+it|trim|write|say|speak|narrate|tell|stop|start|begin|end|finish|keep\s+it|make\s+it)\b/i;
+/** Second-person / modal instruction framing ("you should…", "your video…"). */
+const SECOND_PERSON_RE = /\byou\s+(?:should|need|must|have\s+to|can|could|want|gotta)\b|\byour\s+(?:video|videos|scenes?|narration|script|copy|audience|viewers?|content)\b|\bit\s+should\s+(?:feel|look|be|sound)\b|\bi\s+want\s+(?:it|the\s+video)\b|\b(?:the\s+)?video\s+should\b/i;
+/** Grammar and filler — never evidence of a subject. */
+const DIRECTIVE_STOPWORDS = new Set<string>([
+  'a', 'an', 'the', 'it', 'its', 'this', 'that', 'these', 'those', 'my', 'our', 'your', 'their',
+  'his', 'her', 'of', 'to', 'in', 'on', 'at', 'for', 'with', 'and', 'or', 'but', 'be', 'is', 'are',
+  'was', 'were', 'do', 'does', 'did', 'so', 'very', 'really', 'just', 'like', 'as', 'if', 'then',
+  'than', 'up', 'down', 'out', 'all', 'any', 'some', 'more', 'less', 'not', 'no', 'yes', 'please',
+  'also', 'around', 'across', 'every', 'each', 'whole', 'bit', 'lot', 'little', 'quite', 'too',
+  'much', 'many', 'one', 'two', 'three', 'should', 'must', 'will', 'would', 'can', 'could', 'need',
+  'needs', 'have', 'has', 'there', 'them', 'they', 'we', 'us', 'you', 'me', 'i', 'from', 'about',
+  'into', 'over', 'under', 'through', 'while', 'when', 'where', 'how', 'what', 'which', 'who',
+  'use', 'add', 'make', 'keep', 'show', 'give', 'put', 'include', 'avoid', 'remove', 'drop',
+  'change', 'swap', 'replace', 'try', 'go', 'get', 'let', 'want', 'need', 'ensure',
+]);
+/** True when a phrase INSTRUCTS the pipeline rather than naming something to show. */
+export function isDirectiveInstruction(raw: string): boolean {
+  return classifyInventoryIntent(raw) === 'directive';
+}
+/** 'directive' = style guidance for the planner, never painted into a scene;
+ *  'content' = a concrete thing the video must actually contain. A directive that
+ *  names a concrete subject ("add a photo of my dog") is CONTENT — the client named
+ *  something and it must still reach the plan; only instructions with no subject of
+ *  their own are routed to style guidance. */
+export function classifyInventoryIntent(raw: string): 'directive' | 'content' {
+  const text = normalizeComponent(raw).replace(/^[-–—•*\s]+/, '');
+  if (!text) return 'content';
+  if (!(DIRECTIVE_LEAD_RE.test(text) || SECOND_PERSON_RE.test(text))) return 'content';
+  // Strip the instruction framing (repeatedly: "don't use the word cheap" carries
+  // two leading verbs), then look for any word that is neither grammar, style
+  // language, a colour token nor a number. One such word = a named subject.
+  let body = text;
+  for (let i = 0; i < 4 && DIRECTIVE_LEAD_RE.test(body); i++) body = body.replace(DIRECTIVE_LEAD_RE, ' ');
+  const words = body.toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
+  for (const raw of words) {
+    const word = raw.replace(/^['-]+|['-]+$/g, '');
+    if (!word || word.length < 3) continue;
+    if (DIRECTIVE_STOPWORDS.has(word)) continue;
+    if (STYLE_VOCAB.has(word)) continue;
+    if (COLOR_WORDS.includes(word)) continue;
+    if (/^\d+$/.test(word)) continue;
+    return 'content';
+  }
+  return 'directive';
+}
 const PLATFORM_PATTERNS: Array<{ re: RegExp; name: string }> = [
   { re: /\btiktok\b/i, name: 'TikTok' },
   { re: /\binstagram\b/i, name: 'Instagram' },
@@ -2003,6 +2081,11 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
     // the narration.", assistant chat replies). These leaked verbatim into
     // metadata.components and were injected into visualPrompts (abca11ed).
     if (isChatResidueText(v)) return;
+    // DIRECTIVE GUARD (owner Nov 5 — defect 1): an INSTRUCTION is not a component.
+    // "make it look premium" used to become an inventory item, fail the substring
+    // check, and get appended verbatim to scene 1's visualPrompt — painted into the
+    // still. It is routed to the planner as style guidance instead (buildStyleGuidance).
+    if (isDirectiveInstruction(v)) return;
     if (out.some(o => o.toLowerCase() === v.toLowerCase())) return;
     out.push(v);
   };
@@ -2015,7 +2098,7 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
-  const combined = `${input.cleanBrief} ${userText}`;
+  const combined = `${input.cleanBrief ?? ''} ${userText}`;
   for (const p of PLATFORM_PATTERNS) if (p.re.test(combined)) push(p.name);
   for (const c of COLOR_WORDS) if (new RegExp(`\\b${c}\\b`, 'i').test(combined)) push(c);
   for (const m of combined.match(PRICE_RE) ?? []) push(m);
@@ -2026,7 +2109,7 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   //      (the Oct 8 defect). Derive the component set from the FINISHED subject
   //      when the essence layer flagged internal/degenerate; otherwise carry the
   //      residue-stripped brief's chunks (clean briefs are already client copy).
-  const essence = extractCreativeEssence(input.cleanBrief);
+  const essence = extractCreativeEssence(input.cleanBrief ?? '');
   const briefSource = (essence.internal || essence.degenerateFallback)
     ? finishedEssenceBrief(essence)
     : stripInstructionResidue(input.cleanBrief);
@@ -2042,14 +2125,106 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
   // keep the internal-talk filter for structural meta items.
   return out.filter((c) => !isInternalTalkPoint(c)).slice(0, INVENTORY_CAP);
 }
-/** Every component must appear (case-insensitive substring) in ≥1 scene's text. */
-export function verifyComponentsInScript(script: SceneScript[], components: string[]): { missing: string[] } {
+/** STYLE GUIDANCE (owner Nov 5 — defect 1): the client's INSTRUCTIONS, routed to the
+ *  planner as direction for tone/look/pacing — never as on-screen content. Built from
+ *  the same words as the inventory so nothing the client typed is thrown away: an
+ *  instruction that used to be painted onto scene 1 now changes how the plan reads. */
+export function buildStyleGuidance(input: ComponentInventoryInput): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const v = normalizeComponent(raw);
+    if (!v || v.length < 3 || v.length > COMPONENT_MAX_CHARS) return;
+    if (out.some(o => o.toLowerCase() === v.toLowerCase())) return;
+    out.push(v);
+  };
+  const userText = (input.conversation ?? [])
+    .filter(m => m?.role === 'user' && typeof m?.content === 'string')
+    .map(m => m.content)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const essence = extractCreativeEssence(input.cleanBrief ?? '');
+  const briefSource = (essence.internal || essence.degenerateFallback)
+    ? finishedEssenceBrief(essence)
+    : stripInstructionResidue(input.cleanBrief ?? '');
+  for (const c of chunkText(briefSource)) if (isDirectiveInstruction(c)) push(c);
+  for (const c of chunkText(stripInstructionResidue(userText))) if (isDirectiveInstruction(c)) push(c);
+  return out.slice(0, 8);
+}
+/** Item → sceneNumber, as the PLANNER stated it (componentAssignments). Keys are
+ *  normalised (curly quotes folded, whitespace collapsed, lower-cased). */
+export type ComponentAssignments = Record<string, number>;
+
+/** Read the planner's own per-item assignment map off its JSON reply.
+ *
+ *  OWNER NOV 5 (defect 2b): the previous verdict was `haystack.includes(item)`, a
+ *  substring test on free text — so a plan that said "premium feel" against an
+ *  inventory item "premium" was reported MISSING and then painted onto scene 1 as
+ *  literal text. The planner now states, per item, which scene covers it, and that
+ *  statement is the primary verdict. Tolerates the shapes a model actually returns:
+ *  an array of {component|item|text, scene|sceneNumber|sceneIndex}, a plain
+ *  {item: scene} object, or per-scene `covers`/`components` arrays. */
+export function componentAssignmentsFromPlan(raw: any): ComponentAssignments {
+  const out: ComponentAssignments = {};
+  const put = (item: unknown, scene: unknown) => {
+    const key = normalizeComponent(String(item ?? '')).toLowerCase();
+    const n = Number(scene);
+    if (!key || !Number.isFinite(n) || n < 1) return;
+    if (out[key] === undefined) out[key] = Math.floor(n);
+  };
+  const fromList = (list: any) => {
+    if (Array.isArray(list)) {
+      for (const entry of list) {
+        if (!entry) continue;
+        if (typeof entry === 'string') continue;
+        put(entry.component ?? entry.item ?? entry.text ?? entry.name,
+            entry.scene ?? entry.sceneNumber ?? entry.sceneIndex);
+      }
+    } else if (list && typeof list === 'object') {
+      for (const [k, v] of Object.entries(list)) {
+        const scene = (v && typeof v === 'object') ? ((v as any).scene ?? (v as any).sceneNumber) : v;
+        put(k, scene);
+      }
+    }
+  };
+  fromList(raw?.componentAssignments);
+  fromList(raw?.componentCoverage);
+  fromList(raw?.assignments);
+  const scenesRaw = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
+  for (const s of scenesRaw) {
+    const n = Number(s?.sceneNumber);
+    const covers = s?.covers ?? s?.components;
+    if (!Number.isFinite(n) || !Array.isArray(covers)) continue;
+    for (const c of covers) put(c, n);
+  }
+  return out;
+}
+
+/** Which inventory items are NOT covered by the plan.
+ *
+ *  PRIMARY verdict (owner Nov 5 — defect 2b): the planner's assignment for the item,
+ *  as long as the scene it names actually exists. SECONDARY confirmation: the
+ *  finished wording appears somewhere in the plan's text (normalised, case-insensitive
+ *  substring) — kept only as a confirmation, never as the primary verdict.
+ *  Chat/instruction residue and DIRECTIVES are never required components: residue must
+ *  not appear at all, and an instruction is style guidance, not something to paint. */
+export function verifyComponentsInScript(
+  script: SceneScript[],
+  components: string[],
+  assignments: ComponentAssignments = {},
+): { missing: string[] } {
   const haystack = script.map(s => `${s.visualPrompt || ''} ${s.narration || ''}`).join(' ').toLowerCase();
+  const sceneNumbers = new Set(script.map(s => Number(s.sceneNumber)));
   const missing = (components ?? [])
     .map(normalizeComponent)
     // OWNER-OCT-8 GUARD: chat/instruction residue is NEVER a required component —
     // it must not appear in the video at all, so it can never be 'missing'.
-    .filter(c => c.length > 0 && !isChatResidueText(c) && !haystack.includes(c.toLowerCase()));
+    .filter(c => c.length > 0 && !isChatResidueText(c) && !isDirectiveInstruction(c))
+    .filter(c => {
+      const assigned = assignments[c.toLowerCase()];
+      if (Number.isFinite(assigned) && sceneNumbers.has(Number(assigned))) return false;
+      return !haystack.includes(c.toLowerCase());
+    });
   return { missing };
 }
 /** Deterministic COMPONENT INJECTION backstop (owner: EVERY relayed component must
@@ -2060,17 +2235,21 @@ export function verifyComponentsInScript(script: SceneScript[], components: stri
  *  platforms / offers → the MIDDLE (transformation) scene, subject chunks → the
  *  hook (scene 1). Pure + cheap (no GPT, no paid render); returns the injected
  *  list for audit + the re-verified missing list (empty on a successful pass). */
-export function injectMissingComponents(script: SceneScript[], inventory: string[]): { script: SceneScript[]; injected: string[]; stillMissing: string[]; skippedResidue: string[] } {
+export function injectMissingComponents(script: SceneScript[], inventory: string[], assignments: ComponentAssignments = {}): { script: SceneScript[]; injected: string[]; stillMissing: string[]; skippedResidue: string[] } {
   const next = script.map(s => ({ ...s }));
-  if (!inventory.length || !next.length) return { script: next, injected: [], stillMissing: verifyComponentsInScript(next, inventory).missing, skippedResidue: [] };
-  const missing = verifyComponentsInScript(next, inventory).missing;
-  if (!missing.length) return { script: next, injected: [], stillMissing: [], skippedResidue: [] };
+  // OWNER NOV 5 (defect 1): DIRECTIVES are skipped too — they are style guidance
+  // for the planner, never text to paint onto a scene. They are REPORTED here so
+  // the audit shows exactly what was routed away from the picture (and they are
+  // reported even when nothing else is missing, so the audit is never silent).
+  const skippedResidue: string[] = (inventory ?? []).filter((c) => isChatResidueText(c) || isDirectiveInstruction(c));
+  if (!inventory.length || !next.length) return { script: next, injected: [], stillMissing: verifyComponentsInScript(next, inventory, assignments).missing, skippedResidue };
+  const missing = verifyComponentsInScript(next, inventory, assignments).missing;
+  if (!missing.length) return { script: next, injected: [], stillMissing: [], skippedResidue };
   const injected: string[] = [];
   // OWNER-OCT-8 audit: every inventory item that is chat/instruction residue is
   // refused (verifyComponentsInScript already excludes residue from `missing`,
   // so the per-item guard below never fires for them) — seed the audit from the
   // inventory itself so production logs PROVE residue was dropped, never painted.
-  const skippedResidue: string[] = (inventory ?? []).filter((c) => isChatResidueText(c));
   const last = next.length - 1;
   const mid = Math.floor(next.length / 2);
   const isCtaish = (c: string) => {
@@ -2087,7 +2266,7 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
     // (abca11ed) painted the owner's entire typed brief because this backstop
     // appended the raw chunks verbatim. Residue items are skipped (reported as
     // dropped, never painted); clean inventory items still inject.
-    if (isChatResidueText(c)) { skippedResidue.push(c); continue; }
+    if (isChatResidueText(c) || isDirectiveInstruction(c)) { if (!skippedResidue.includes(c)) skippedResidue.push(c); continue; }
     let target: number;
     if (isCtaish(c)) target = last;
     else if (isColorish(c) || isPlatformish(c) || isOfferish(c)) target = mid === last ? Math.max(0, mid - 1) : mid;
@@ -2096,7 +2275,7 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
     s.visualPrompt = `${s.visualPrompt || ''}${s.visualPrompt ? ' — ' : ''}${c}`.trim();
     injected.push(c);
   }
-  return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory).missing, skippedResidue };
+  return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory, assignments).missing, skippedResidue };
 }
 /** F4 LAUNCH-GATE (task 40c58f6a): narration-only verification of the SPOKEN
  *  mandate. The Oct 10 acceptance render carried ALL 7 owner selling points in the
@@ -2664,6 +2843,23 @@ export function deliveredVideoDuration(sceneDurations: Array<{ duration?: number
 export function deliveredVideoDurationSeconds(sceneDurations: Array<{ duration?: number | null }>): number {
   return Math.round(deliveredVideoDuration(sceneDurations));
 }
+/** The delivered length to PERSIST on completion (owner Nov 5 — defect 4).
+ *  `metadata.deliveredDurationSeconds` used to be arithmetic on the planned/DB scene
+ *  durations — a projection that could not notice a clip coming out short or a `-t`
+ *  cap biting. The final file IS probed (`runRenderQC` → `qc.duration`, post-overlay,
+ *  the exact bytes uploaded), so that measurement is the number we store. The
+ *  projection survives ONLY as the fallback for a render where QC did not run
+ *  (its try/catch swallowed the probe), and it says so via `source`. */
+export function resolveDeliveredDuration(input: {
+  qcDuration?: number | null;
+  sceneRows: Array<{ duration?: number | null }>;
+}): { seconds: number; source: 'measured' | 'projected' } {
+  const measured = Number(input.qcDuration);
+  if (Number.isFinite(measured) && measured > 0) {
+    return { seconds: Math.round(measured * 100) / 100, source: 'measured' };
+  }
+  return { seconds: deliveredVideoDuration(input.sceneRows ?? []), source: 'projected' };
+}
 
 export function normalizePlanTimeBudget(script: SceneScript[], targetDuration: number, opts?: { dissolveCompensate?: boolean }): SceneScript[] {
   if (!script.length) return [];
@@ -2855,8 +3051,156 @@ export function buildReplanFeedback(missingComponents: string[], arcFlags: ArcFl
   return `\n\nYOUR PREVIOUS PLAN FAILED THE PLANNING-QUALITY CHECK. Return a COMPLETE, corrected JSON plan in the exact same shape. Fix ALL of the following while keeping every correct scene you already planned:\n${parts.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
 }
 
-function runPlanQC(script: SceneScript[], inventory: string[]): { missingComponents: string[]; arcFlags: ArcFlags } {
-  return { missingComponents: verifyComponentsInScript(script, inventory).missing, arcFlags: verifyArcCoverage(script) };
+function runPlanQC(script: SceneScript[], inventory: string[], assignments: ComponentAssignments = {}): { missingComponents: string[]; arcFlags: ArcFlags } {
+  return { missingComponents: verifyComponentsInScript(script, inventory, assignments).missing, arcFlags: verifyArcCoverage(script) };
+}
+
+/** ── 2c: ONE text-only repair pass (owner Nov 5 — defect 2) ───────────────────────
+ *  When the planner's own assignment map leaves an item unplaced, ask the planner to
+ *  PLACE it: text in, text out — no image, no audio, no motion, no network media.
+ *  Bounded to one attempt. Before this, the backstop appended the raw item onto a
+ *  scene's visualPrompt, which painted claim text into the still and (for a voiced
+ *  video) was stripped again straight afterwards — the item never landed anywhere. */
+export function buildComponentRepairRequest(params: {
+  items: string[];
+  script: SceneScript[];
+  voice?: 'female' | 'male' | 'none';
+}): string {
+  const items = (params.items ?? []).map(normalizeComponent).filter(Boolean);
+  const silent = params.voice === 'none';
+  const scenes = (params.script ?? [])
+    .map(s => `- scene ${s.sceneNumber} (${s.duration}s)${silent ? ` visualPrompt: "${String(s.visualPrompt || '').slice(0, 220)}"` : ` narration: "${String(s.narration || '').slice(0, 220)}"`}`)
+    .join('\n');
+  return `A planned video is missing ${items.length} thing(s) the client asked for. Place each one into the plan that already exists. This is a TEXT-ONLY placement task: do NOT describe new images, do not rewrite the scenes, do not change durations.\n\nITEMS THAT MUST BE PLACED:\n${items.map((c, i) => `${i + 1}. "${c}"`).join('\n')}\n\nTHE EXISTING PLAN:\n${scenes}\n\nReturn ONLY this JSON object and nothing else \u2014 the outer \"script\" wrapper is required, and \"placements\" is the only thing inside it:\n{"script": {"placements": [{"component": "<the item text, copied exactly>", "scene": <an existing sceneNumber>, ${silent ? '"visualPrompt"' : '"narration"'}: "<${silent ? 'one concrete image description' : 'one complete natural sentence, at most 15 words, that says the item out loud as finished voiceover copy'}>"}]}}\nRules: every item above must appear exactly once; the scene you name must be one that exists; the ${silent ? 'visualPrompt must describe IMAGERY that carries the item' : 'narration must contain the item\'s finished wording and read like a creator talking to an audience'} — never a label, a plan note, or the prompt itself.`;
+}
+
+/** Find the placements array in whatever shape the reply came back in: the router
+ *  keeps `script`/`parameters` and drops unknown top-level keys, so the reply is
+ *  requested as {"script":{"placements":[...]}} and every plausible nesting is read. */
+function resolveComponentPlacements(raw: any): any[] {
+  if (typeof raw === 'string') {
+    try { return resolveComponentPlacements(JSON.parse(raw)); } catch { return []; }
+  }
+  const pick = (v: any): any[] => (Array.isArray(v) ? v : (Array.isArray(v?.placements) ? v.placements : []));
+  const candidates = [raw?.placements, raw?.script, raw?.parameters, raw?.data, raw?.result, raw];
+  for (const c of candidates) {
+    const list = pick(c);
+    if (list.length) return list;
+  }
+  return [];
+}
+
+/** Apply the repair reply. Pure: text in, text out. A placement is only honoured
+ *  when it names a scene that exists and carries real text; anything else is
+ *  ignored and stays missing (where the gate can see it and say so plainly). */
+export function applyComponentRepair(
+  script: SceneScript[],
+  items: string[],
+  raw: any,
+  opts?: { voice?: 'female' | 'male' | 'none' },
+): { script: SceneScript[]; placed: string[]; assignments: ComponentAssignments; stillMissing: string[] } {
+  const next = script.map(s => ({ ...s }));
+  const byNumber = new Map(next.map(s => [Number(s.sceneNumber), s]));
+  const wanted = (items ?? []).map(normalizeComponent).filter(Boolean);
+  const wantedKeys = new Set(wanted.map(c => c.toLowerCase()));
+  const placements = resolveComponentPlacements(raw);
+  const assignments: ComponentAssignments = {};
+  const placed: string[] = [];
+  const silent = opts?.voice === 'none';
+  for (const p of placements) {
+    if (!p || typeof p !== 'object') continue;
+    const item = normalizeComponent(String((p as any).component ?? (p as any).item ?? ''));
+    const key = item.toLowerCase();
+    if (!key || !wantedKeys.has(key)) continue;
+    const scene = byNumber.get(Number((p as any).scene ?? (p as any).sceneNumber));
+    if (!scene) continue;
+    const narration = String((p as any).narration ?? '').replace(/\s+/g, ' ').trim();
+    const visual = String((p as any).visualPrompt ?? '').replace(/\s+/g, ' ').trim();
+    if (silent) {
+      if (!visual) continue;
+      scene.visualPrompt = visual;
+    } else {
+      if (!narration) continue;
+      scene.narration = narration;
+    }
+    assignments[key] = Number(scene.sceneNumber);
+    placed.push(item);
+  }
+  return { script: next, placed, assignments, stillMissing: verifyComponentsInScript(next, wanted, assignments).missing };
+}
+
+/** ── 2d: the components gate (owner Nov 5 — defect 2) ────────────────────────────
+ *  The BACKSTOP, for what 2a–2c could not place. This fires only after the planner
+ *  had the checklist, its assignment was checked, and one text-only repair pass ran
+ *  — so when it fires it is a real signal, not a routine miss. It fires BEFORE any
+ *  paid media call, which turns $2.46 of silent waste into a zero-cost, plain-language
+ *  failure. The copy is the client's words: what could not be placed, and that
+ *  nothing was rendered. Never a code, never "componentsVerified". */
+export const COMPONENTS_NOT_PLACED_CODE = 'COMPONENTS_NOT_PLACED' as const;
+
+export interface ComponentsFailure {
+  code: typeof COMPONENTS_NOT_PLACED_CODE;
+  /** Client-facing copy, in the app's own voice. */
+  message: string;
+  /** Engineer-facing one-liner recorded next to it. */
+  detail: string;
+  missing: string[];
+}
+
+export function componentsNotPlacedNotice(missing: string[]): ComponentsFailure | null {
+  const items = (missing ?? []).map(normalizeComponent).filter(Boolean);
+  if (!items.length) return null;
+  const quoted = items.map(c => `\u201c${c}\u201d`).join(', ');
+  return {
+    code: COMPONENTS_NOT_PLACED_CODE,
+    message:
+      `We didn't make this video. These parts of your brief could not be placed into a scene: ${quoted}. ` +
+      'Nothing was rendered, so nothing was charged. Your brief is saved \u2014 tell us in chat where those ' +
+      'belong (which scene, or what they should look like) and we will try again.',
+    detail: `components could not be placed after the planner checklist + one repair pass: ${items.join(' | ')}`,
+    missing: items,
+  };
+}
+
+/** Thrown by createProject when an item could not be placed, AFTER the failed row is
+ *  written (mirrors PlanningFailedError so the route answers 422 in plain words). */
+export class ComponentsNotPlacedError extends Error {
+  readonly code = COMPONENTS_NOT_PLACED_CODE;
+  readonly projectId: string;
+  readonly clientMessage: string;
+  readonly missing: string[];
+  constructor(projectId: string, failure: ComponentsFailure) {
+    super(failure.message);
+    this.name = 'ComponentsNotPlacedError';
+    this.projectId = projectId;
+    this.clientMessage = failure.message;
+    this.missing = failure.missing;
+  }
+}
+
+/** The ONE decision that says whether a row starts a render. Pure, so the fixture can
+ *  assert the gate without a database: a planning failure outranks a components
+ *  failure, and either one writes the row as failed and starts NO render. */
+export function resolveProjectCreationOutcome(input: {
+  planningFailure: { code: string; message: string; detail: string } | null;
+  componentsFailure: ComponentsFailure | null;
+  missingComponents: string[];
+}): {
+  status: 'failed' | 'generating';
+  startRender: boolean;
+  failure: { code: string; message: string; detail: string } | null;
+  componentsVerified: boolean;
+  componentsMissing: string[];
+} {
+  const missingComponents = (input.missingComponents ?? []).slice();
+  const failure = input.planningFailure ?? input.componentsFailure ?? null;
+  return {
+    status: failure ? 'failed' : 'generating',
+    startRender: !failure,
+    failure,
+    componentsVerified: missingComponents.length === 0,
+    componentsMissing: missingComponents,
+  };
 }
 /** COMPONENTS INVENTORY section injected into the planner prompt. */
 export function buildPlannerComponentsSection(inventory: string[], voice?: 'female' | 'male' | 'none'): string {
@@ -2865,7 +3209,7 @@ export function buildPlannerComponentsSection(inventory: string[], voice?: 'fema
   const narrationRule = voice === 'none'
     ? ' There is NO voiceover (silent video), so every component MUST appear in a scene\'s visualPrompt — the narration field will NOT be spoken.'
     : ' F4 HARD RULE (owner launch-gate): every component MUST be SPOKEN — the viewer must HEAR it, so place the exact finished wording inside at least one scene\'s narration (the voiceover). NEVER put component/benefit/claim text into a visualPrompt — visualPrompts describe IMAGERY ONLY (no bullets, no painted lists, no claim captions in the stills).';
-  return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. OWNER-OCT-8: these items are ALREADY FINISHED client-facing copy — never quote the user's raw typed brief, never echo chat-tone filler ("Yes Make sure it's cohesive...", "Use a energetic mood across every scene..."), and never render any item as on-screen text; weave each one naturally into a scene's polished narration or visual concept. The full conversation was also read to build this list — do not drop any item.\n${list}\n`;
+  return `\n\nCOMPONENTS INVENTORY (mandatory): these are the specific components the client/owner relayed in the conversation.${narrationRule} Distribute them across the scenes so the WHOLE video together includes ALL of them, and make sure the FINAL/CTA scene carries the relayed call-to-action wording (if the client gave one). Never invent or substitute components that contradict the brief — use exactly what the client said. OWNER-OCT-8: these items are ALREADY FINISHED client-facing copy — never quote the user's raw typed brief, never echo chat-tone filler ("Yes Make sure it's cohesive...", "Use a energetic mood across every scene..."), and never render any item as on-screen text; weave each one naturally into a scene's polished narration or visual concept. The full conversation was also read to build this list — do not drop any item.\n${list}\n\nASSIGNMENT CHECKLIST (mandatory — this is checked BEFORE anything renders): for EVERY numbered item above, state where it landed by returning an ADDITIONAL top-level key \"componentAssignments\": [{\"component\": \"<the item text, copied exactly as listed>\", \"scene\": <the sceneNumber that carries it>}]. Every item must appear in that list exactly once and the scene you name must genuinely contain it (in its narration for a voiced video, in its visualPrompt for a silent one). This key is ADDITIONAL to the JSON object you already return — every other key keeps its exact current shape. An item you cannot place must still be listed with the closest scene that carries it; never invent a scene number that does not exist.\n`;
 }
 /** HARD TIME BUDGET section injected into the planner prompt. */
 export function buildPlannerTimeBudgetSection(duration: number, sceneCount: number): string {
@@ -2882,15 +3226,15 @@ export function buildPlannerTimeBudgetSection(duration: number, sceneCount: numb
 function buildPlannerRequest(params: {
   cleanIdea: string; duration: number; sceneCount: number; perScene: number;
   constrain: string; toneHint: string; moodHint: string; srcHint: string;
-  componentsSection: string; timeBudgetSection: string; actionSection: string; avatarSection: string;
+  componentsSection: string; styleSection?: string; timeBudgetSection: string; actionSection: string; avatarSection: string;
   dictation?: string;
 }): string {
   // CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY and
   // visualPrompts are IMAGERY ONLY. Shared by the Scene + Faceless planner so
   // both shapes carry the same anti-plan-speak directive.
   const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every narration value must be SHORT \u2014 at most ~15 words / ~120 characters, because each reads aloud in a ~6-second scene; never a multi-sentence paragraph. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.' + buildTransformationPlannerRule();
-  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection, dictation = '' } = params;
-  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (the whole scenes array must sum to EXACTLY ${dissolveCompensatedSceneSum(duration, sceneCount).toFixed(1)}s — the ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades at each seam overlap adjacent scenes, so the DELIVERED file lands at exactly ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.${dictation}`;
+  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, styleSection = '', timeBudgetSection, actionSection, avatarSection, dictation = '' } = params;
+  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (the whole scenes array must sum to EXACTLY ${dissolveCompensatedSceneSum(duration, sceneCount).toFixed(1)}s — the ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades at each seam overlap adjacent scenes, so the DELIVERED file lands at exactly ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${styleSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.${dictation}`;
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
@@ -2904,6 +3248,11 @@ export class SceneVideoPipelineService {
     // turns of the consultant conversation — is extracted deterministically and
     // fed to the planner as a COMPONENTS INVENTORY (never invent components).
     const inventory = buildComponentInventory({ components: input.components, cleanBrief: cleanIdea, conversation: input.conversation });
+    // STYLE GUIDANCE (owner Nov 5 — defect 1): the client's INSTRUCTIONS ("make it look
+    // premium", "more energy") are routed to the planner as DIRECTION, not turned into
+    // components. They used to become inventory items that were then painted verbatim
+    // onto scene 1's visualPrompt.
+    const styleGuidance = buildStyleGuidance({ components: input.components, cleanBrief: cleanIdea, conversation: input.conversation });
     // USER-REQUESTED ELEMENTS (task 08041dff — owner ADJUST #2 Oct 19): dictated
     // openings, on-screen bullets, the end-flash domain and a brief-given mood are
     // extracted DETERMINISTICALLY from the client's OWN text (brief + conversation
@@ -2922,6 +3271,9 @@ export class SceneVideoPipelineService {
     // Worst-case Sora spend ≈ $1.60/video — far inside the $50 subscription.
     const budget = soraCallBudget(duration);
     let generatedScript = input.script;
+    // The planner's own per-item assignment map (defect 2b — the primary verdict
+    // on whether a relayed item is really in the plan).
+    let componentAssignments: ComponentAssignments = {};
     // PLANNER OUTCOME (owner Nov 2): the scene list's provenance is recorded on the
     // project. Before this, a template-arc plan was indistinguishable from a model
     // plan on the row, so a generic video shipped looking planned.
@@ -2959,7 +3311,10 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds: the whole scenes array must sum to EXACTLY ${sceneSumLock.toFixed(1)}s — about ${perScene}s each — because ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades overlap at every seam and the DELIVERED file must land at exactly ${duration}s), visualType ("motion" or "still"), narration, and visualPrompt.`
           : hybridDirective;
-        const componentsSection = buildPlannerComponentsSection(inventory, input.voice);
+        const componentsSection = buildPlannerComponentsSection(inventory, input.voice)
+          + (styleGuidance.length
+            ? `\n\nSTYLE DIRECTION (mandatory, from the client's own words): these are INSTRUCTIONS about how the video should feel, sound and be paced — apply them to the tone, pacing and visual language of EVERY scene. They are NOT content: never put this wording in a narration, never ask for it as on-screen text, never describe it as a thing to look at.\n${styleGuidance.map((c, i) => `${i + 1}. "${c}"`).join('\n')}\n`
+            : '');
         const timeBudgetSection = buildPlannerTimeBudgetSection(duration, sceneCount);
         const actionSection = buildPlannerActionSection();
         const avatarSection = buildPlannerAvatarSection();
@@ -2990,13 +3345,17 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         plannerAttempts = planning.attempts;
         plannerDetail = planning.detail;
         generatedScript = planning.payload ?? undefined;
+        componentAssignments = componentAssignmentsFromPlan(generatedScript);
+        if (Object.keys(componentAssignments).length) {
+          trace(`component_assignments project=${projectId} items=${Object.keys(componentAssignments).length} scenes=[${Object.values(componentAssignments).join(',')}]`);
+        }
         // Planning-layer QC (deterministic, NO paid renders): every relayed component
         // must appear somewhere in the plan and the arc must cover hook → about → CTA.
         // If the first plan misses any of it, run ONE auto-correct re-plan pass that
         // emphasizes exactly what failed (cheap GPT 5.2 decision-only call, not a
         // media render, so this respects the paid-render QA policy).
         const firstPlan = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
-        const firstQc = runPlanQC(firstPlan, inventory);
+        const firstQc = runPlanQC(firstPlan, inventory, componentAssignments);
         // CONTENT DIRECTION QC (owner Sep 9): avatar-dialogue scenes whose narration
         // reads as a third-person narrator violate the avatar-voice rule (v3 — only a
         // TALKING avatar suppresses narration, and that scene's ONLY voice is the
@@ -3174,7 +3533,29 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // Final auditable QC of the plan we actually persist (components → componentsVerified
     // / componentsMissing, arc → arcFlags). Never blocks; missing items are recorded so
     // the owner can audit that every relayed component was planned in.
-    let qc = runPlanQC(planned, inventory);
+    let qc = runPlanQC(planned, inventory, componentAssignments);
+    // 2c — ONE TEXT-ONLY REPAIR PASS (owner Nov 5, defect 2): an item the planner's
+    // assignment map leaves unplaced is PLACED, by asking the planner where it goes.
+    // Text in, text out — no image, no audio, no Veo, bounded to one attempt. This
+    // replaces the old behaviour of gluing the raw item onto a visualPrompt (which
+    // painted claim text into the still and was stripped straight back out again for
+    // any voiced video, so the item never landed anywhere).
+    let componentRepair: { attempted: string[]; placed: string[]; stillMissing: string[] } = { attempted: [], placed: [], stillMissing: [] };
+    if (qc.missingComponents.length > 0) {
+      const attempted = qc.missingComponents.slice();
+      try {
+        const repairReply = await aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate' });
+        const repaired = applyComponentRepair(planned, attempted, repairReply, { voice: input.voice });
+        if (repaired.placed.length) planned.splice(0, planned.length, ...repaired.script);
+        componentAssignments = { ...componentAssignments, ...repaired.assignments };
+        qc = runPlanQC(planned, inventory, componentAssignments);
+        componentRepair = { attempted, placed: repaired.placed, stillMissing: qc.missingComponents.slice() };
+        trace(`component_repair project=${projectId} attempted=${attempted.length} placed=${repaired.placed.length} stillMissing=[${qc.missingComponents.join(' | ')}]`);
+      } catch (repairErr: any) {
+        componentRepair = { attempted, placed: [], stillMissing: qc.missingComponents.slice() };
+        trace(`component_repair_failed project=${projectId} error=${repairErr?.message}`);
+      }
+    }
     // COMPONENT INJECTION BACKSTOP (owner: every relayed component MUST actually flow
     // into the delivered plan — GPT (and even the one auto-correct replan) is not
     // guaranteed to comply, and the old parse layer could strip long component-bearing
@@ -3183,10 +3564,10 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // subject chunks→hook). Deterministic, zero paid renders.
     const injected: string[] = [];
     if (qc.missingComponents.length > 0) {
-      const inj = injectMissingComponents(planned, inventory);
+      const inj = injectMissingComponents(planned, inventory, componentAssignments);
       const afterInjection = inj.script;
       injected.push(...inj.injected);
-      qc = runPlanQC(afterInjection, inventory);
+      qc = runPlanQC(afterInjection, inventory, componentAssignments);
       trace(`components_injected project=${projectId} count=${inj.injected.length} stillMissing=[${inj.stillMissing.join(' | ')}]`);
       // Durations are untouched by injection (text only) — the exact time budget holds.
       planned.splice(0, planned.length, ...afterInjection);
@@ -3374,16 +3755,33 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     }
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
-    qc = runPlanQC(planned, inventory);
+    qc = runPlanQC(planned, inventory, componentAssignments);
+    // 2d — THE GATE (owner Nov 5, defect 2): the BACKSTOP for what the checklist, the
+    // assignment check and the one repair pass could not place. It fires before ANY
+    // paid media call, so the client gets a plain-language failure instead of $2.46 of
+    // render that silently drops what she asked for. `componentsVerified` is read
+    // nowhere in the app, so nothing downstream can be surprised by the failed row.
+    const componentsFailure = componentsNotPlacedNotice(qc.missingComponents);
     // PLANNING GATE (owner Nov 2): no plan ⇒ no video. The row is still written (so
     // the bypass is recorded and the client can see why) but it is written as failed,
     // and the render never starts. This is the difference between "we could not plan
     // your brief" and a confident-looking generic video.
     const planningFailure = plannerOutcome.reason ? plannerFailureNotice(plannerOutcome) : null;
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:planningFailure?'failed':'generating',totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},deliveredDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:qc.missingComponents.length===0,componentsMissing:qc.missingComponents,componentsInjected:injected,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{})}});
+    // ONE decision, asserted by the fixture: a failure writes the row as failed and
+    // starts NO render (planning outranks components).
+    const creation = resolveProjectCreationOutcome({
+      planningFailure,
+      componentsFailure,
+      missingComponents: qc.missingComponents,
+    });
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
+    }
+    if (componentsFailure) {
+      trace(`components_not_placed project=${projectId} missing=[${componentsFailure.missing.join(' | ')}] attemptedRepair=[${componentRepair.attempted.join(' | ')}] — refusing to render a video that drops what the client asked for`);
+      throw new ComponentsNotPlacedError(projectId, componentsFailure);
     }
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
@@ -3398,7 +3796,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       }};
     }));
     trace(`project_created id=${projectId} scenes=${planned.length} spans=${spanPlans.length}`);
-    void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
+    if (creation.startRender) void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
     return projectId;
   }
 
@@ -3746,11 +4144,18 @@ if (!skipGeneration) {
         try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; primaryR2Key=uploaded.r2Key; }
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
+      const delivered = resolveDeliveredDuration({ qcDuration: qc?.duration, sceneRows: complete });
+      if (delivered.source === 'projected') trace(`delivered_duration_projected project=${projectId} reason=render_qc_unavailable`);
       const completeMeta: Record<string, any> = {
         ...mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), {
           sceneCount: complete.length,
           totalDuration: deliveredVideoDurationSeconds(complete),
-          deliveredDurationSeconds: deliveredVideoDuration(complete),
+          // DEFECT 4 (owner Nov 5): the DELIVERED length is the probe of the file we
+          // actually upload (runRenderQC -> qc.duration, post-overlay), not arithmetic
+          // on the planned scene durations. The projection is the fallback ONLY when QC
+          // did not run, and `deliveredDurationSource` says which one this row carries.
+          deliveredDurationSeconds: delivered.seconds,
+          deliveredDurationSource: delivered.source,
           variantExportCount: variantResults.length,
         }),
       };

@@ -1235,6 +1235,13 @@ router.post('/video-project', async (req: Request, res: Response) => {
     if (error?.code === 'PLANNING_FAILED') {
       return res.status(422).json({ status: 'error', error: error.clientMessage, code: error.code, projectId: error.projectId });
     }
+    // COMPONENTS NOT PLACED (owner Nov 5): the plan was real, but a part of the
+    // client's brief could not be placed into any scene. No media was bought, so
+    // the answer is the client-facing reason, not a 500 and not a silent render
+    // that quietly drops what she asked for.
+    if (error?.code === 'COMPONENTS_NOT_PLACED') {
+      return res.status(422).json({ status: 'error', error: error.clientMessage, code: error.code, projectId: error.projectId });
+    }
     // SUPPLIED SCRIPT vs CHAT (owner Nov 4): the two inputs genuinely disagree about
     // the words to speak. Answer with the conflict in plain words instead of
     // silently picking one and rendering the wrong narration.
