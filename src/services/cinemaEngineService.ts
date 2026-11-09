@@ -12,7 +12,7 @@ import {
   renderClip, concatClips, normalizePlanTimeBudget, resolveNarrationRoles,
   enforceAvatarConsistency, verifySellingPointsSpoken, injectSellingPointsIntoNarration,
   stripBenefitTextFromVisualPrompts, deliveredVideoDuration, deliveredVideoDurationSeconds,
-  generateSceneAudio, type SceneScript,
+  generateSceneAudio, extractRequestedImagery, type RequestedImagery, type SceneScript,
 } from './sceneVideoPipelineService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho, extractCreativeEssence, finishedEssenceSentences } from './creativeTransformation.js';
 import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
@@ -75,10 +75,18 @@ function clampTwin(n: number, lo: number, hi: number): number {
 
 /** Every twin segment's CLEAN talking-head visual description (F1 no-text): it
  *  must never contain narration, benefit or script text — only the avatar + motion.
- *  No "SHOW THIS BEING DONE" app directive either: a talking head IS the action. */
-export function buildTwinVisualPrompt(emotion: string): string {
+ *  No "SHOW THIS BEING DONE" app directive either: a talking head IS the action.
+ *
+ *  OWNER NOV 9 ("it just ignores the background, even though in the chat it
+ *  acknowledged it"): the backdrop used to be HARD-CODED to "studio-lit dark
+ *  background" — a template that overwrote whatever the client asked for. When she
+ *  described a background, it is carried here instead; with no request the old
+ *  default is byte-identical. */
+export function buildTwinVisualPrompt(emotion: string, background?: string): string {
   const e = String(emotion || 'confident').toLowerCase();
-  return `The same talking-head AI avatar built from the user's photo with a ${e} expression, facing the camera and speaking, subtle mouth movement, studio-lit dark background, vertical 9:16 frame — no text, no captions, no on-screen words.`;
+  const bg = String(background || '').replace(/\s+/g, ' ').trim();
+  const setting = bg ? `the background the client asked for: ${bg}` : 'studio-lit dark background';
+  return `The same talking-head AI avatar built from the user's photo with a ${e} expression, facing the camera and speaking, subtle mouth movement, ${setting}, vertical 9:16 frame — no text, no captions, no on-screen words.`;
 }
 
 /** The ONE stable avatar look shared verbatim by every avatar-dialogue segment. */
@@ -135,6 +143,10 @@ export function buildTwinPlan(
   safeScript: string,
   durationTarget: number,
   voice?: 'female' | 'male' | 'none',
+  // CLIENT-STATED IMAGERY (owner Nov 9): what she asked to see, extracted from her
+  // own words. Carried into every segment's image description — the twin's frames
+  // are DRAWN (no image model), so this plan text is the twin's image instruction.
+  requestedImagery: RequestedImagery[] = [],
 ): {
   plan: SceneScript[];
   sellingPoints: string[];
@@ -150,12 +162,14 @@ export function buildTwinPlan(
   const segments = splitTwinScript(safeScript, segmentCount);
   const voiced = (voice ?? '') !== 'none';
   const sellingPoints = finishedEssenceSentences(extractCreativeEssence(safeScript)).filter((c) => String(c || '').trim().length > 0);
+  const twinBackground = (requestedImagery ?? []).find((im) => im.scope === 'background')?.phrase
+    ?? (requestedImagery ?? [])[0]?.phrase;
   const base: SceneScript[] = segments.map((narration, i) => ({
     sceneNumber: i + 1,
     duration: 1,
     visualType: 'still' as const,
     narration,
-    visualPrompt: buildTwinVisualPrompt('confident'),
+    visualPrompt: buildTwinVisualPrompt('confident', twinBackground),
     narrationRole: 'avatar-dialogue' as const,
   }));
   // Time budget FIRST (same order as createProject) so F4 cap math sees final durations.
@@ -278,6 +292,11 @@ export class CinemaEngineService {
     // enforcement is pure/idempotent: finished user scripts are left verbatim.
     const talkText = userConversationText(conversation);
     const requestedVisuals = extractRequestedVisuals(talkText ? `${script} ${talkText}` : script);
+    // CLIENT-STATED IMAGERY (owner Nov 9 — Twin is in scope: "it needs to go for
+    // scene and twin as well"). The twin's frames are drawn, so its image
+    // instruction is the plan's visualPrompt; her described background is carried
+    // into it instead of the hard-coded studio backdrop.
+    const requestedImagery = extractRequestedImagery(talkText ? `${script} ${talkText}` : script);
     // DEFECT 2 — TWIN SCRIPT SEAM (owner Oct 30, project 399ef884: "that line
     // just annoys me"). The twin seam glues its own copy the same way the shared
     // planner does, so the SAME deterministic sanitizer runs on the transformed
@@ -350,7 +369,7 @@ export class CinemaEngineService {
       const targetDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
         ? Math.min(duration, 30)
         : Math.max(5, Math.min(30, Math.round(String(safeScript || '').trim().split(/\s+/).filter(Boolean).length / 2.5)));
-      const twinPlan = buildTwinPlan(finalTwinScript, targetDuration, twinVoice);
+      const twinPlan = buildTwinPlan(finalTwinScript, targetDuration, twinVoice, requestedImagery);
       // MAIN-SIDE PLANNER FIDELITY (owner Oct 26–30) is preserved: the owner's
       // dictated on-screen bullets + end-state domain band + mood strip are still
       // passed through to the frame builder (TWIN_CANONICAL_BULLETS / moodPositive),
@@ -410,6 +429,7 @@ export class CinemaEngineService {
             deliveredDurationSeconds: twinDelivered,
             f4: { narrationInjected: twinPlan.f4Injected, narrationStillMissing: twinPlan.f4StillMissing },
             sellingPoints: twinPlan.sellingPoints,
+            ...(requestedImagery.length ? { requestedImagery } : {}),
             narrationRoles: twinPlan.narrationRoles,
             avatarLook: twinPlan.avatarLook || undefined,
             scriptTransformed: isInternalBriefEcho(script),

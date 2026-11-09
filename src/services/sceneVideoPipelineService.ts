@@ -1801,6 +1801,12 @@ export function isDirectImageUrl(value: string): boolean {
   return isRemoteUrl(s) && !isVideoUrl(s);
 }
 /** Enrich a per-scene visual prompt so the user's uploaded image becomes the continuous subject. */
+/** THE FINAL IMAGE PROMPT for a scene: the exact string handed to gpt-image-2 /
+ *  Veo for that scene. Exported so a fixture can assert on the prompt that
+ *  actually goes out (design principle 13) rather than on an intermediate. */
+export function buildSceneImagePrompt(visualPrompt: string, sourceImage?: string): string {
+  return withSourceSubject(visualPrompt, sourceImage);
+}
 function withSourceSubject(prompt: string, sourceImage?: string): string {
   if (!sourceImage) return prompt;
   return `${prompt} — Use the user's uploaded reference image as the hero and continuous subject: ${sourceImage}. Keep this exact subject visible and consistent across every scene; do NOT swap it for a different subject.`;
@@ -2150,6 +2156,122 @@ export function buildStyleGuidance(input: ComponentInventoryInput): string[] {
   for (const c of chunkText(briefSource)) if (isDirectiveInstruction(c)) push(c);
   for (const c of chunkText(stripInstructionResidue(userText))) if (isDirectiveInstruction(c)) push(c);
   return out.slice(0, 8);
+}
+
+/** ── CLIENT-STATED IMAGERY (owner Nov 9: "it just ignores the background, even
+ *  though in the chat it acknowledged it") ────────────────────────────────────
+ *  A sentence in which the client says what she wants to SEE is an IMAGE
+ *  instruction. It is not narration copy (it must not be merely spoken) and it is
+ *  not style direction (it must not be reduced to "make it feel premium"). The
+ *  planner's job is to arrange timing, narration, ordering and overlays AROUND
+ *  that content — replacing it with its own imagery is the defect.
+ *
+ *  Extraction is deterministic and CONSERVATIVE: a sentence qualifies only when it
+ *  names a visual surface or a showing verb (background / backdrop / setting /
+ *  visuals / image / show me …) AND what remains after the framing is stripped
+ *  still carries a named subject — classifyInventoryIntent must call it 'content'.
+ *  "Make it look premium" (an instruction with no subject of its own) is therefore
+ *  never promoted into the picture, which keeps PR #148 defect 1 fixed, while
+ *  "the background should be a happy family spending time together" is carried.
+ *
+ *  scope 'background' = she asked for it BEHIND the video, so every scene carries
+ *  it; 'scene' = a subject she wants to see at least once (scene 1).
+ */
+export interface RequestedImagery { phrase: string; scope: 'background' | 'scene'; source: string }
+
+const IMAGERY_SURFACE_RE = /\b(?:background|backdrop|setting|scenery|surroundings|visuals?|imagery|picture|image|photo|footage)\b|\bbehind\s+(?:me|her|him|them|us)\b/i;
+const IMAGERY_VERB_RE = /\b(?:show(?:ing|s|n)?|depict(?:s|ing|ed)?|feature|featuring|display(?:s|ing)?|see|imagine|visuali[sz]e)\b/i;
+/** Framing stripped so only the SUBJECT the client named is carried into the
+ *  image prompt — never the instruction itself ("should be", "I want", …). */
+const IMAGERY_FRAME_RE = new RegExp(
+  '(?:^|\\b)(?:please\\s+|also\\s+|and\\s+|but\\s+)?(?:for\\s+)?(?:the\\s+)?'
+  + '(?:background|backdrop|setting|scenery|surroundings|visuals?|imagery|picture|image|photo|footage)\\s*'
+  + '(?::|should\\s+(?:be|show|have|feature|depict)|must\\s+(?:be|show|have|feature|depict)|needs?\\s+to\\s+(?:be|show|have|feature|depict)|is|are|will\\s+be)?\\s*',
+  'i',
+);
+const IMAGERY_TAIL_RE = /\b(?:please|thanks|thank you|no text|without text|no words)\b[\s\S]*$/i;
+const IMAGERY_SCENE_REF_TAIL_RE = /\s+in\s+(?:the\s+)?(?:first|second|third|fourth|fifth|last|final|\d+(?:st|nd|rd|th))\s+scenes?\b[\s\S]*$/i;
+const IMAGERY_VERB_FRAME_RE = /^[\s\S]*?\b(?:show(?:ing|s)?|depict(?:s)?|feature|display(?:s)?|see|imagine|visuali[sz]e)\b\s*(?:me\s+|us\s+)?/i;
+
+export function extractRequestedImagery(text: string): RequestedImagery[] {
+  const out: RequestedImagery[] = [];
+  const push = (raw: string, scope: 'background' | 'scene') => {
+    const v = normalizeComponent(raw)
+      .replace(IMAGERY_TAIL_RE, '')
+      .replace(IMAGERY_SCENE_REF_TAIL_RE, '')
+      .replace(/^[\s,;:.–—-]+|[\s,;:.–—-]+$/g, '')
+      .trim();
+    if (v.length < 3 || v.length > 140) return;
+    // DEFECT-1 GUARD: an instruction with no named subject is NOT imagery.
+    if (classifyInventoryIntent(v) === 'directive') return;
+    if (isChatResidueText(v)) return;
+    if (out.some(o => o.phrase.toLowerCase() === v.toLowerCase())) return;
+    out.push({ phrase: v, scope, source: normalizeComponent(raw) });
+  };
+  for (const sentence of chunkText(stripInstructionResidue(String(text || '')))) {
+    const surface = IMAGERY_SURFACE_RE.test(sentence);
+    const verb = IMAGERY_VERB_RE.test(sentence);
+    if (!surface && !verb) continue;
+    let subject = sentence.replace(IMAGERY_FRAME_RE, ' ').trim();
+    if (!subject || subject === sentence.trim()) subject = sentence.replace(IMAGERY_VERB_FRAME_RE, ' ').trim();
+    const scope: 'background' | 'scene' = /\bbackground\b|\bbackdrop\b|\bsetting\b|\bsurroundings\b|\bbehind\s+(?:me|her|him|them|us)\b/i.test(sentence)
+      ? 'background'
+      : 'scene';
+    push(subject, scope);
+  }
+  return out.slice(0, 4);
+}
+
+/** True when an inventory item IS a client-stated image (so it must not also be
+ *  demanded as SPOKEN narration copy — the two rules would cancel out). */
+export function isRequestedImageryItem(item: string, imagery: RequestedImagery[]): boolean {
+  const i = normalizeComponent(item).toLowerCase();
+  if (!i) return false;
+  return (imagery ?? []).some((im) => {
+    const p = normalizeComponent(im.phrase).toLowerCase();
+    if (!p) return false;
+    return i.includes(p) || p.includes(i);
+  });
+}
+
+/** Planner-facing section: the client's described imagery is CONTENT the plan
+ *  must show, so it is stated as such — in the picture, not in the voiceover. */
+export function buildPlannerImagerySection(imagery: RequestedImagery[]): string {
+  if (!imagery || !imagery.length) return '';
+  const list = imagery
+    .map((im, i) => `${i + 1}. "${im.phrase}"${im.scope === 'background' ? ' — the background of the WHOLE video, so it appears behind the subject in every scene' : ''}`)
+    .join('\n');
+  return `\n\nCLIENT-STATED IMAGERY (mandatory — this is what the client asked to SEE): the client described the picture herself. Every visualPrompt must SHOW this content, described as imagery (subject, setting, action, light). It is NOT narration copy: do not merely say it in the voiceover, and never print it as on-screen text, a caption or a list. Do not substitute your own setting, cast or stock business scene for it — arrange the story, timing and overlays AROUND it.\n${list}\n`;
+}
+
+/** Deterministic carry-through (NOT a gate): whatever the planner did, the
+ *  client's own described imagery is appended to the visualPrompt that actually
+ *  reaches the image model. Background scope → every scene; a single requested
+ *  subject → the hook. Pure, zero paid calls, never blocks a render. */
+export function applyRequestedImagery(
+  script: SceneScript[],
+  imagery: RequestedImagery[],
+): { script: SceneScript[]; applied: string[]; scenes: number[] } {
+  const next = script.map(s => ({ ...s }));
+  if (!imagery || !imagery.length || !next.length) return { script: next, applied: [], scenes: [] };
+  const applied: string[] = [];
+  const scenes: number[] = [];
+  for (const im of imagery) {
+    const targets = im.scope === 'background' ? next.map((_, i) => i) : [0];
+    const lead = im.scope === 'background'
+      ? `Background behind the subject: ${im.phrase}`
+      : im.phrase.charAt(0).toUpperCase() + im.phrase.slice(1);
+    for (const i of targets) {
+      const s = next[i];
+      if (!String(s.visualPrompt || '').toLowerCase().includes(im.phrase.toLowerCase())) {
+        const v = String(s.visualPrompt || '').trim();
+        s.visualPrompt = `${v}${v ? ' — ' : ''}${lead}`.trim();
+      }
+      if (!scenes.includes(s.sceneNumber)) scenes.push(s.sceneNumber);
+    }
+    applied.push(im.phrase);
+  }
+  return { script: next, applied, scenes };
 }
 /** Item → sceneNumber, as the PLANNER stated it (componentAssignments). Keys are
  *  normalised (curly quotes folded, whitespace collapsed, lower-cased). */
@@ -3259,6 +3381,14 @@ export class SceneVideoPipelineService {
     // user turns) BEFORE any instruction-residue stripping, so they survive the
     // transformation -> planner -> overlay chain. Never invents: absent asks -> {}.
     const requested = extractRequestedVisuals(cleanIdea + ' ' + userConversationText(input.conversation));
+    // CLIENT-STATED IMAGERY (owner Nov 9 — "it just ignores the background, even
+    // though in the chat it acknowledged it"): what she said she wants to SEE is
+    // the image instruction. Extracted deterministically here and carried into the
+    // visualPrompt that reaches the image model (see applyRequestedImagery below).
+    const requestedImagery = extractRequestedImagery(cleanIdea + ' ' + userConversationText(input.conversation));
+    // An image is carried in its OWN planner section; listing it as a spoken
+    // component too would re-route it to the voiceover (the F4 spoken rule).
+    const inventoryForPlanner = inventory.filter((c) => !isRequestedImageryItem(c, requestedImagery));
     const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
@@ -3311,7 +3441,8 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const legacyConstrain = mode === 'faceless'
           ? ` Return a JSON object with a "scenes" array of ${sceneCount} objects, each with sceneNumber, duration (seconds: the whole scenes array must sum to EXACTLY ${sceneSumLock.toFixed(1)}s — about ${perScene}s each — because ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades overlap at every seam and the DELIVERED file must land at exactly ${duration}s), visualType ("motion" or "still"), narration, and visualPrompt.`
           : hybridDirective;
-        const componentsSection = buildPlannerComponentsSection(inventory, input.voice)
+        const componentsSection = buildPlannerComponentsSection(inventoryForPlanner, input.voice)
+          + buildPlannerImagerySection(requestedImagery)
           + (styleGuidance.length
             ? `\n\nSTYLE DIRECTION (mandatory, from the client's own words): these are INSTRUCTIONS about how the video should feel, sound and be paced — apply them to the tone, pacing and visual language of EVERY scene. They are NOT content: never put this wording in a narration, never ask for it as on-screen text, never describe it as a thing to look at.\n${styleGuidance.map((c, i) => `${i + 1}. "${c}"`).join('\n')}\n`
             : '');
@@ -3629,11 +3760,20 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const f4Visual = f4Voice
       ? stripBenefitTextFromVisualPrompts(
           planned,
-          [...f4SellingPoints, ...inventory, ...inventory.map((c) => String(c ?? '').replace(/^[-–—•*\s]+/, ''))].filter(c => !/^EmpireLaunch AI\.$/i.test(c)),
+          [...f4SellingPoints, ...inventoryForPlanner, ...inventoryForPlanner.map((c) => String(c ?? '').replace(/^[-–—•*\s]+/, ''))].filter(c => !/^EmpireLaunch AI\.$/i.test(c)),
         )
       : { script: planned, strippedScenes: [] };
     if (f4Visual.script !== planned) planned.splice(0, planned.length, ...f4Visual.script);
     if (f4Visual.strippedScenes.length) trace(`f4_visual_strip project=${projectId} scenes=[${f4Visual.strippedScenes.join(',')}]`);
+    // CLIENT-STATED IMAGERY — CARRIED, NOT GATED (owner Nov 9). The planner prompt
+    // asks for it; this pass GUARANTEES it: the client's own described subject is
+    // appended to the visualPrompt that actually reaches the image model. It runs
+    // AFTER the F4 benefit strip, which would otherwise scrub her words straight
+    // back out, and it never blocks or fails a render — a gate is the backstop,
+    // carrying the words through is the fix.
+    const imageryPass = applyRequestedImagery(planned, requestedImagery);
+    if (imageryPass.script !== planned) planned.splice(0, planned.length, ...imageryPass.script);
+    if (imageryPass.applied.length) trace(`requested_imagery_applied project=${projectId} scenes=[${imageryPass.scenes.join(',')}] phrases=[${imageryPass.applied.join(' | ')}]`);
     // LINK-IN-BIO DEFAULT BAN (owner product rule, Oct 11): deterministic emission
     // guard at the transformation output — any link-in-bio residue in narrations
     // is stripped when NOT explicitly requested (owner script / client brief) and
@@ -3785,7 +3925,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       componentsFailure,
       missingComponents: qc.missingComponents,
     });
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
@@ -4311,7 +4451,7 @@ if (!skipGeneration) {
       // Use the uploaded source image as the continuous subject. Where the provider
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
-      const subjectPrompt = withSourceSubject(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
+      const subjectPrompt = buildSceneImagePrompt(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
       if(scene.visualType==='still'){
         // STILL RETRIEVABILITY (owner Nov 2): pass the userId so renderImage also
         // writes the still to R2. A render's scene-1 still is otherwise unreachable
