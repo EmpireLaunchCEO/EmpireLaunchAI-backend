@@ -54,9 +54,14 @@ if (!fs.existsSync(NARRATION)) {
   execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
     '-i', 'sine=frequency=440:duration=3.2', '-c:a', 'pcm_s16le', NARRATION]);
 }
+// The take has to MOVE, or C1's own sanity gate cannot fire. `testsrc2` does not
+// move enough for that: measured on ffmpeg 6.1.1, its 64x64 grey frame at 1.5s
+// differs from the frame at 0.5s by 2.3/255 — under C1's >10 threshold, so the test
+// fails on its sanity assertion instead of on the defect. `mandelbrot` is a real
+// zoom: measured 21.6 at 1s, 34.3 at 2s, 42.5 at 3s. Delete this file to regenerate.
 if (!fs.existsSync(TAKE)) {
   execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
-    '-i', 'testsrc2=size=720x1280:rate=30:duration=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', TAKE],
+    '-i', 'mandelbrot=size=720x1280:rate=30', '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', TAKE],
     { maxBuffer: 32 * 1024 * 1024 });
 }
 
