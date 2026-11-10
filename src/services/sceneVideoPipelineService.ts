@@ -2273,6 +2273,133 @@ export function applyRequestedImagery(
   }
   return { script: next, applied, scenes };
 }
+
+/** ── AN AGREED SUGGESTION IS A STATED ONE (owner Nov 9, rule 1: "stated → use
+ *  it exactly"; "if client or background isn't mentioned, the AI should ask,
+ *  and use what is stated") ───────────────────────────────────────────────────
+ *  The consultant offers a concrete default in chat — aiRouter.ts:134's own
+ *  example is "background: I'd suggest a cozy home-studio scene" — and the
+ *  client replies "yes". That acceptance is a decision, so it must reach the
+ *  picture exactly as a TYPED description does. It was dropped because it lives
+ *  only in an ASSISTANT turn: userConversationText and buildComponentInventory
+ *  both read role === 'user' only, so the planner invented the background again.
+ *
+ *  CONSERVATIVE, as extractRequestedImagery is (requirement 4):
+ *   - an assistant turn on its own is NEVER promoted — only one the client
+ *     ACCEPTED counts (a proposal that was ignored is not stated);
+ *   - the acceptance must attach to the NEAREST preceding assistant turn, so an
+ *     unrelated earlier proposal is never carried;
+ *   - an acceptance must be ONLY acceptance ("yes", "that works", "sounds good",
+ *     "perfect", "do that"): a "no", or a reply that adds or swaps content, is
+ *     never an acceptance, so a client who picks something else is not
+ *     overridden;
+ *   - only VISUAL proposals become imagery (a suggested vibe/colour/font is not).
+ *  Never blocks a render: absent or ambiguous acceptance → empty result.
+ */
+const ACCEPT_LEAD_RE =
+  /^(?:yes|yeah|yep|yup|sure|ok|okay|perfect|great|awesome|sounds|sound|that\s+works|works|do\s+that|let'?s|please|go\s+ahead|i\s+love|love|absolutely|definitely|good|fine|cool|nice|excellent|brilliant)\b/i;
+/** Words an acceptance may contain — anything else ("beach", "but", "instead")
+ *  means the client is deciding something, not agreeing to the proposal. */
+const ACCEPT_WORDS = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'perfect', 'great', 'awesome', 'amazing',
+  'lovely', 'nice', 'good', 'fine', 'excellent', 'brilliant', 'cool', 'super', 'wonderful', 'ideal',
+  'please', 'do', 'that', 'this', 'it', 'them', 'all', 'of', 'sounds', 'sound', 'works', 'work',
+  'for', 'me', 'us', 'i', 'we', 'love', 'like', 'let', 'lets', 'go', 'with', 'apply', 'use',
+  'ahead', 'and', 'the', 'too', 'is', 'so', 'much', 'absolutely', 'definitely', 'thats', 'thank',
+  'thanks', 'you', 'yes', 'please', 'appreciate', 'that', 'one',
+]);
+export function isSuggestionAcceptance(raw: string): boolean {
+  const t = normalizeComponent(raw).toLowerCase().replace(/[\u2019']/g, '');
+  if (!t) return false;
+  if (!ACCEPT_LEAD_RE.test(t)) return false;
+  const tokens = t.replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  return tokens.every((tok) => ACCEPT_WORDS.has(tok));
+}
+/** A proposal phrased SURFACE-first: "background: I'd suggest a cozy home-studio scene". */
+const PROPOSAL_SURFACE_FIRST_RE =
+  /\b(background|backdrop|setting|surroundings|scenery|visuals?|imagery)\b\s*[:\-\u2013\u2014]?\s*(?:i'?d\s+|i\s+)?(?:suggest|recommend|propose|go\s+with|use|try|pick|choose)\s*(?:using\s+|with\s+)?([^.!?;\n\u2014\u2013]{3,140})/gi;
+/** A proposal phrased VERB-first: "Want me to use a cozy home studio background?". */
+const PROPOSAL_VERB_FIRST_RE =
+  /\b(?:i'?d\s+|i\s+)?(?:suggest|recommend|propose|how\s+about|what\s+about|let'?s\s+(?:go\s+with|use|try)|go\s+with|use|try)\s+(?:a\s+|an\s+|the\s+)?([^.!?;\n\u2014\u2013]{3,140})/gi;
+const PROPOSAL_SURFACE_RE = /\b(?:background|backdrop|setting|surroundings|scenery|visuals?|imagery)\b/i;
+const PROPOSAL_SURFACE_TAIL_RE =
+  /[\s,]+(?:as\s+the\s+|for\s+the\s+|in\s+the\s+|as\s+a\s+|for\s+a\s+|as\s+an\s+)?(?:background|backdrop|setting|surroundings|scenery|visuals?|imagery)\b[\s\S]*$/i;
+
+/** The imagery a single consultant turn PROPOSED (never applied on its own). */
+function extractProposedImagery(assistantText: string): RequestedImagery[] {
+  const out: RequestedImagery[] = [];
+  const push = (raw: string, scope: 'background' | 'scene') => {
+    const v = normalizeComponent(raw)
+      .replace(PROPOSAL_SURFACE_TAIL_RE, '')
+      .replace(/^[\s,;:.\u2013\u2014-]+|[\s,;:.\u2013\u2014-]+$/g, '')
+      .trim();
+    if (v.length < 3 || v.length > 140) return;
+    if (classifyInventoryIntent(v) === 'directive') return;
+    if (isChatResidueText(v)) return;
+    if (out.some((o) => o.phrase.toLowerCase() === v.toLowerCase())) return;
+    out.push({ phrase: v, scope, source: normalizeComponent(raw) });
+  };
+  const scopeOf = (text: string): 'background' | 'scene' =>
+    /\bbackground\b|\bbackdrop\b|\bsetting\b|\bsurroundings\b/i.test(text) ? 'background' : 'scene';
+  for (const m of String(assistantText || '').matchAll(PROPOSAL_SURFACE_FIRST_RE)) {
+    push(m[2] || '', scopeOf(m[1] || ''));
+  }
+  for (const m of String(assistantText || '').matchAll(PROPOSAL_VERB_FIRST_RE)) {
+    const phrase = m[1] || '';
+    // VERB-first only counts when the proposed thing IS a visual surface;
+    // a suggested vibe / colour / font is not imagery.
+    if (!PROPOSAL_SURFACE_RE.test(phrase)) continue;
+    push(phrase, scopeOf(phrase));
+  }
+  return out;
+}
+
+/** Imagery the client ACCEPTED in conversation. Nearest preceding assistant turn
+ *  only, acceptance-only replies only, visual proposals only. Never throws. */
+export function extractAgreedSuggestionImagery(
+  conversation: { role?: string; content?: unknown }[] | undefined,
+): RequestedImagery[] {
+  const out: RequestedImagery[] = [];
+  try {
+    const msgs = (conversation ?? []).filter(
+      (m) => m && typeof m.content === 'string' && (m.role === 'user' || m.role === 'assistant'),
+    );
+    for (let i = 0; i < msgs.length; i++) {
+      if (msgs[i].role !== 'user') continue;
+      if (!isSuggestionAcceptance(String(msgs[i].content))) continue;
+      let k = i - 1;
+      while (k >= 0 && msgs[k].role !== 'assistant') k--;
+      if (k < 0) continue;
+      for (const im of extractProposedImagery(String(msgs[k].content))) {
+        if (out.some((o) => o.phrase.toLowerCase() === im.phrase.toLowerCase())) continue;
+        out.push(im);
+      }
+    }
+  } catch {
+    return out;
+  }
+  return out.slice(0, 4);
+}
+
+/** What the client TYPED wins; an agreed suggestion is added only where it does
+ *  not contradict something she said herself (no double background). */
+export function mergeRequestedImagery(
+  typed: RequestedImagery[] | undefined,
+  agreed: RequestedImagery[] | undefined,
+): RequestedImagery[] {
+  const out = [...(typed ?? [])];
+  for (const a of agreed ?? []) {
+    const p = normalizeComponent(a.phrase).toLowerCase();
+    if (!p) continue;
+    if (out.some((o) => {
+      const t = normalizeComponent(o.phrase).toLowerCase();
+      return !!t && (t.includes(p) || p.includes(t));
+    })) continue;
+    out.push(a);
+  }
+  return out.slice(0, 4);
+}
 /** Item → sceneNumber, as the PLANNER stated it (componentAssignments). Keys are
  *  normalised (curly quotes folded, whitespace collapsed, lower-cased). */
 export type ComponentAssignments = Record<string, number>;
@@ -3385,7 +3512,17 @@ export class SceneVideoPipelineService {
     // though in the chat it acknowledged it"): what she said she wants to SEE is
     // the image instruction. Extracted deterministically here and carried into the
     // visualPrompt that reaches the image model (see applyRequestedImagery below).
-    const requestedImagery = extractRequestedImagery(cleanIdea + ' ' + userConversationText(input.conversation));
+    // AN AGREED BACKGROUND IS A STATED ONE (owner Nov 9, rule 1). The consultant
+    // offers a default in chat and the client says "yes" — that acceptance lives
+    // only in an assistant turn, so the user-only scans above never saw it and
+    // the planner invented the background again. Merged into the SAME imagery
+    // list, so it reaches the image prompt through applyRequestedImagery after
+    // the F4 strip exactly as a typed description does. What she typed wins.
+    const agreedImagery = extractAgreedSuggestionImagery(input.conversation);
+    const requestedImagery = mergeRequestedImagery(
+      extractRequestedImagery(cleanIdea + ' ' + userConversationText(input.conversation)),
+      agreedImagery,
+    );
     // An image is carried in its OWN planner section; listing it as a spoken
     // component too would re-route it to the voiceover (the F4 spoken rule).
     const inventoryForPlanner = inventory.filter((c) => !isRequestedImageryItem(c, requestedImagery));
