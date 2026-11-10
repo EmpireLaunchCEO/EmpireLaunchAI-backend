@@ -152,7 +152,7 @@ const PROJECT_ID = '5a2b7c8d-1e2f-4a3b-9c4d-5e6f7a8b9c0d';
  * Restore always runs, so nothing leaks into the other tests in this file.
  */
 function installRegenerationStubs(callerId: string, projectMetadata: any) {
-  const scene = { id: SCENE_ID, projectId: PROJECT_ID, sceneNumber: 1, status: 'pending', duration: 5, assetUrl: null, audioUrl: null };
+  const scene: any = { id: SCENE_ID, projectId: PROJECT_ID, sceneNumber: 1, status: 'pending', duration: 5, assetUrl: null, audioUrl: null };
   const project = { id: PROJECT_ID, userId: callerId, status: 'completed', metadata: projectMetadata, finalVideoUrl: null, thumbnailUrl: null };
   const rowsFor = (table: any) =>
     table === schema.videoScenes ? [scene] : table === schema.videoProjects ? [project] : [];
@@ -172,7 +172,12 @@ function installRegenerationStubs(callerId: string, projectMetadata: any) {
   const realProcessScene = svc.processScene;
   const realProcessProject = svc.processProject;
   const calls: string[] = [];
-  svc.processScene = async () => { calls.push('processScene'); };
+  // A REAL processScene leaves its own row `completed` when it succeeds, and
+  // regenerateScene reads that row back before assembling: a regeneration whose
+  // scene did not complete must not reach processProject. The stub has to keep
+  // that contract, or these tests would measure a scene that silently stayed
+  // pending instead of the decision they are about.
+  svc.processScene = async () => { calls.push('processScene'); scene.status = 'completed'; };
   svc.processProject = async () => { calls.push('processProject'); };
   return {
     calls,

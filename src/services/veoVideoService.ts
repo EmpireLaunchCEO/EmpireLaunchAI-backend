@@ -267,7 +267,23 @@ export const VEO_ERRORS = {
   lastFrameRejected:
     `${VEO_PROVIDER_TAG}: the LAST-FRAME image was REJECTED — this clip could not be steered to end on the next scene's designed still. ` +
     `The join target was NOT dropped and the call was NOT downgraded: the scene has no join-steered motion rather than an unaligned one.`,
+  /**
+   * CREATE OUTCOME UNKNOWN — the POST left this process and we never learned what
+   * Vertex did with it. The operation may exist and may be billing; we simply do not
+   * have its name, so we cannot resume it. Retrying would be a SECOND paid
+   * `predictLongRunning` for the same window, which is the one thing that must never
+   * happen: a create that may have reached the provider is NOT retryable as a new
+   * create. Deterministic — the caller stops and names it.
+   */
+  createUncertain:
+    `${VEO_PROVIDER_TAG}: CREATE OUTCOME UNKNOWN — the predictLongRunning POST was sent but the response never arrived (timeout or dropped connection). ` +
+    `Vertex may already be generating and billing this window, and its operation name is lost, so this window is NOT retried: a retry would be a SECOND paid operation for the same window.`,
 } as const;
+/** Loud, named failure for "the create POST may have reached Vertex but we have no
+ *  operation name" — carries the transport detail so the cause is diagnosable. */
+export function veoCreateUncertainMessage(detail: string): string {
+  return `${VEO_ERRORS.createUncertain} (transport: ${detail})`;
+}
 /** Loud, named failure for "the next scene's still (the join target) could not be read". */
 export function veoLastFrameMissingMessage(sceneKey: string, reason: string): string {
   return (
@@ -654,7 +670,7 @@ export class VeoVideoService {
    *   4. Poll (5s→10s backoff) until done / terminal error.
    *   5. Save the video (inline base64 — the Vertex path — or a signed https uri).
    */
-  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean; usedLastFrame?: boolean }> {
+  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean; usedLastFrame?: boolean; createUncertain?: boolean }> {
     const model = VEO_MODEL;
     const billedSeconds = opts.durationSeconds ?? VEO_CALL_SECONDS;
     let operationName: string | undefined = opts.existingOperationName;
@@ -705,12 +721,26 @@ export class VeoVideoService {
         const createUrl = buildVeoCreateUrl(sa.project_id, model);
         console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s image=${inputImage ? 'yes' : 'no'} lastFrame=${lastFrameImage ? 'yes' : 'no'}`);
         const token = await this.tokens.getAccessToken(sa);
-        const createRes = await fetch(createUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(60_000),
-        });
+        // NEVER PAY TWICE FOR ONE WINDOW (defect A2). Once the POST has left this
+        // process we cannot know whether Vertex accepted it. A timeout / dropped
+        // connection here used to fall through to the generic catch below, which
+        // returned an error with NO operationName — and isRetryableVeoFailure said
+        // "retryable", so generateOneVeoWindow fired a FRESH predictLongRunning
+        // while the first operation may still have been running and billing.
+        // A create whose outcome we never learned is deterministic: name it, stop.
+        let createRes: Response;
+        try {
+          createRes = await fetch(createUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(60_000),
+          });
+        } catch (createErr: any) {
+          const mapped = veoCreateUncertainMessage(`${createErr?.name || 'error'}: ${createErr?.message || 'no detail'}`);
+          console.error(`[Veo] veo_create_uncertain scene=${opts.sceneKey} dur=${billedSeconds}s error=${mapped}`);
+          return { success: false, error: mapped, operationName: undefined, createUncertain: true };
+        }
         if (!createRes.ok) {
           const text = await createRes.text().catch(() => '');
           // An image-bearing call rejected for image reasons gets its OWN message —

@@ -183,6 +183,9 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
   return new Promise<T>((resolve, reject) => {
     const started = Date.now();
     let done = false;
+    // Tick at most every 5s (Railway-safe, no long setTimeout) but fast enough that a
+    // SHORT deadline actually fires: a 12-minute deadline still ticks every 5s.
+    const tickMs = Math.min(5000, Math.max(25, Math.floor(ms / 10)));
     const timer = setInterval(() => {
       if (done) { clearInterval(timer); return; }
       if (Date.now() - started >= ms) {
@@ -190,7 +193,7 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
         clearInterval(timer);
         reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
       }
-    }, 5000);
+    }, tickMs);
     promise.then(
       (v) => { if (!done) { done = true; clearInterval(timer); resolve(v); } },
       (e) => { if (!done) { done = true; clearInterval(timer); reject(e); } },
@@ -542,6 +545,11 @@ export function padClipToDuration(input: string, targetSec: number): Promise<voi
 export function isRetryableVeoFailure(error: string | undefined): boolean {
   const e = String(error || '');
   if (!e) return false;
+  // A CREATE WHOSE OUTCOME WE NEVER LEARNED is deterministic for the ONE thing that
+  // matters: we must not POST again (defect A2). The first operation may still be
+  // running and billing, so a retry would be a second paid operation for the same
+  // window. Checked FIRST so no generic /timeout/ rule can re-enable it.
+  if (/CREATE OUTCOME UNKNOWN|create request TIMED OUT/i.test(e)) return false;
   if (/PERMISSION_DENIED|IAM_PERMISSION_DENIED|GOOGLE_VERTEX_SA_JSON|service.?account|credential/i.test(e)) return false;
   if (/is unavailable \(NOT_FOUND\)|retired|not granted/i.test(e)) return false;
   if (/input image was REJECTED|NO designed still/i.test(e)) return false;
@@ -1096,6 +1104,14 @@ const VEO_WINDOW_MAX_ATTEMPTS = 2;
  * Railway request — the old SCENE_DEADLINE_MS (7 min) was sized for TWO windows.
  */
 const VEO_PREPASS_DEADLINE_MS = 12 * 60 * 1000;
+/** The deadline in force. Overridable ONLY so the suite can drive the real worker
+ *  through an expiry in milliseconds instead of twelve minutes (defect A1: the
+ *  expiry path had no test at all, which is how it silently threw away a take that
+ *  had already been paid for). Production reads the constant above. */
+export function veoPrepassDeadlineMs(): number {
+  const raw = Number(process.env.VEO_PREPASS_DEADLINE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : VEO_PREPASS_DEADLINE_MS;
+}
 /** Per-scene provider deadline (unchanged from prior behaviour). */
 const SCENE_DEADLINE_MS = 7 * 60 * 1000;
 
@@ -1629,6 +1645,31 @@ export function buildSpanPrompt(run: SceneScript[], blockPrompt?: string, window
     flow = `Render ONE continuous ${takeSeconds}-second single take — no cuts, no scene changes, one fluid unbroken camera move.`;
   }
   return blockPrompt ? `${flow} ${blockPrompt}` : flow;
+}
+/** ONE WINDOW, ONE BEAT (defect A4). `buildSpanPrompt` describes the WHOLE span —
+ *  "Render ONE continuous 16-second single take … 0-8s scene 1 … 8-16s scene 5" — and
+ *  that same string used to be handed to EVERY window call while the call asked
+ *  Vertex for `durationSeconds: 8` with a contradictory "…of this beat only" suffix.
+ *  The model was told to render both beats inside each 8-second call: one call, two
+ *  beats, neither of them the one that scene needed.
+ *
+ *  A window's prompt now describes ONLY its own beat and its OWN real length. The
+ *  span prompt stays in metadata (it is still the plan's record); it is no longer
+ *  what the provider is asked to render.
+ *  Pure + deterministic. */
+export function buildWindowPrompt(
+  w: MotionWindow,
+  scene?: { sceneNumber?: number; visualPrompt?: string } | null,
+  blockPrompt?: string,
+): string {
+  const seconds = Number.isFinite(w.motionSeconds) && w.motionSeconds > 0 ? Math.round(w.motionSeconds) : VEO_CALL_SECONDS;
+  const beat = String(scene?.visualPrompt || '').trim();
+  const head = beat
+    ? `Render ONE ${seconds}-second single take of ONE beat: ${beat}`
+    : `Render ONE ${seconds}-second single take of ONE beat`;
+  const tail = 'No cuts, no scene changes, one fluid unbroken camera move, same subject throughout.';
+  const block = String(blockPrompt || '').trim();
+  return [head + '.', tail, block].filter(Boolean).join(' ');
 }
 /** Deterministically group every contiguous run of scenes that share a soraBlock into
  *  ONE SoraSpan. On-disk the span maps to EXACTLY ONE 16s Sora call ($1.60, owner Sep
@@ -4230,16 +4271,34 @@ if (!skipGeneration) {
       const stillSourceFor = (sceneNumber: number): string | undefined =>
         sourceImageTargetScenes.includes(sceneNumber) ? heroSource : undefined;
       for (const span of spanPlans) {
+        // A WINDOW'S TAKE LANDS THE MOMENT THAT WINDOW FINISHES (defect A1). The
+        // registry used to be filled only once the WHOLE span resolved, so one slow
+        // window threw away every take the span had already PAID for — and both
+        // Faceless windows live in one span, so that was the normal case, not an
+        // edge. The deadline does not cancel work in flight either, so the abandoned
+        // promise kept polling and later recorded the cost: the ledger said $0.48 on
+        // a video with no motion at all.
+        const lostWindows: Array<{ sceneNumber: number; reason: string }> = [];
         try {
-          const takes = await withDeadline(
-            this.generateVeoTakes(span, projectId, userId, heroSource, sceneByNumber, stillSourceFor, mode === 'faceless'),
-            VEO_PREPASS_DEADLINE_MS,
+          await withDeadline(
+            this.generateVeoTakes(span, projectId, userId, heroSource, sceneByNumber, stillSourceFor, mode === 'faceless', {
+              onTake: (sceneNumber, takePath) => takeRegistry.set(sceneNumber, takePath),
+              // JOIN STEERING is Scene's join: Faceless dissolves (xfade) and never
+              // reads a lastFrame, so it must not send one (defect A5).
+              joinSteersLastFrame: mode !== 'faceless',
+            }),
+            veoPrepassDeadlineMs(),
             `Veo motion windows ${span.soraBlock}`,
           );
-          for (const [sceneNumber, takePath] of takes) takeRegistry.set(sceneNumber, takePath);
-          trace(`veo_windows_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takes.size}`);
+          trace(`veo_windows_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takeRegistry.size}`);
         } catch (spanError: any) {
-          trace(`veo_window_takes_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
+          // ONLY THE WINDOWS WITH NO TAKE ARE LOST. A window that already finished is
+          // in takeRegistry and keeps its motion; each lost window is named, with the
+          // reason, on its own scene record.
+          for (const n of span.sceneNumbers) {
+            if (!takeRegistry.has(n)) lostWindows.push({ sceneNumber: n, reason: String(spanError?.message || spanError) });
+          }
+          trace(`veo_window_takes_failed project=${projectId} block=${span.soraBlock} kept=[${[...takeRegistry.keys()].join(',')}] lost=[${lostWindows.map(l => l.sceneNumber).join(',')}] error=${spanError?.message}`);
           if (mode === 'faceless') {
             // FACELESS FAILS SOFT (owner, Nov 10) — a deliberate change from Scene,
             // where a missing motion take fails the scene and the whole project.
@@ -4248,15 +4307,15 @@ if (!skipGeneration) {
             // video still finishes, and the reason is STATED on the scene and rolled
             // up onto the project. This is not the silent template substitution the
             // owner banned — the substitution is named.
-            for (const n of span.sceneNumbers) {
-              const sc = sceneByNumber.get(n);
-              if (sc?.id) await this.recordMotionFallback(sc.id, String(spanError?.message || spanError));
+            for (const lost of lostWindows) {
+              const sc = sceneByNumber.get(lost.sceneNumber);
+              if (sc?.id) await this.recordMotionFallback(sc.id, lost.reason);
             }
             continue;
           }
-          const ids = span.sceneNumbers
-            .map(n => scenes.find((s: any) => s.sceneNumber === n)?.id)
-            .filter((id): id is string => Boolean(id));
+          const ids = lostWindows
+            .map(l => sceneByNumber.get(l.sceneNumber)?.id)
+            .filter((id: any): id is string => Boolean(id));
           for (const id of ids) failedSpanSceneIds.add(id);
           for (const id of ids) {
             await db.update(schema.videoScenes).set({
@@ -4726,10 +4785,22 @@ if (!skipGeneration) {
           localPath = await ensureLocalFile(scene.visualPrompt, `direct image scene ${scene.sceneNumber}`);
           trace(`scene_direct_image id=${scene.id} number=${scene.sceneNumber}`);
         } else {
-          const result = await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
-          sourceImageOutcome = result.sourceImage;
-          if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
-          localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
+          // A LOST WINDOW REUSES THE FRAME ITS MOTION STARTED FROM (defect A6). The
+          // `scene` row here is the snapshot selected BEFORE the pre-pass ran, so it
+          // carries no `motionStillPath` in memory — but the LIVE row does. Reading it
+          // back means the fallback still is the SAME designed frame the Veo clip was
+          // seeded with: no second paid image call, and the picture is the one the
+          // client's brief produced rather than a fresh, different drawing of it.
+          const motionStill = String((await liveSceneMetadata(scene.id, {})).motionStillPath || '');
+          if (motionStill && fs.existsSync(motionStill)) {
+            localPath = motionStill;
+            trace(`scene_motion_still_reused id=${scene.id} number=${scene.sceneNumber} still=${motionStill}`);
+          } else {
+            const result = await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
+            sourceImageOutcome = result.sourceImage;
+            if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
+            localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
+          }
         }
         mime='image/png';
       }
@@ -4872,6 +4943,13 @@ else {
     sourceImageFor?: (sceneNumber: number) => string | undefined,
     /** FACELESS: a failed window is STATED and falls back to its still, never fatal. */
     softFail = false,
+    /** Per-window hooks.
+     *  - `onTake`: called the MOMENT a window's take lands, not when the whole span
+     *    resolves, so a span deadline can no longer discard motion already paid for
+     *    (defect A1).
+     *  - `joinSteersLastFrame`: whether THIS mode's join actually consumes a
+     *    `lastFrame`. Faceless dissolves with xfade and never reads one (defect A5). */
+    hooks: { onTake?: (sceneNumber: number, takePath: string) => void; joinSteersLastFrame?: boolean } = {},
   ): Promise<Map<number, string>> {
     const takes = new Map<number, string>();
     const windows = span.windows ?? [];
@@ -4903,10 +4981,21 @@ else {
         // JOIN STEERING (owner Nov 2): clips 1..n-1 are told to END on the NEXT
         // scene's designed picture. The LAST clip sends no lastFrame — there is no
         // next picture to land on. A missing target fails LOUD (no silent drop).
-        const lastFramePath = nextWindow ? await stillFor(nextWindow.sceneNumber) : undefined;
+        //
+        // ONLY WHERE THE JOIN CONSUMES IT (defect A5). Faceless joins with xfade and
+        // never reads a lastFrame, so sending one there steered the picture for no
+        // reason, shipped a base64 1024×1792 PNG on every call, and let Vertex refuse
+        // an OPTIONAL input — a deterministic non-retryable error that killed an
+        // 8-second window the mode did not need.
+        const lastFramePath = hooks.joinSteersLastFrame === false || !nextWindow
+          ? undefined
+          : await stillFor(nextWindow.sceneNumber);
         const takePath = await this.generateOneVeoWindow(
           span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath, userId,
         );
+        // A1: land the take NOW — the span-level deadline must never be able to
+        // discard a window that already finished.
+        hooks.onTake?.(w.sceneNumber, takePath);
         return { sceneNumber: w.sceneNumber, takePath, error: undefined as string | undefined };
       } catch (err: any) {
         return { sceneNumber: w.sceneNumber, takePath: undefined as string | undefined, error: String(err?.message || err) };
@@ -4947,7 +5036,9 @@ else {
     lastFramePath?: string,
     userId?: string,
   ): Promise<string> {
-    const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
+    // A4: this call renders THIS window's beat at THIS window's real length — never
+    // the span's "16-second single take" text, which described the other beat too.
+    const windowPrompt = withSourceSubject(buildWindowPrompt(w, scene), heroSource || undefined);
     // What the call COSTS is the legal Veo duration; what the scene NEEDS is its own
     // planned narration window. They are deliberately different numbers.
     const billedSeconds = Number.isFinite(w.motionSeconds) ? w.motionSeconds : VEO_CALL_SECONDS;
@@ -4971,7 +5062,7 @@ else {
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
       const result = await veoVideoService.generateSceneVideo({
-        prompt: `${spanPrompt} — One continuous single take of this beat only (scene ${w.sceneNumber}): no cuts, no scene changes, one fluid motion sequence, same subject throughout.`,
+        prompt: windowPrompt,
         sceneKey,
         existingOperationName: persistedOp, // exactly-once: never a second paid POST
         onOperationCreated: (operation) => {
@@ -5268,8 +5359,49 @@ else {
       ? scenesForSourceImagePlacement(placement, projectScenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })))
       : [];
     const regenSourceImage = sourceImageForScene(heroSource, placement, projectScenes.map((sc: any) => ({ sceneNumber: sc.sceneNumber, duration: sc.duration })), scene.sceneNumber);
-    await this.processScene(scene,userId,pmeta.voice,pmeta.tone,regenSourceImage,undefined,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 });
+    // ONE CLICK MUST NOT DESTROY A GOOD VIDEO (defect A3). This used to call
+    // processScene with `mode` OMITTED and no take: shouldRenderStillInstead() was
+    // false for a motion scene, so it entered the motion branch and threw "Motion
+    // span take missing"; the scene was marked failed and processProject then marked
+    // the WHOLE project failed. Now the project's own mode is passed, and a motion
+    // scene is regenerated by RE-RUNNING ITS OWN WINDOW (exactly-once — the persisted
+    // operation is resumed, never a second paid POST). If that window cannot be
+    // produced, Faceless falls back to its still (stated on the scene) rather than
+    // failing anything.
+    const regenMode: 'faceless' | 'scene' = pmeta?.mode === 'faceless' ? 'faceless' : 'scene';
+    let regenTakePath: string | undefined;
+    if (scene.visualType !== 'still') {
+      const regenSpans: SoraSpan[] = Array.isArray(pmeta.spans) ? pmeta.spans : [];
+      const regenSpan = regenSpans.find((sp) => (sp.windows ?? []).some((w) => Number(w.sceneNumber) === Number(scene.sceneNumber)));
+      const regenWindow = regenSpan?.windows.find((w) => Number(w.sceneNumber) === Number(scene.sceneNumber));
+      if (regenSpan && regenWindow) {
+        const sceneByNumber = new Map<number, any>(projectScenes.map((sc: any) => [sc.sceneNumber, sc]));
+        try {
+          const takes = await this.generateVeoTakes(
+            { ...regenSpan, windows: [regenWindow], sceneNumbers: [regenWindow.sceneNumber] },
+            scene.projectId, userId, heroSource, sceneByNumber,
+            (n: number) => (Number(n) === Number(scene.sceneNumber) ? regenSourceImage : undefined),
+            regenMode === 'faceless',
+            // A single window has no next clip, so there is no join to steer.
+            { joinSteersLastFrame: false },
+          );
+          regenTakePath = takes.get(regenWindow.sceneNumber);
+        } catch (regenErr: any) {
+          trace(`regen_window_failed project=${scene.projectId} scene=${scene.sceneNumber} error=${regenErr?.message}`);
+        }
+      }
+    }
+    await this.processScene(scene,userId,pmeta.voice,pmeta.tone,regenSourceImage,regenTakePath,{ allowPlanSpeak: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0 },regenMode);
     if (heroSource) await this.recordSourceImageOutcome(scene.projectId, placementTargets, pmeta);
+    // A REGENERATION NEVER FAILS THE PROJECT (defect A3). processProject(skipGeneration)
+    // marks the project failed when any scene is not completed — so a regeneration that
+    // could not complete its own scene used to flip a good, finished video to 'failed'.
+    // The scene carries the reason; the project keeps the status it had.
+    const [regenAfter] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.id, scene.id)).limit(1);
+    if (regenAfter?.status !== 'completed') {
+      trace(`regen_scene_not_completed project=${scene.projectId} scene=${scene.sceneNumber} status=${String(regenAfter?.status)}`);
+      return scene.projectId;
+    }
     await this.processProject(scene.projectId,userId,true); return scene.projectId; }
   /**
    * Resume-on-boot recovery. If the Railway process restarts (deploy, crash, scale),
