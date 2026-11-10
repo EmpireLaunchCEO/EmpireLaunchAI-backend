@@ -200,6 +200,33 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
     );
   });
 }
+/**
+ * PER-PROJECT METADATA WRITE QUEUE (defect C3).
+ *
+ * Every project-level bookkeeping write — the cost ledger, the persisted Veo
+ * operation, the job status — is a read-modify-write of the WHOLE `metadata`
+ * object. Both Faceless windows run CONCURRENTLY, so two of them read the same
+ * copy and the second write silently drops the first one's key: the ledger
+ * reported one call / $0.24 for a render that really billed two / $0.48. A ledger
+ * that under-reports money spent is worse than no ledger — it is the number the
+ * margin is decided on (and over-reporting is a bug too).
+ *
+ * So: one queue per project id. Each write waits for the previous one to settle,
+ * then RE-READS the row immediately before it writes, so it merges into the
+ * freshest copy instead of a stale snapshot. Serialising only the write section
+ * keeps the windows themselves concurrent — nothing about the paid calls changes.
+ */
+const projectMetadataQueue = new Map<string, Promise<void>>();
+function withProjectMetadataLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = projectMetadataQueue.get(projectId) ?? Promise.resolve();
+  const run = prev.then(() => fn(), () => fn());
+  const tail: Promise<void> = run.then(() => undefined, () => undefined);
+  projectMetadataQueue.set(projectId, tail);
+  void tail.then(() => {
+    if (projectMetadataQueue.get(projectId) === tail) projectMetadataQueue.delete(projectId);
+  });
+  return run;
+}
 function inputHasAudio(input: string): boolean {
   try {
     return execFileSync('ffprobe', [
@@ -350,7 +377,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
   return report;
 }
 
-export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right'; padVideoToAudio?: boolean; stillCoverFit?: boolean }): Promise<void> {
+export function renderClip(input: string, output: string, duration: number, audio?: string, opts?: { kenburns?: boolean; kenburnsStartZoom?: number; kenburnsEndZoom?: number; kenburnsDir?: 'zoom-in' | 'pan-left' | 'pan-right'; padVideoToAudio?: boolean; stillCoverFit?: boolean; freezeTail?: boolean; sceneEntryFadeIn?: boolean }): Promise<void> {
   return new Promise((resolve,reject)=>{
     // Explicit arg order is load-bearing: for a still image we need `-loop 1` IMMEDIATELY before `-i image.png`.
     // fluent-ffmpeg's .loop() misplaces `-loop 1` when a 2nd input (narration .wav) is added -> "Option loop not found".
@@ -384,7 +411,12 @@ export function renderClip(input: string, output: string, duration: number, audi
     //     fills the target with at most ONE loop transition.
     //   - source < 60% of target (very short) -> tpad=stop_mode=clone FREEZE-LAST-FRAME
     //     pad + 250ms fade in/out — no loop splice at all, clean hold on the final frame.
-    const padByLoop = srcDur >= 0.6 * duration;
+    // A MOTION CLIP THAT WAS ALREADY FITTED IS NEVER REPLAYED (defect C1). When the
+    // assembly had to stretch a take that could not honestly reach its window (past
+    // MAX_TAKE_STRETCH_RATIO), the remainder is a FREEZE of the last frame: a freeze
+    // reads as a pause, `-stream_loop 1` reads as the picture jumping back to its
+    // opening frame mid-motion. `freezeTail` forces the clone-fill branch.
+    const padByLoop = !opts?.freezeTail && srcDur >= 0.6 * duration;
     const inputs: string[] = [];
     if (isImage) {
       if (kenburns) {
@@ -468,8 +500,15 @@ export function renderClip(input: string, output: string, duration: number, audi
       : fitChain;
     // tpad clone-fill for the very-short-source case: freeze last frame + 250ms
     // fades (clean, no loop splice). Applied AFTER fps normalization (same cadence).
+    // THE FADE-UP FROM BLACK IS A SCENE-ENTRY NICETY, NEVER THE ENDING (defect C2).
+    // The payoff scene is a motion scene, so `padVideoToAudio` is true and this
+    // filter used to fade the video's CLOSING SHOT up from black — the last thing
+    // the client sees starting as nothing. The caller decides by POSITION in the
+    // timeline (only the video's first, non-ending scene may fade in); a fade TO
+    // black at the very end is untouched.
+    const entryFadeIn = opts?.sceneEntryFadeIn !== false ? 'fade=t=in:st=0:d=0.25,' : '';
     const padFill = (!isImage && (!padByLoop || extending) && srcDur > 0)
-      ? `,tpad=stop_mode=clone:stop_duration=${Math.max(0, effective - srcDur)},fade=t=in:st=0:d=0.25,fade=t=out:st=${Math.max(0, effective - 0.25)}:d=0.25`
+      ? `,tpad=stop_mode=clone:stop_duration=${Math.max(0, effective - srcDur)},${entryFadeIn}fade=t=out:st=${Math.max(0, effective - 0.25)}:d=0.25`
       : '';
     inputs.push('-vf', kenburnsVf + ',' + fpsNorm + padFill);
     inputs.push('-t',String(effective));
@@ -574,6 +613,12 @@ export function isRetryableVeoFailure(error: string | undefined): boolean {
  *      the clip lands EXACTLY on its window.
  *  So: trim when the take is long enough, stretch when it is short, never pad.
  *  Pure FFmpeg; zero paid seconds. */
+/** How far a motion take may be SLOWED to fill a window that grew after the take
+ *  was already fitted (defect C1). 2x is already a deliberate slow motion; past
+ *  that the honest answer is to hold the LAST frame, because a freeze reads as a
+ *  pause while a `-stream_loop` replay reads as the picture jumping back to its
+ *  opening frame mid-shot. */
+export const MAX_TAKE_STRETCH_RATIO = 2;
 export function fitClipToDuration(input: string, targetSec: number): Promise<void> {
   const t = Math.max(0.1, Number(targetSec) || 0.1);
   const out = `${input}.fit.mp4`;
@@ -1111,6 +1156,30 @@ const VEO_PREPASS_DEADLINE_MS = 12 * 60 * 1000;
 export function veoPrepassDeadlineMs(): number {
   const raw = Number(process.env.VEO_PREPASS_DEADLINE_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : VEO_PREPASS_DEADLINE_MS;
+}
+/**
+ * PER-WINDOW DEADLINE - strictly shorter than the span budget above, and that
+ * relationship is the whole point (owner, Nov 10: "as fast and as best as
+ * possible"). The span budget is a backstop for the WHOLE pre-pass; on its own a
+ * single hung window holds every other window's picture hostage for twelve
+ * minutes and, before A1, then threw away the takes that had already landed. A
+ * window is abandoned HERE instead: the other windows keep their motion, the lost
+ * one falls back to its designed still (named on its own scene), and the client
+ * waits minutes for a video instead of tens of minutes for a provider.
+ *
+ * Sized from the MEASURED 54.7s per call (2026-11-02, 4s/720p/9:16): 5 minutes is
+ * ~5x that, leaves room for the one retry plus the download, sits comfortably
+ * inside the 12-minute span budget, and is below Veo's own 10-20 minute poll cap
+ * so it fires FIRST - by design. The span ceiling is deliberately NOT raised:
+ * a longer ceiling makes every video slower and fixes nothing.
+ */
+const VEO_WINDOW_DEADLINE_MS = 5 * 60 * 1000;
+/** The per-window deadline in force. Overridable ONLY so the suite can drive the
+ *  real worker through a hung window in milliseconds instead of five minutes;
+ *  production reads the constant above. */
+export function veoWindowDeadlineMs(): number {
+  const raw = Number(process.env.VEO_WINDOW_DEADLINE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : VEO_WINDOW_DEADLINE_MS;
 }
 /** Per-scene provider deadline (unchanged from prior behaviour). */
 const SCENE_DEADLINE_MS = 7 * 60 * 1000;
@@ -4502,6 +4571,31 @@ if (!skipGeneration) {
         // 29.5–30.5s band because the planner sized scenes ≥ the narration rooms
         // (tighten pauses, never words).
         kbOpts.padVideoToAudio = !!sceneAudio && scene.sceneNumber === lastSceneNumber;
+        // ── C1: A GROWN MOTION WINDOW IS RE-FITTED, NEVER REPLAYED ─────────────
+        // `growSceneWindowsToMeasured` above can widen a motion scene AFTER its take
+        // was fitted to the planned window, and renderClip's `-stream_loop 1` then
+        // restarts the clip at frame 0 mid-motion: the picture jumps back to its
+        // opening frame. Re-run the SAME fit the take already used (speed/slow, never
+        // pad) so the motion stays continuous across the whole window. Only when the
+        // take genuinely cannot reach the new length without looping (past
+        // MAX_TAKE_STRETCH_RATIO) does the remainder hold its LAST frame.
+        if (scene.visualType !== 'still') {
+          const targetSeconds = Number(scene.duration) || 3;
+          const haveSeconds = probeDuration(local);
+          if (haveSeconds > 0 && haveSeconds < targetSeconds - 0.05) {
+            const reachable = Math.min(targetSeconds, haveSeconds * MAX_TAKE_STRETCH_RATIO);
+            await fitClipToDuration(local, reachable);
+            if (reachable < targetSeconds - 0.05) kbOpts.freezeTail = true;
+            trace(`motion_window_refit project=${projectId} scene=${scene.sceneNumber} have=${haveSeconds.toFixed(2)}s window=${targetSeconds}s fitted=${reachable.toFixed(2)}s freeze=${Boolean(kbOpts.freezeTail)}`);
+          }
+        }
+        // ── C2: THE FADE-UP FROM BLACK IS A SCENE-ENTRY NICETY, NEVER THE ENDING ─
+        // Decided by POSITION in the timeline, deterministically: only the video's
+        // FIRST scene may fade up from black, and never when that scene is also the
+        // ending. A motion scene whose predecessor already carried the picture must
+        // not fade in, and the closing shot — which is a motion scene, so
+        // `padVideoToAudio` is true — must never start as black.
+        kbOpts.sceneEntryFadeIn = clips.length === 0 && scene.sceneNumber !== lastSceneNumber;
         await renderClip(local,clip,scene.duration||3,sceneAudio,kbOpts);
         clips.push(clip);
       }
@@ -4976,29 +5070,46 @@ else {
       const sceneKey = `block${span.soraBlock}-scene${w.sceneNumber}`;
       const scene = sceneByNumber?.get(w.sceneNumber);
       const nextWindow = windows[index + 1];
+      const startedAt = Date.now();
+      const elapsed = () => Date.now() - startedAt;
       try {
-        const stillPath = await stillFor(w.sceneNumber);
-        // JOIN STEERING (owner Nov 2): clips 1..n-1 are told to END on the NEXT
-        // scene's designed picture. The LAST clip sends no lastFrame — there is no
-        // next picture to land on. A missing target fails LOUD (no silent drop).
-        //
-        // ONLY WHERE THE JOIN CONSUMES IT (defect A5). Faceless joins with xfade and
-        // never reads a lastFrame, so sending one there steered the picture for no
-        // reason, shipped a base64 1024×1792 PNG on every call, and let Vertex refuse
-        // an OPTIONAL input — a deterministic non-retryable error that killed an
-        // 8-second window the mode did not need.
-        const lastFramePath = hooks.joinSteersLastFrame === false || !nextWindow
-          ? undefined
-          : await stillFor(nextWindow.sceneNumber);
-        const takePath = await this.generateOneVeoWindow(
-          span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath, userId,
-        );
-        // A1: land the take NOW — the span-level deadline must never be able to
-        // discard a window that already finished.
-        hooks.onTake?.(w.sceneNumber, takePath);
+        // PER-WINDOW DEADLINE (see VEO_WINDOW_DEADLINE_MS): create + poll + download
+        // for THIS window only, so one hung window is abandoned here instead of at
+        // the span budget and the rest of the video proceeds. The deadline does not
+        // cancel the call in flight, so a take that lands late still reaches
+        // `hooks.onTake` — A1's guarantee that a landed take is never lost stands.
+        const takePath = await withDeadline((async () => {
+          const stillPath = await stillFor(w.sceneNumber);
+          // JOIN STEERING (owner Nov 2): clips 1..n-1 are told to END on the NEXT
+          // scene's designed picture. The LAST clip sends no lastFrame — there is no
+          // next picture to land on. A missing target fails LOUD (no silent drop).
+          //
+          // ONLY WHERE THE JOIN CONSUMES IT (defect A5). Faceless joins with xfade and
+          // never reads a lastFrame, so sending one there steered the picture for no
+          // reason, shipped a base64 1024×1792 PNG on every call, and let Vertex refuse
+          // an OPTIONAL input — a deterministic non-retryable error that killed an
+          // 8-second window the mode did not need.
+          const lastFramePath = hooks.joinSteersLastFrame === false || !nextWindow
+            ? undefined
+            : await stillFor(nextWindow.sceneNumber);
+          const takePath = await this.generateOneVeoWindow(
+            span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath, userId,
+          );
+          // A1: land the take NOW — the span-level deadline must never be able to
+          // discard a window that already finished.
+          hooks.onTake?.(w.sceneNumber, takePath);
+          return takePath;
+        })(), veoWindowDeadlineMs(), `Veo window ${sceneKey}`);
+        trace(`veo_window_ready project=${projectId} window=${sceneKey} elapsedMs=${elapsed()}`);
         return { sceneNumber: w.sceneNumber, takePath, error: undefined as string | undefined };
       } catch (err: any) {
-        return { sceneNumber: w.sceneNumber, takePath: undefined as string | undefined, error: String(err?.message || err) };
+        const message = String(err?.message || err);
+        // ONE line per window outcome, always carrying the window and how long it
+        // took: `veo_window_timed_out` (abandoned at the per-window deadline),
+        // `veo_window_takes_failed` (the call itself failed) and `veo_window_ready`
+        // above. A silent window is what made this class of defect invisible.
+        trace(`${/timed out/i.test(message) ? 'veo_window_timed_out' : 'veo_window_takes_failed'} project=${projectId} window=${sceneKey} elapsedMs=${elapsed()} error=${message}`);
+        return { sceneNumber: w.sceneNumber, takePath: undefined as string | undefined, error: message };
       }
     });
     const failures = outcomes.filter((o) => !o.takePath);
@@ -5084,7 +5195,7 @@ else {
         await fitClipToDuration(slicedPath, sceneSeconds);
         await this.recordVeoCost(projectId, sceneKey, result.billedSeconds ?? billedSeconds);
         void this.markVeoJobStatus(projectId, sceneKey, 'completed');
-        trace(`veo_window_ready project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} lastFrame=${result.usedLastFrame ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
+        trace(`veo_window_take_fitted project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} lastFrame=${result.usedLastFrame ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
         return slicedPath;
       }
       lastError = result.error || 'no video path';
@@ -5152,18 +5263,24 @@ else {
    *  double-count — a video that fails halfway reports exactly what it spent. */
   private async recordVeoCost(projectId: string, sceneKey: string, billedSeconds: number): Promise<void> {
     try {
-      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
-      if (!row) return;
-      const meta = ((row.metadata as any) || {});
-      const prev = (meta.motionCost as { perWindow?: Record<string, number> }) || {};
-      const perWindow: Record<string, number> = { ...(prev.perWindow || {}) };
-      if (perWindow[sceneKey] === undefined) perWindow[sceneKey] = billedSeconds;
-      const total = Object.values(perWindow).reduce((a, b) => a + (Number(b) || 0), 0);
-      const calls = Object.keys(perWindow).length;
-      await db.update(schema.videoProjects)
-        .set({ metadata: { ...meta, motionCost: { billedSeconds: total, calls, usd: veoCostUsd(total), perWindow } }, updatedAt: new Date() })
-        .where(eq(schema.videoProjects.id, projectId));
-      trace(`veo_cost project=${projectId} window=${sceneKey} billed=${billedSeconds}s total=${total}s calls=${calls} usd=${veoCostUsd(total)}`);
+      // MERGE, NEVER REPLACE (defect C3): serialised per project and re-read INSIDE
+      // the lock, so two concurrent windows each land their own `perWindow` entry
+      // and the ledger totals both calls. This is money: under-reporting it is a
+      // bug in the margin decision, over-reporting is a bug in the truth.
+      await withProjectMetadataLock(projectId, async () => {
+        const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+        if (!row) return;
+        const meta = ((row.metadata as any) || {});
+        const prev = (meta.motionCost as { perWindow?: Record<string, number> }) || {};
+        const perWindow: Record<string, number> = { ...(prev.perWindow || {}) };
+        if (perWindow[sceneKey] === undefined) perWindow[sceneKey] = billedSeconds;
+        const total = Object.values(perWindow).reduce((a, b) => a + (Number(b) || 0), 0);
+        const calls = Object.keys(perWindow).length;
+        await db.update(schema.videoProjects)
+          .set({ metadata: { ...meta, motionCost: { billedSeconds: total, calls, usd: veoCostUsd(total), perWindow } }, updatedAt: new Date() })
+          .where(eq(schema.videoProjects.id, projectId));
+        trace(`veo_cost project=${projectId} window=${sceneKey} billed=${billedSeconds}s total=${total}s calls=${calls} usd=${veoCostUsd(total)}`);
+      });
     } catch { /* best-effort */ }
   }
   /** FACELESS FAIL-SOFT: state, on the scene, that its motion window was lost and
@@ -5196,13 +5313,17 @@ else {
    *  resume across retries / restarts). Best-effort: never fails the take. */
   private async persistVeoTakeOperation(projectId: string, sceneKey: string, operation: string): Promise<void> {
     try {
-      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
-      if (!row) return;
-      const meta = ((row.metadata as any) || {});
-      const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
-      veoJobs[sceneKey] = { operation, status: 'in_progress', createdAt: new Date().toISOString() };
-      await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
-      trace(`veo_window_operation_persisted project=${projectId} ${sceneKey} op=${operation}`);
+      // MERGE, NEVER REPLACE (defect C3): a lost `veoJobs` entry breaks exactly-once
+      // resume — the next run would re-POST a window that is already paid for.
+      await withProjectMetadataLock(projectId, async () => {
+        const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+        if (!row) return;
+        const meta = ((row.metadata as any) || {});
+        const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
+        veoJobs[sceneKey] = { operation, status: 'in_progress', createdAt: new Date().toISOString() };
+        await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+        trace(`veo_window_operation_persisted project=${projectId} ${sceneKey} op=${operation}`);
+      });
     } catch (err: any) {
       trace(`veo_window_operation_persist_failed project=${projectId} ${sceneKey} error=${err?.message}`);
     }
@@ -5211,14 +5332,18 @@ else {
    *  Best-effort: never fails the take. */
   private async markVeoJobStatus(projectId: string, sceneKey: string, status: string): Promise<void> {
     try {
-      const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
-      if (!row) return;
-      const meta = ((row.metadata as any) || {});
-      const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
-      const job = veoJobs[sceneKey];
-      if (!job?.operation) return;
-      veoJobs[sceneKey] = { ...job, status };
-      await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      // Same read-modify-write of the SAME `veoJobs` object as the persist above, so
+      // it takes the same per-project lock (defect C3).
+      await withProjectMetadataLock(projectId, async () => {
+        const [row] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+        if (!row) return;
+        const meta = ((row.metadata as any) || {});
+        const veoJobs = { ...(((meta as any).veoJobs as Record<string, { operation?: string; status?: string; createdAt?: string }>) || {}) };
+        const job = veoJobs[sceneKey];
+        if (!job?.operation) return;
+        veoJobs[sceneKey] = { ...job, status };
+        await db.update(schema.videoProjects).set({ metadata: { ...meta, veoJobs }, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      });
     } catch { /* best-effort */ }
   }
   /** Load a persisted Veo window's operation name (exactly-once resume). */
