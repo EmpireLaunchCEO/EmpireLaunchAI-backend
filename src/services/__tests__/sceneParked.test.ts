@@ -31,6 +31,8 @@ import {
 } from '../sceneAccess.js';
 import { OWNER_USER_ID } from '../ownerIdentity.js';
 import { sceneVideoPipelineService } from '../sceneVideoPipelineService.js';
+import { readFileSync } from 'node:fs';
+import { db, schema } from '../../db/index.js';
 
 /** A perfectly ordinary client account id (never the owner). */
 const CLIENT_ID = '7c1e5b2a-9d34-4f68-a1b0-2c3d4e5f6a7b';
@@ -130,4 +132,120 @@ test('THE REFUSAL BODY is the one sentence, in the shape the client UI renders',
   assert.doesNotMatch(SCENE_PARKED_MESSAGE, /undefined|TypeError|stack|api key|token|sora|veo/i);
   assert.match(SCENE_PARKED_MESSAGE, /paused/i);
   assert.match(SCENE_PARKED_MESSAGE, /Faceless videos still work/i);
+});
+
+// ─── REGENERATING ONE SCENE IS A PAID RENDER TOO ─────────────────────────────
+//
+// Hiding the Scene box closed new Scene projects but left the per-scene door
+// open: a client holding an OLD Scene project could still re-render one scene,
+// which buys a still and a Veo window on a mode we have closed. These tests run
+// the REAL `regenerateScene` — the method the route calls — with a stub DB and
+// stubbed processScene/processProject, so the decision is measured on the path a
+// real request takes, not on a copy of the rule.
+
+const SCENE_ID = '0f9e4b2c-3d1a-4c5e-8b7a-9c1d2e3f4a5b';
+const PROJECT_ID = '5a2b7c8d-1e2f-4a3b-9c4d-5e6f7a8b9c0d';
+
+/**
+ * Install a stub DB (scene + project, no users row — so a client resolves to
+ * non-owner) and spies on the two paid stages, for one call of regenerateScene.
+ * Restore always runs, so nothing leaks into the other tests in this file.
+ */
+function installRegenerationStubs(callerId: string, projectMetadata: any) {
+  const scene = { id: SCENE_ID, projectId: PROJECT_ID, sceneNumber: 1, status: 'pending', duration: 5, assetUrl: null, audioUrl: null };
+  const project = { id: PROJECT_ID, userId: callerId, status: 'completed', metadata: projectMetadata, finalVideoUrl: null, thumbnailUrl: null };
+  const rowsFor = (table: any) =>
+    table === schema.videoScenes ? [scene] : table === schema.videoProjects ? [project] : [];
+  const realSelect = (db as any).select;
+  (db as any).select = () => {
+    let table: any = null;
+    const builder: any = {
+      from(t: any) { table = t; return builder; },
+      where() { return builder; },
+      orderBy() { return Promise.resolve(rowsFor(table)); },
+      limit() { return Promise.resolve(rowsFor(table)); },
+      then(ok: any, bad: any) { return Promise.resolve(rowsFor(table)).then(ok, bad); },
+    };
+    return builder;
+  };
+  const svc: any = sceneVideoPipelineService;
+  const realProcessScene = svc.processScene;
+  const realProcessProject = svc.processProject;
+  const calls: string[] = [];
+  svc.processScene = async () => { calls.push('processScene'); };
+  svc.processProject = async () => { calls.push('processProject'); };
+  return {
+    calls,
+    restore() {
+      (db as any).select = realSelect;
+      svc.processScene = realProcessScene;
+      svc.processProject = realProcessProject;
+    },
+  };
+}
+
+test('REGENERATION IS REFUSED: a client re-rendering an OLD Scene project is stopped before any paid stage', async () => {
+  const stubs = installRegenerationStubs(CLIENT_ID, { mode: 'scene', voice: 'female' });
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      () => sceneVideoPipelineService.regenerateScene(SCENE_ID, CLIENT_ID),
+      (err: any) => {
+        assert.equal(isSceneUnavailableError(err), true, 'regeneration must raise the SCENE_UNAVAILABLE refusal');
+        assert.equal(err.message, SCENE_PARKED_MESSAGE);
+        return true;
+      },
+    );
+    // No still, no Veo window, no assembly: the door closes before the spend.
+    assert.deepEqual(stubs.calls, [], 'no paid stage may run for a refused regeneration');
+    assert.ok(Date.now() - started < 5000, 'the refusal must not wait on a provider');
+  } finally {
+    stubs.restore();
+  }
+});
+
+test('REGENERATION IS REFUSED: a legacy Scene project with no stored mode is refused too', async () => {
+  // A project row from before `mode` was persisted renders as Scene, so it is
+  // refused rather than defaulted into a paid Scene render.
+  const stubs = installRegenerationStubs(CLIENT_ID, {});
+  try {
+    await assert.rejects(
+      () => sceneVideoPipelineService.regenerateScene(SCENE_ID, CLIENT_ID),
+      (err: any) => isSceneUnavailableError(err),
+    );
+    assert.deepEqual(stubs.calls, []);
+  } finally {
+    stubs.restore();
+  }
+});
+
+test("REGENERATION STILL WORKS: the owner re-renders her own Scene project", async () => {
+  const stubs = installRegenerationStubs(OWNER_USER_ID, { mode: 'scene', voice: 'female' });
+  try {
+    const projectId = await sceneVideoPipelineService.regenerateScene(SCENE_ID, OWNER_USER_ID);
+    assert.equal(projectId, PROJECT_ID, 'the owner gets a project back, not a refusal');
+    assert.deepEqual(stubs.calls, ['processScene', 'processProject'], 'the owner reaches the real render stages');
+  } finally {
+    stubs.restore();
+  }
+});
+
+test('REGENERATION STILL WORKS: a client re-renders a FACELESS project — the live mode is never collateral damage', async () => {
+  const stubs = installRegenerationStubs(CLIENT_ID, { mode: 'faceless', voice: 'female' });
+  try {
+    const projectId = await sceneVideoPipelineService.regenerateScene(SCENE_ID, CLIENT_ID);
+    assert.equal(projectId, PROJECT_ID);
+    assert.deepEqual(stubs.calls, ['processScene', 'processProject'], 'Faceless regeneration is untouched by the Scene park');
+  } finally {
+    stubs.restore();
+  }
+});
+
+test('THE GATE IS ON THE REGENERATION PATH: the refusal is checked before processScene is called', () => {
+  const src = readFileSync(new URL('../sceneVideoPipelineService.ts', import.meta.url), 'utf8');
+  const regen = src.slice(src.indexOf('async regenerateScene('));
+  const gate = regen.indexOf('sceneParkedForRequest(pmeta?.mode');
+  assert.ok(gate > 0, 'regenerateScene must apply the one parked-Scene rule');
+  assert.ok(gate < regen.indexOf('this.processScene('), 'the gate must run before the paid render');
+  assert.ok(gate < regen.indexOf('this.processProject('), 'the gate must run before assembly');
 });
