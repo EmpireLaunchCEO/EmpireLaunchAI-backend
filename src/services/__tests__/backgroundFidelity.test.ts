@@ -97,7 +97,6 @@ function runLivePostPlan(raw: any, mode: 'scene' | 'faceless') {
   const inventoryForPlanner = inventory.filter((c) => !isRequestedImageryItem(c, requestedImagery));
   const budget = soraCallBudget(DURATION);
   const scriptBeforeFloor = parseScenePlan(raw, IDEA, DURATION, mode);
-  if (mode === 'faceless') for (const s of scriptBeforeFloor) s.visualType = 'still';
   const timeExact = normalizePlanTimeBudget(scriptBeforeFloor, DURATION, { dissolveCompensate: true });
   const script = mode === 'scene'
     ? applySceneMotionFloor(timeExact, extractSoraBlockPrompts(raw || {}, budget), budget)
@@ -184,7 +183,11 @@ test('SCENE — DISCRIMINATOR: the planner\'s own plan did NOT contain it (the d
 // ─── 4. FACELESS: same guarantee, its own branch ─────────────────────────────
 test('FACELESS — the outbound image prompt for EVERY scene contains her background', () => {
   const { planned } = runLivePostPlan(PLANNER_RAW, 'faceless');
-  assert.ok(planned.every((s) => s.visualType === 'still'), 'FACELESS must enter its own branch (stills only, zero motion)');
+  // FACELESS MOTION (owner, Nov 10 — rev 192): Faceless enters its own branch and
+  // now carries Veo motion on the hook + payoff, so "stills only" is no longer the
+  // guarantee. The guarantee this test exists for is unchanged: EVERY scene's image
+  // prompt — including the still that seeds each motion clip — carries her words.
+  assert.ok(planned.length > 0, 'FACELESS must enter its own branch');
   for (const prompt of outboundPrompts(planned)) {
     assert.ok(prompt.toLowerCase().includes(OWNER_PHRASE), `faceless image prompt lost her background: "${prompt}"`);
   }

@@ -158,7 +158,16 @@ export function nearestLegalVeoSeconds(sceneSeconds: number): number {
  *
  * Pure + deterministic. Never exceeds VEO_MOTION_PLAN_CEILING_SECONDS (32s).
  */
-export function planVeoClipDurations(sceneCount: number): number[] {
+export function planVeoClipDurations(sceneCount: number, targetSeconds?: number): number[] {
+  // TARGET-SUM FORM (owner Nov 10): "16 seconds in two calls" is a SUM, not a
+  // count — the scene-shaped plan below cannot express it (n=2 → [6, 8] = 14s).
+  if (Number.isFinite(targetSeconds) && Number(targetSeconds) > 0) {
+    const planned = planVeoTargetSumDurations(
+      Number(targetSeconds),
+      Math.max(1, Math.floor(Number(sceneCount) || 1)),
+    );
+    if (planned.length) return planned;
+  }
   const n = Math.max(0, Math.min(Math.floor(Number(sceneCount) || 0), VEO_MAX_MOTION_WINDOWS));
   if (n === 0) return [];
   if (n === 1) return [VEO_CALL_SECONDS];
@@ -170,6 +179,45 @@ export function planVeoClipDurations(sceneCount: number): number[] {
 /** Total billed seconds for a plan (cost + the 32s ceiling check). */
 export function planVeoClipDurationsTotal(sceneCount: number): number {
   return planVeoClipDurations(sceneCount).reduce((a, b) => a + b, 0);
+}
+/**
+ * FACELESS MOTION BUDGET (owner-approved cost model, rev 192 — Nov 10):
+ * a 30-second Faceless video spends **16 seconds of Veo in TWO 8-second calls**
+ * and the other 14 seconds on stills. Before this, only CAPS existed (a 30s
+ * budget, a 5-window cap, and planVeoClipDurations(2) → [6, 8] = 14s), so there
+ * was no way to express "16 seconds total, in two calls".
+ */
+export const VEO_FACELESS_MOTION_TARGET_SECONDS = 16;
+export const VEO_FACELESS_MOTION_CALLS = 2;
+/**
+ * THE TARGET-SUM PLAN: legal Veo durations (4|6|8) summing to EXACTLY
+ * `targetSeconds` in at most `maxCalls` calls.
+ *
+ * Deterministic: fewest calls first, then the longest tier first, so 16s in two
+ * calls is exactly [8, 8] — never [6, 6, 4] and never the 14s [6, 8] the
+ * scene-shaped planner produces. Returns [] when the target cannot be expressed
+ * with the enum (the caller then falls back to a single legal clip).
+ */
+export function planVeoTargetSumDurations(targetSeconds: number, maxCalls: number = VEO_FACELESS_MOTION_CALLS): number[] {
+  const target = Math.round(Number(targetSeconds));
+  const cap = Math.max(1, Math.min(Math.floor(Number(maxCalls) || 1), VEO_MAX_MOTION_WINDOWS));
+  if (!Number.isFinite(target) || target <= 0) return [];
+  const legal = [...VEO_LEGAL_DURATIONS].sort((a, b) => b - a); // 8, 6, 4
+  const walk = (remaining: number, callsLeft: number, acc: number[]): number[] | null => {
+    if (remaining === 0) return acc;
+    if (callsLeft === 0 || remaining < 0) return null;
+    for (const d of legal) {
+      if (d > remaining) continue;
+      const out = walk(remaining - d, callsLeft - 1, [...acc, d]);
+      if (out) return out;
+    }
+    return null;
+  };
+  for (let calls = 1; calls <= cap; calls++) {
+    const plan = walk(target, calls, []);
+    if (plan) return plan;
+  }
+  return [];
 }
 export const VEO_ASPECT_RATIO = '9:16';
 export const VEO_RESOLUTION = '720p';
