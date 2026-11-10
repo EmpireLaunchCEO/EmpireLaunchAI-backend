@@ -12,7 +12,7 @@ import {
   renderClip, concatClips, normalizePlanTimeBudget, resolveNarrationRoles,
   enforceAvatarConsistency, verifySellingPointsSpoken, injectSellingPointsIntoNarration,
   stripBenefitTextFromVisualPrompts, deliveredVideoDuration, deliveredVideoDurationSeconds,
-  generateSceneAudio, extractRequestedImagery, type RequestedImagery, type SceneScript,
+  generateSceneAudio, extractRequestedImagery, extractAgreedSuggestionImagery, mergeRequestedImagery, type RequestedImagery, type SceneScript,
 } from './sceneVideoPipelineService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho, extractCreativeEssence, finishedEssenceSentences } from './creativeTransformation.js';
 import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
@@ -304,7 +304,13 @@ export class CinemaEngineService {
     // scene and twin as well"). The twin's frames are drawn, so its image
     // instruction is the plan's visualPrompt; her described background is carried
     // into it instead of the hard-coded studio backdrop.
-    const requestedImagery = extractRequestedImagery(talkText ? `${script} ${talkText}` : script);
+    // AN AGREED BACKGROUND IS A STATED ONE (owner Nov 9, rule 1): a background the
+    // client accepted in chat is carried exactly like one she typed, so Twin's
+    // image instruction is hers too.
+    const requestedImagery = mergeRequestedImagery(
+      extractRequestedImagery(talkText ? `${script} ${talkText}` : script),
+      extractAgreedSuggestionImagery(conversation),
+    );
     // DEFECT 2 — TWIN SCRIPT SEAM (owner Oct 30, project 399ef884: "that line
     // just annoys me"). The twin seam glues its own copy the same way the shared
     // planner does, so the SAME deterministic sanitizer runs on the transformed
