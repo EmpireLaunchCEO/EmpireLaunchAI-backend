@@ -338,7 +338,15 @@ test('FAIL SOFT: the project is not marked failed by a lost motion window', () =
   // status:'failed'. Assert the wiring, because that write is what kills the project.
   const start = SERVICE_SRC.indexOf('if (mode === \'faceless\') {', SERVICE_SRC.indexOf('veo_window_takes_failed'));
   assert.ok(start > 0, 'the pre-pass has a Faceless branch');
-  const branch = SERVICE_SRC.slice(start, SERVICE_SRC.indexOf('const ids = span.sceneNumbers', start));
+  // The Scene failure block is what follows the Faceless branch, and its opening
+  // statement is the ONLY safe end anchor. This was `const ids = span.sceneNumbers`
+  // until the A1 fix renamed that list to `lostWindows`: a stale anchor makes indexOf
+  // return -1, so the slice ran to the end of the file, the Scene `status:'failed'`
+  // write fell INSIDE the Faceless branch, and the assertion below failed for a reason
+  // that was not a defect. Anchored and asserted, so it can never widen silently again.
+  const end = SERVICE_SRC.indexOf('const ids = lostWindows', start);
+  assert.ok(end > start, 'the Faceless branch is followed by the Scene failure block');
+  const branch = SERVICE_SRC.slice(start, end);
   assert.ok(/recordMotionFallback/.test(branch), 'it records the reason on the scene');
   assert.ok(/continue;/.test(branch), 'and skips the failure marking entirely');
   assert.ok(!/status: 'failed'/.test(branch), 'a lost Faceless window NEVER marks the scene failed');
