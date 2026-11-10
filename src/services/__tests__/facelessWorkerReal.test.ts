@@ -113,6 +113,10 @@ function selectChain(): any {
   return self;
 }
 
+/** Optional observer so a test can SEE a write land (e.g. the moment a window's cost
+ *  is recorded) instead of guessing with a sleep. */
+let dbUpdateObserver: ((table: any, values: any) => void) | undefined;
+
 function updateChain(table: any): any {
   let values: any; let pred: any;
   const self: any = {
@@ -120,13 +124,15 @@ function updateChain(table: any): any {
     where(p: any) { pred = p; return self; },
     then(res: any, rej: any) {
       for (const r of rowsOf(table)) if (evalPred(pred, r)) Object.assign(r, values);
+      dbUpdateObserver?.(table, values);
       return Promise.resolve([]).then(res, rej);
     },
   };
   return self;
 }
 
-function installDb(seed: { project: Row; scenes: Row[] }) {
+function installDb(seed: { project: Row; scenes: Row[] }, onUpdate?: (table: any, values: any) => void) {
+  dbUpdateObserver = onUpdate;
   const anyDb = db as any;
   const orig = { select: anyDb.select, update: anyDb.update, insert: anyDb.insert };
   store.clear();
@@ -141,7 +147,7 @@ function installDb(seed: { project: Row; scenes: Row[] }) {
       return Promise.resolve([]);
     },
   });
-  return () => { Object.assign(anyDb, orig); };
+  return () => { Object.assign(anyDb, orig); dbUpdateObserver = undefined; };
 }
 
 const scenesOf = () => rowsOf(schema.videoScenes);
@@ -221,9 +227,25 @@ function stubProviders(opts: {
 }
 
 // ═══ A1 + A5 + A6, through the REAL processProject ══════════════════════════
-test('A1/A5/A6 — the real worker: a finished window keeps its take when the span deadline expires', async () => {
+test('A1/A5/A6 — the real worker: a finished window keeps its take when the span deadline expires', async (t) => {
   const { project, scenes } = facelessProject();
-  const restoreDb = installDb({ project, scenes });
+  // DETERMINISM. The span deadline is a WALL CLOCK, so a fixture that simply sets a
+  // short one races its own work: window 1's still render + ffmpeg fit take longer
+  // than the deadline, so window 1 was counted LOST before its take had landed. That
+  // measured the test's speed, not the worker. The clock is faked here instead — the
+  // deadline can only fire when this test ticks it, and it ticks it only AFTER window
+  // 1's take is in the worker's registry. The code under test is untouched and real.
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  // The one observable that runs a microtask BEFORE the take is handed to the
+  // registry (recordVeoCost → onTake), so landing it here means the take is about to
+  // land; the setImmediate drain below closes that gap.
+  let windowOneBilled: () => void = () => {};
+  const billed = new Promise<void>((resolve) => { windowOneBilled = resolve; });
+  const restoreDb = installDb({ project, scenes }, (table, values) => {
+    if (table === schema.videoProjects && values?.metadata?.motionCost?.perWindow?.['block0-scene1'] !== undefined) {
+      windowOneBilled();
+    }
+  });
   const veoCalls: any[] = [];
   const renders: string[] = [];
   const restore = stubProviders({
@@ -237,9 +259,26 @@ test('A1/A5/A6 — the real worker: a finished window keeps its take when the sp
   });
   process.env.VEO_PREPASS_DEADLINE_MS = '400';
   try {
-    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID);
+    const run = sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID);
+    // REAL-TIME watchdog (native timer, unaffected by the faked clock) so a worker
+    // that never lands window 1 fails the test instead of hanging the suite.
+    await Promise.race([
+      billed,
+      new Promise<void>((_resolve, reject) => {
+        AbortSignal.timeout(60_000).addEventListener('abort', () => reject(new Error('window 1 never landed within 60s of real time')));
+      }),
+    ]);
+    // Let the take reach the registry (pure microtasks from here — setImmediate is
+    // NOT faked). The span promise is still pending: window 2 is still hanging.
+    for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r));
+    // NOW the span deadline expires — after the take landed, which is the whole point.
+    t.mock.timers.tick(400);
+    // Back to the real clock for the rest of the worker (scene loop, ffmpeg, exports).
+    t.mock.timers.reset();
+    await run;
   } finally {
     delete process.env.VEO_PREPASS_DEADLINE_MS;
+    t.mock.timers.reset();
     restore();
     restoreDb();
   }
