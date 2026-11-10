@@ -47,6 +47,8 @@ import {
   applySceneMotionFloor,
   planSoraSpans,
   capVeoMotionWindows,
+  planFacelessVeoSpans,
+  applyVeoSceneMotion,
   extractSoraBlockPrompts,
   DISSOLVE_OVERLAP_SECONDS,
   type SceneScript,
@@ -96,7 +98,8 @@ function runSharedPlanner(
     ? injectSellingPointsIntoNarration(planned, f4SellingPoints)
     : { script: planned, injected: [], stillMissing: verifySellingPointsSpoken(planned, f4SellingPoints).missing };
   planned = f4Narr.script.map(s => ({ ...s }));
-  // span planning + VEO window cap (scene only; faceless/twin skip by mode)
+  // span planning + VEO window cap (scene: whole-video election; faceless: the
+  // owner-approved 16s-in-two-8s-calls election — owner Nov 10)
   let spanPlans = mode === 'scene'
     ? planSoraSpans(planned, extractSoraBlockPrompts(raw || {}, budget))
     : [];
@@ -104,6 +107,11 @@ function runSharedPlanner(
     const cap = capVeoMotionWindows(planned, spanPlans);
     spanPlans = cap.spans;
     planned = cap.script.map(s => ({ ...s }));
+  }
+  if (mode === 'faceless') {
+    // FACELESS MOTION (owner, Nov 10): the pipeline elects the motion — hook +
+    // payoff, two 8s calls = 16s — and projects it onto the plan.
+    planned = applyVeoSceneMotion(planned, planFacelessVeoSpans(planned));
   }
   // content direction + avatar consistency
   const withRoles = resolveNarrationRoles(planned);
@@ -185,11 +193,14 @@ test('faceless baseline: OCT10 brief through shared planner — F4 7/7 SPOKEN, v
     const low = (s.visualPrompt || '').toLowerCase();
     for (const key of BENEFIT_KEYS) assert.ok(!low.includes(key), `"${key}" must NEVER remain in faceless scene ${s.sceneNumber} visualPrompt`);
   }
-  // F1: every faceless still is a still; no-text guard contract applies at render
+  // F1: the no-text guard applies to EVERY faceless image (still AND motion seed);
+  // Faceless motion (owner, Nov 10) is the pipeline's deterministic election —
+  // at most the two 8s windows — never the planner's choice.
+  const facelessMotion = r.planned.filter((s) => s.visualType === 'motion');
+  assert.ok(facelessMotion.length <= 2, `at most two Faceless motion windows (got ${facelessMotion.length})`);
   for (const s of r.planned) {
-    assert.equal(s.visualType, 'still', `faceless scene ${s.sceneNumber} must be a still`);
     const guarded = appendNoTextGuard(s.visualPrompt);
-    assert.ok(/NO text, NO words/i.test(guarded), 'deterministic no-text guard must be present for faceless stills');
+    assert.ok(/NO text, NO words/i.test(guarded), 'deterministic no-text guard must be present for every faceless image');
   }
   // F3: subject exact
   assert.ok(r.planned.some(s => /EmpireLaunch AI/i.test(s.narration)), 'subject spoken');
@@ -225,10 +236,12 @@ test('twin-shaped plan: F4 verify passes with avatar roles — 7/7 SPOKEN (injec
     const low = (s.visualPrompt || '').toLowerCase();
     for (const key of BENEFIT_KEYS) assert.ok(!low.includes(key), `"${key}" must NEVER remain in twin scene ${s.sceneNumber} visualPrompt`);
   }
-  // F1: twin stills portrait + no-text guard
+  // F1: no-text guard on every twin image. FACELESS MOTION (owner, Nov 10): Twin
+  // rides the shared faceless PLANNER, which now elects Veo motion (two 8s windows);
+  // Twin's OWN renderer draws its frames (buildTwinPlan), so the still/motion shape
+  // here is the shared planner's, not Twin's output.
   for (const s of r.planned) {
-    assert.equal(s.visualType, 'still', `twin scene ${s.sceneNumber} must be a still`);
-    assert.ok(/NO text, NO words/i.test(appendNoTextGuard(s.visualPrompt)), 'no-text guard must apply to twin avatar stills (F1)');
+    assert.ok(/NO text, NO words/i.test(appendNoTextGuard(s.visualPrompt)), 'no-text guard must apply to twin avatar images (F1)');
   }
   // F3: subject exact
   assert.ok(r.planned.some(s => /EmpireLaunch AI/i.test(s.narration)), 'subject spoken (twin)');

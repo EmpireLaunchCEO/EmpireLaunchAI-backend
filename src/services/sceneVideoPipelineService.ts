@@ -17,6 +17,9 @@ import {
   VEO_MAX_MOTION_WINDOWS,
   nearestLegalVeoSeconds,
   planVeoClipDurations,
+  planVeoTargetSumDurations,
+  VEO_FACELESS_MOTION_TARGET_SECONDS,
+  VEO_FACELESS_MOTION_CALLS,
   veoCostUsd,
 } from './veoVideoService.js';
 import { planMatchCutCuts, JOIN_GOOD_PSNR, JOIN_VISIBLE_PSNR, assertClipPicture, type MatchCutReport } from './sceneJoinService.js';
@@ -1427,12 +1430,13 @@ export function extractSoraBlockPrompts(raw: any, budget: number): string[] {
  */
 export function parseScenePlan(raw: any, idea: string, durationTarget: number, mode: 'faceless' | 'scene'): SceneScript[] {
   if (mode === 'faceless') {
-    // FACELESS HARD-LOCK (owner decision Aug 30): Faceless NEVER consumes paid Sora
-    // motion — every scene renders as a gpt-image-2 still animated by FFmpeg Ken
-    // Burns. Force `still` at the parse layer (defense in depth: createProject also
-    // forces stills after parsing, so the guarantee holds for ANY caller of the
-    // parser, not just the Scene pipeline's own createProject path).
-    return parseScenes(raw, idea, durationTarget).map(s => ({ ...s, visualType: 'still' as const, soraBlock: undefined }));
+    // FACELESS MOTION (owner, Nov 10 — rev 192). What CHANGED: the old hard-lock
+    // forced every scene to a still, which locked Faceless out of the Veo motion it
+    // now carries. What did NOT change: the PLANNER never buys motion in Faceless —
+    // soraContent blocks are never paired here, and the still/motion split is
+    // decided deterministically downstream by planFacelessVeoSpans (hook + payoff,
+    // two 8s calls = 16s), which overwrites whatever visualType the model asked for.
+    return parseScenes(raw, idea, durationTarget).map(s => ({ ...s, soraBlock: undefined }));
   }
   const scenesRaw = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
   const budget = soraCallBudget(durationTarget);
@@ -1728,6 +1732,74 @@ export function planVeoSceneWindows(script: SceneScript[]): MotionWindow[] {
  *  shape stays unchanged for every existing reader. */
 export function planVeoSceneSpans(script: SceneScript[]): SoraSpan[] {
   const windows = planVeoSceneWindows(script);
+  if (!windows.length) return [];
+  const run = script.filter((s) => windows.some((w) => w.sceneNumber === s.sceneNumber));
+  return [{
+    soraBlock: 0,
+    sceneNumbers: windows.map((w) => w.sceneNumber),
+    totalSeconds: windows.reduce((a, w) => a + w.motionSeconds, 0),
+    windows,
+    prompt: buildSpanPrompt(run, undefined, windows),
+  }];
+}
+/**
+ * FACELESS MOTION WINDOWS (owner-approved cost model, rev 192 — Nov 10):
+ * **16 seconds of Veo in TWO 8-second calls**, the rest of a 30s video on stills.
+ * Faceless was locked out of motion by four conditions — parse forced `still`,
+ * createProject forced `still`, `spanPlans` was `mode==='scene'` only, and
+ * `veoWindowReady` was written only for Scene. This is the election that replaces
+ * them, and it is the ONE place that decides which Faceless scenes move.
+ *
+ * WHICH scenes move is DETERMINISTIC FROM THE NARRATION, never the planner's
+ * taste: the HOOK (the first scene) and the PAYOFF (the last scene). Each window
+ * is one 8s Veo call, so a 30s video is exactly 2 calls / 16s. The target is
+ * capped at the video's own planned length (never buy more motion than there is
+ * video) with the legal 4s floor; a single-scene video buys one call.
+ */
+export function planFacelessVeoWindows(script: SceneScript[]): MotionWindow[] {
+  if (!script.length) return [];
+  const plannedTotal = script.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
+  const target = Math.min(VEO_FACELESS_MOTION_TARGET_SECONDS, Math.max(4, Math.ceil(plannedTotal)));
+  const hook = script[0];
+  const payoff = script[script.length - 1];
+  const elected = hook.sceneNumber === payoff.sceneNumber
+    ? [hook.sceneNumber]
+    : [hook.sceneNumber, payoff.sceneNumber];
+  const durations = planVeoTargetSumDurations(target, Math.min(VEO_FACELESS_MOTION_CALLS, elected.length));
+  // Not expressible with the 4|6|8 enum (a very short video) → one legal clip.
+  const seconds = durations.length ? durations : [nearestLegalVeoSeconds(Math.max(1, target))];
+  const windows: MotionWindow[] = [];
+  let offset = 0;
+  for (let i = 0; i < Math.min(seconds.length, elected.length); i++) {
+    windows.push({ sceneNumber: elected[i], motionStartSeconds: offset, motionSeconds: seconds[i] });
+    offset += seconds[i];
+  }
+  return windows;
+}
+/** FACELESS FAIL-SOFT DECISION (owner, Nov 10) — the ONE place that decides whether
+ *  a motion scene renders its STILL instead of failing.
+ *
+ *  Scene mode keeps its own policy: a missing motion take fails the scene, loudly.
+ *  Faceless must not — the owner has already paid for the other window, so the video
+ *  finishes with the still in that slot and the reason is recorded on the scene and
+ *  the project. This is a STATED substitution, not the silent template swap the
+ *  owner banned. */
+export function shouldRenderStillInstead(
+  scene: { visualType?: string },
+  mode: 'faceless' | 'scene' | undefined,
+  spanTakePath: string | undefined,
+  fileExists: (p: string) => boolean = fs.existsSync,
+): boolean {
+  if (scene?.visualType === 'still') return true;
+  if (mode !== 'faceless') return false; // Scene: a missing take still fails the scene
+  return !(spanTakePath && fileExists(spanTakePath));
+}
+/** ONE span carrying the Faceless windows (soraBlock 0) so the persisted `spans`
+ *  metadata shape is identical to Scene's and the worker's Veo pre-pass runs
+ *  unchanged — the same proven transport, the same exactly-once operation keys,
+ *  the same per-window cost ledger. */
+export function planFacelessVeoSpans(script: SceneScript[]): SoraSpan[] {
+  const windows = planFacelessVeoWindows(script);
   if (!windows.length) return [];
   const run = script.filter((s) => windows.some((w) => w.sceneNumber === s.sceneNumber));
   return [{
@@ -3535,10 +3607,12 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (plannerOutcome.templateScenes > 0) {
       trace(`planner_template_fill project=${projectId} scenes=${plannerOutcome.templateScenes}/${targetSceneCount(duration)} source=${plannerOutcome.source}`);
     }
-    // FACELESS-ONLY: force every scene down the still path (gpt-image-2 + FFmpeg Ken
-    // Burns/zoompan) regardless of what the GPT planner returned, so Faceless never
-    // consumes paid Sora motion calls. Scene-Based and Neural Twin are unaffected.
-    if (mode === 'faceless') { for (const s of scriptBeforeFloor) { s.visualType = 'still'; } }
+    // FACELESS MOTION (owner, Nov 10 — rev 192): the old force-to-still is GONE.
+    // Faceless is the one live mode and it carries motion; the still/motion split is
+    // elected deterministically from the narration further down
+    // (planFacelessVeoSpans: hook + payoff, two 8s calls = 16s). The PLANNER still
+    // never buys motion in Faceless — soraContent is not paired and the election
+    // overwrites any visualType the model asked for.
     // HARD TIME BUDGET runs FIRST so the motion-floor SPAN election below sees the
     // EXACT durations the assembly will render (rounding drift can't push a span over
     // the 16s single-take cap after the fact; durations still sum EXACTLY to `duration`).
@@ -3723,12 +3797,12 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // motion budget is the whole video (capped at 30s). The old Sora-shaped span
     // election (ONE contiguous <=16s take per block, "important windows only") is no
     // longer used for Scene mode: a scene that is on screen always moves.
-    let spanPlans = mode === 'scene' ? capVeoMotionWindows(planned, planVeoSceneSpans(planned)).spans : [];
-    if (mode === 'scene') {
-      planned.splice(0, planned.length, ...applyVeoSceneMotion(planned, spanPlans));
-      const motionSeconds = spanPlans.reduce((a, sp) => a + sp.windows.reduce((b, w) => b + w.motionSeconds, 0), 0);
-      trace(`veo_whole_video_motion project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} motionSeconds=${motionSeconds} stillScenes=${planned.filter((s) => s.visualType !== 'motion').length} usd=${veoCostUsd(motionSeconds)}`);
-    }
+    let spanPlans = mode === 'scene'
+      ? capVeoMotionWindows(planned, planVeoSceneSpans(planned)).spans
+      : planFacelessVeoSpans(planned);
+    planned.splice(0, planned.length, ...applyVeoSceneMotion(planned, spanPlans));
+    const motionSeconds = spanPlans.reduce((a, sp) => a + sp.windows.reduce((b, w) => b + w.motionSeconds, 0), 0);
+    trace(`${mode === 'scene' ? 'veo_whole_video_motion' : 'faceless_veo_motion'} project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} motionSeconds=${motionSeconds} stillScenes=${planned.filter((s) => s.visualType !== 'motion').length} usd=${veoCostUsd(motionSeconds)}`);
     const motionWindowByScene = new Map<number, MotionWindow>();
     for (const span of spanPlans) for (const w of span.windows) motionWindowByScene.set(w.sceneNumber, w);
     // CONTENT DIRECTION (owner Sep 9 — folded into this planner rewrite): resolve
@@ -3939,7 +4013,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       const mw = isMotion ? motionWindowByScene.get(s.sceneNumber) : undefined;
       return {id:uuidv4(),projectId,sceneNumber:s.sceneNumber,duration:s.duration,visualType:s.visualType,narration:s.narration,visualPrompt:(visualPromptOverridesMeta && visualPromptOverridesMeta[s.sceneNumber-1]) || s.visualPrompt,status:'pending',metadata:{
         importantSora:isMotion,
-        ...(isMotion && mode === 'scene' ? { veoWindowReady: true } : {}),
+        ...(isMotion ? { veoWindowReady: true } : {}),
         ...(s.soraBlock !== undefined ? { soraBlock: s.soraBlock } : {}),
         ...(mw ? { motionStartSeconds: mw.motionStartSeconds, motionSeconds: mw.motionSeconds, spanOffset: mw.motionStartSeconds } : {}),
         ...(s.narrationRole !== undefined ? { narrationRole: s.narrationRole } : {}),
@@ -3958,6 +4032,10 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // narration is voiced with the user's gender/tone instead of a hardcoded alloy.
     const [projectRow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
     const pmeta = ((projectRow?.metadata as any) || {});
+    // FACELESS MOTION (owner, Nov 10): Faceless now runs the Veo pre-pass too, and
+    // its failure policy is deliberately DIFFERENT from Scene's — see the pre-pass
+    // catch below (fail SOFT: the still, stated, never a dead project).
+    const mode = pmeta.mode === 'faceless' ? 'faceless' : 'scene';
     const voice = pmeta.voice as 'female' | 'male' | 'none' | undefined;
     const tone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
     const sourceImages: string[] = Array.isArray(pmeta.sourceImages)
@@ -4003,7 +4081,7 @@ if (!skipGeneration) {
       for (const span of spanPlans) {
         try {
           const takes = await withDeadline(
-            this.generateVeoTakes(span, projectId, heroSource, sceneByNumber, stillSourceFor),
+            this.generateVeoTakes(span, projectId, userId, heroSource, sceneByNumber, stillSourceFor, mode === 'faceless'),
             VEO_PREPASS_DEADLINE_MS,
             `Veo motion windows ${span.soraBlock}`,
           );
@@ -4011,6 +4089,20 @@ if (!skipGeneration) {
           trace(`veo_windows_ready project=${projectId} block=${span.soraBlock} scenes=[${span.sceneNumbers.join(',')}] windows=${takes.size}`);
         } catch (spanError: any) {
           trace(`veo_window_takes_failed project=${projectId} block=${span.soraBlock} error=${spanError?.message}`);
+          if (mode === 'faceless') {
+            // FACELESS FAILS SOFT (owner, Nov 10) — a deliberate change from Scene,
+            // where a missing motion take fails the scene and the whole project.
+            // For Faceless that is wrong: the owner has already paid for the OTHER
+            // window and would get nothing. The failed window uses its still, the
+            // video still finishes, and the reason is STATED on the scene and rolled
+            // up onto the project. This is not the silent template substitution the
+            // owner banned — the substitution is named.
+            for (const n of span.sceneNumbers) {
+              const sc = sceneByNumber.get(n);
+              if (sc?.id) await this.recordMotionFallback(sc.id, String(spanError?.message || spanError));
+            }
+            continue;
+          }
           const ids = span.sceneNumbers
             .map(n => scenes.find((s: any) => s.sceneNumber === n)?.id)
             .filter((id): id is string => Boolean(id));
@@ -4041,7 +4133,7 @@ if (!skipGeneration) {
           const takePath = takeRegistry.get(scene.sceneNumber);
           // Only the placement target(s) get the uploaded photo — never every scene.
           const sceneSourceImage = sourceImageTargetScenes.includes(scene.sceneNumber) ? heroSource : undefined;
-          await withDeadline(this.processScene(scene, userId, voice, tone, sceneSourceImage, takePath, voiceOpts), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
+          await withDeadline(this.processScene(scene, userId, voice, tone, sceneSourceImage, takePath, voiceOpts, mode), SCENE_DEADLINE_MS, `Scene ${scene.sceneNumber}`);
           return { status: 'fulfilled' as const };
         } catch (reason) {
           return { status: 'rejected' as const, reason };
@@ -4077,6 +4169,10 @@ if (!skipGeneration) {
     if (heroSource) {
       await this.recordSourceImageOutcome(projectId, sourceImageTargetScenes, pmeta);
     }
+    // FACELESS FAIL-SOFT ROLL-UP (owner, Nov 10): name the windows that lost their
+    // motion ON THE PROJECT, so "this video has 14s of motion, not 16s, and here is
+    // which window and why" is answerable from the record instead of invisible.
+    if (mode === 'faceless') await this.recordMotionFallbacks(projectId);
     const complete=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     if (complete.some(s=>s.status!=='completed')) {
       const failedCount = complete.filter(s=>s.status==='failed').length;
@@ -4439,7 +4535,7 @@ if (!skipGeneration) {
       trace(`source_image_outcome_failed project=${projectId} error=${e?.message}`);
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean },mode?: 'faceless'|'scene'):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       // Did the client's uploaded photo actually drive this scene's still? Recorded
@@ -4452,7 +4548,15 @@ if (!skipGeneration) {
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
       const subjectPrompt = buildSceneImagePrompt(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
-      if(scene.visualType==='still'){
+      // FACELESS FAIL-SOFT (owner, Nov 10): a Faceless motion window whose take
+      // never arrived renders its STILL instead of failing the scene. The still is
+      // the SAME designed frame the motion clip would have started from — it already
+      // carries the client's stated background — so the picture stays hers. Stated,
+      // not hidden: the scene and the project both record which window lost motion.
+      const facelessMotionFallback = mode === 'faceless'
+        && scene.visualType !== 'still'
+        && shouldRenderStillInstead(scene, mode, spanTakePath);
+      if(shouldRenderStillInstead(scene, mode, spanTakePath)){
         // STILL RETRIEVABILITY (owner Nov 2): pass the userId so renderImage also
         // writes the still to R2. A render's scene-1 still is otherwise unreachable
         // after the run (temp/scene-assets lives inside the container), which makes
@@ -4578,7 +4682,7 @@ else {
         assetUrl = uploaded.url || safeLocal;
       }
       const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
-      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sourceImageOutcome?{sourceImageUsed:sourceImageOutcome.used,sourceImageReference:sourceImageOutcome.reference,...(sourceImageOutcome.reason?{sourceImageSkippedReason:sourceImageOutcome.reason}:{})}:{}),...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
+      await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sourceImageOutcome?{sourceImageUsed:sourceImageOutcome.used,sourceImageReference:sourceImageOutcome.reference,...(sourceImageOutcome.reason?{sourceImageSkippedReason:sourceImageOutcome.reason}:{})}:{}),...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{}),...(facelessMotionFallback?{motionFallback:{usedStill:true,reason:String((scene.metadata as any)?.motionFallbackReason||'the Veo motion window did not return a clip')}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
     } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
@@ -4611,9 +4715,12 @@ else {
   private async generateVeoTakes(
     span: SoraSpan,
     projectId: string,
+    userId?: string,
     heroSource?: string,
     sceneByNumber?: Map<number, any>,
     sourceImageFor?: (sceneNumber: number) => string | undefined,
+    /** FACELESS: a failed window is STATED and falls back to its still, never fatal. */
+    softFail = false,
   ): Promise<Map<number, string>> {
     const takes = new Map<number, string>();
     const windows = span.windows ?? [];
@@ -4631,7 +4738,7 @@ else {
       }
       let p = stillPromises.get(sceneNumber);
       if (!p) {
-        p = this.renderSceneStillForMotion(scene, projectId, sourceImageFor?.(sceneNumber));
+        p = this.renderSceneStillForMotion(scene, projectId, sourceImageFor?.(sceneNumber), userId);
         stillPromises.set(sceneNumber, p);
       }
       return p;
@@ -4647,7 +4754,7 @@ else {
         // next picture to land on. A missing target fails LOUD (no silent drop).
         const lastFramePath = nextWindow ? await stillFor(nextWindow.sceneNumber) : undefined;
         const takePath = await this.generateOneVeoWindow(
-          span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath,
+          span, w, projectId, sceneKey, heroSource, scene, stillPath, lastFramePath, userId,
         );
         return { sceneNumber: w.sceneNumber, takePath, error: undefined as string | undefined };
       } catch (err: any) {
@@ -4658,9 +4765,17 @@ else {
     for (const o of outcomes) if (o.takePath) takes.set(o.sceneNumber, o.takePath);
     if (failures.length) {
       trace(`veo_windows_failed project=${projectId} block=${span.soraBlock} failed=[${failures.map((f) => f.sceneNumber).join(',')}] ok=${takes.size}`);
-      // Nothing succeeded → surface the REAL reason for the whole span (credentials
-      // vs service account vs retired model vs rejected image), never a bare count.
-      if (takes.size === 0) {
+      if (softFail) {
+        // FACELESS: name the window that lost its motion on ITS OWN scene record,
+        // then let it render its still. The reason reaches the client instead of
+        // being swallowed by a retry loop or a dead project.
+        for (const f of failures) {
+          const sc = sceneByNumber?.get(f.sceneNumber);
+          if (sc?.id) await this.recordMotionFallback(sc.id, String(f.error || 'no error detail'));
+        }
+      } else if (takes.size === 0) {
+        // Nothing succeeded → surface the REAL reason for the whole span (credentials
+        // vs service account vs retired model vs rejected image), never a bare count.
         throw new Error(failures.map((f) => f.error).filter(Boolean).join(' | ') || 'all Veo motion windows failed');
       }
     }
@@ -4679,6 +4794,7 @@ else {
     scene?: any,
     stillPathArg?: string,
     lastFramePath?: string,
+    userId?: string,
   ): Promise<string> {
     const spanPrompt = withSourceSubject(String(span.prompt || ''), heroSource || undefined);
     // What the call COSTS is the legal Veo duration; what the scene NEEDS is its own
@@ -4690,7 +4806,7 @@ else {
     // cannot be produced this throws LOUD — never a silent text-to-video downgrade.
     // The pre-pass resolves it (once per scene, shared with the previous clip's
     // lastFrame); the fallback keeps this method correct on its own.
-    const stillPath = stillPathArg || await this.renderSceneStillForMotion(scene, projectId);
+    const stillPath = stillPathArg || await this.renderSceneStillForMotion(scene, projectId, undefined, userId);
     let persistedOp: string | undefined = await this.loadVeoTakeOperation(projectId, sceneKey);
     let lastError: string | undefined;
     for (let attempt = 1; attempt <= VEO_WINDOW_MAX_ATTEMPTS; attempt++) {
@@ -4743,7 +4859,7 @@ else {
    *  with the client's uploaded photo as the reference subject. Cached on the scene
    *  metadata so a retry/regeneration never pays for the still twice, and so the
    *  record shows WHICH frame the motion began from. */
-  private async renderSceneStillForMotion(scene: any, projectId: string, sourceImage?: string): Promise<string> {
+  private async renderSceneStillForMotion(scene: any, projectId: string, sourceImage?: string, userId?: string): Promise<string> {
     if (!scene) throw new Error('scene record missing — cannot render the still the motion clip must start from');
     const cached = String((scene.metadata as any)?.motionStillPath || '');
     if (cached && fs.existsSync(cached)) return cached;
@@ -4754,9 +4870,13 @@ else {
     if (isDirectImageUrl(visualPrompt)) {
       stillPath = await ensureLocalFile(visualPrompt, `motion still scene ${scene.sceneNumber}`);
     } else {
+      // MOTION STILLS ARE RETRIEVABLE (owner, Nov 10): this used to pass `undefined`
+      // as the userId, so a motion still was never uploaded to R2 and the frame a
+      // Veo clip began from was unreachable after the run. Same call as the still
+      // path, which has always passed it.
       const result = await renderingEngine.renderImage(
         withSourceSubject(visualPrompt, usableSource),
-        undefined,
+        userId,
         usableSource,
         { size: '1024x1792', noText: true },
       );
@@ -4802,6 +4922,31 @@ else {
         .set({ metadata: { ...meta, motionCost: { billedSeconds: total, calls, usd: veoCostUsd(total), perWindow } }, updatedAt: new Date() })
         .where(eq(schema.videoProjects.id, projectId));
       trace(`veo_cost project=${projectId} window=${sceneKey} billed=${billedSeconds}s total=${total}s calls=${calls} usd=${veoCostUsd(total)}`);
+    } catch { /* best-effort */ }
+  }
+  /** FACELESS FAIL-SOFT: state, on the scene, that its motion window was lost and
+   *  why. The still is rendered in its place; nothing is hidden. */
+  private async recordMotionFallback(sceneId: string, reason: string): Promise<void> {
+    try {
+      await db.update(schema.videoScenes).set({
+        metadata: mergeCompletionMetadata(await liveSceneMetadata(sceneId, {}), { motionFallbackReason: reason }),
+        updatedAt: new Date(),
+      }).where(eq(schema.videoScenes.id, sceneId));
+      trace(`motion_window_fallback scene=${sceneId} reason=${reason}`);
+    } catch { /* best-effort */ }
+  }
+  /** Roll the per-scene fallbacks up onto the PROJECT so the client-facing record
+   *  says which window lost its motion and why. */
+  private async recordMotionFallbacks(projectId: string): Promise<void> {
+    try {
+      const rows: any[] = await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId, projectId));
+      const lost = rows
+        .filter((r) => (r.metadata as any)?.motionFallbackReason)
+        .map((r) => ({ sceneNumber: Number(r.sceneNumber), reason: String((r.metadata as any).motionFallbackReason) }));
+      if (!lost.length) return;
+      const meta = mergeCompletionMetadata(await liveProjectMetadata(projectId, {}), { motionFallbacks: lost });
+      await db.update(schema.videoProjects).set({ metadata: meta, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
+      trace(`motion_fallbacks project=${projectId} scenes=[${lost.map((l) => l.sceneNumber).join(',')}]`);
     } catch { /* best-effort */ }
   }
   /** Persist a Veo window's operation name in project metadata under `veoJobs[sceneKey]`

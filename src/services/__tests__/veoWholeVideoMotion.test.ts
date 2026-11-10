@@ -28,7 +28,8 @@
  *       slow-down, never a frozen tail) so picture and narration cannot drift.
  *   (7) THE REAL REASON — a failed window surfaces credentials / service account /
  *       retired model / rejected image, never a bare count.
- *   (8) FACELESS + TWIN — zero Veo calls, by construction.
+ *   (8) FACELESS carries motion now (owner, Nov 10 — rev 192): its own election,
+ *       two 8s calls = 16s, stills for everything else. TWIN is parked.
  *
  * ZERO PAID CALLS: fetch is fully mocked and every ffmpeg fixture is generated
  * locally from a 2-colour PNG.
@@ -282,17 +283,18 @@ test('CAP: capVeoMotionWindows keeps the whole 4 × 6s + 1 × 8s plan and demote
   assert.equal(VEO_MOTION_PLAN_CEILING_SECONDS, 32);
 });
 
-// ═══ (8) Faceless / Twin make ZERO Veo calls ═════════════════════════════════
-test('FACELESS/TWIN: the motion election is `mode === "scene"` only — zero Veo spend elsewhere', () => {
+// ═══ (8) FACELESS carries its own motion; SCENE keeps its election ══════════
+test('FACELESS: its own deterministic election (two 8s calls); SCENE keeps planVeoSceneSpans', () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src', 'services', 'sceneVideoPipelineService.ts'), 'utf8');
   const callSites = src.split('\n')
     .filter(l => l.includes('planVeoSceneSpans('))
     .filter(l => !l.includes('export function planVeoSceneSpans')); // the definition is not a call
   assert.equal(callSites.length, 1, 'planVeoSceneSpans has exactly ONE call site');
-  assert.ok(/mode === 'scene'\s*\?/.test(callSites[0]), 'and it is guarded by mode === "scene"');
-  // Faceless and Twin are Ken Burns: they never enter the Veo window pre-pass,
-  // because a span plan only exists for scene mode.
-  assert.ok(/let spanPlans = mode === 'scene' \?/.test(src), 'non-scene modes get an EMPTY span plan');
+  // FACELESS MOTION (owner, Nov 10 — rev 192): Faceless is no longer excluded from
+  // the Veo pre-pass. The guard is now a TWO-BRANCH choice — Scene keeps its
+  // whole-video election, Faceless gets the owner-approved 16s-in-two-8s-calls one.
+  assert.ok(/let spanPlans = mode === 'scene'\s*\n\s*\? capVeoMotionWindows\(planned, planVeoSceneSpans\(planned\)\)\.spans\s*\n\s*: planFacelessVeoSpans\(planned\);/.test(src),
+    'Scene → its own spans; Faceless → two 8s windows (16s)');
   assert.equal(src.split('veoVideoService.generateSceneVideo(').length - 1, 2,
     'exactly two Veo call sites (the per-window path and the legacy per-scene path)');
 });

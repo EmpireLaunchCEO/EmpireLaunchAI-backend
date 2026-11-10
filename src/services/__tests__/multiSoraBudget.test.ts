@@ -152,10 +152,15 @@ test('GPT may elect FEWER sora scenes than the budget (Sora only where motion is
   assert.ok(motion[0].visualPrompt.includes('BLOCK-1'));
 });
 
-test('Faceless mode ignores soraContent entirely (ZERO Sora — owner hard-lock)', () => {
+test('Faceless mode pairs NO soraContent block — the planner never buys Faceless motion', () => {
   const scenes = parseScenePlan(multiPlan, 'test subject', 60, 'faceless');
   assert.ok(scenes.length > 0);
-  assert.ok(scenes.every(s => s.visualType === 'still'), 'Faceless never keeps motion');
+  // FACELESS MOTION (owner, Nov 10 — rev 192): Faceless DOES carry motion now, but
+  // the PLANNER still never buys it — no soraContent block is paired here, so no
+  // scene can reach the Sora path. The still/motion split is elected downstream by
+  // planFacelessVeoSpans (hook + payoff, two 8s Veo calls = 16s).
+  assert.ok(scenes.every(s => s.soraBlock === undefined), 'Faceless never pairs a Sora block');
+  assert.ok(scenes.every(s => !String(s.visualPrompt).includes('BLOCK-')), 'no soraContent prompt leaks into a Faceless scene');
   // Scene-Based normalization still applies (exact sum), defensively.
   const normalized = normalizePlanTimeBudget(scenes, 60);
   assert.equal(normalized.reduce((a, s) => a + s.duration, 0), 60);
