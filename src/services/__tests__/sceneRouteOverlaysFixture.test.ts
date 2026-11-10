@@ -77,7 +77,10 @@ before(async () => {
   (db as any).select = () => ({
     from: () => ({
       where: () => ({
-        limit: async () => [{ id: USER_ID }],
+        // Scene-Based is parked for clients (owner Nov 9), so this fixture — which
+        // drives the REAL Scene route — must act as the OWNER, exactly as she would.
+        // A client here gets a 403 by design; sceneParked.test.ts proves that.
+        limit: async () => [{ id: USER_ID, email: 'stacipeabody@gmail.com', tier: 'OWNER_MASTER' }],
       }),
     }),
   });
