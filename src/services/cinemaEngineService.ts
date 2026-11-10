@@ -16,6 +16,7 @@ import {
 } from './sceneVideoPipelineService.js';
 import { transformTwinScriptToPitch, isInternalBriefEcho, extractCreativeEssence, finishedEssenceSentences } from './creativeTransformation.js';
 import { extractRequestedVisuals, enforceTwinDictation, userConversationText } from './requestedVisuals.js';
+import { isTwinAllowedForUser, TwinUnavailableError } from './twinAccess.js';
 import { TWIN_CANONICAL_BULLETS, appendBandToSvg, grammarizeYouBenefitSplice, sanitizeComponentSpliceFromNarration, twinBandMarkup, twinMoodStripMarkup } from './plannerFidelity.js';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { RunnableSequence } from '@langchain/core/runnables';
@@ -275,6 +276,13 @@ export class CinemaEngineService {
    */
   async createNeuralTwin(request: TwinCreationRequest): Promise<CinemaAsset> {
     const { userId, photoPath, photoUrl, script, voiceStyle, mood, duration, voice, conversation } = request;
+    // NEURAL TWIN IS PARKED (owner Nov 9). The Studio box is hidden from client
+    // accounts, but hiding is not closing: this is the ONE place every Twin
+    // render passes through, so the refusal is enforced here — before a single
+    // frame, image or second of audio is bought. Owner accounts are unaffected.
+    if (!(await isTwinAllowedForUser(userId))) {
+      throw new TwinUnavailableError();
+    }
     // CREATIVE TRANSFORMATION (owner Sep 28): the twin's script must be a FINISHED
     // pitch to potential clients, never a recital of the owner's typed brief or
     // the chat's internal structure. transformTwinScriptToPitch rewrites
