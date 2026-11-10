@@ -26,6 +26,7 @@ import { r2Storage } from './r2StorageService.js';
 import { refreshR2Url } from './approvalPayloadRefresh.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
 import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
+import { isSceneAllowedForUser, sceneParkedForRequest, SceneUnavailableError } from './sceneAccess.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
 import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences, containsLinkInBio, stripLinkInBioPhrases } from './creativeTransformation.js';
 // PLANNER OUTCOME (owner Nov 2): a bypassed planner must never look like a planned
@@ -3360,6 +3361,20 @@ function buildPlannerRequest(params: {
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
+    // SCENE-BASED IS PARKED (owner Nov 9). The Studio box is hidden from client
+    // accounts, but hiding is not closing: this is the ONE place every video
+    // project is created, so the refusal is enforced here — before the planner,
+    // before a single image, motion second or frame of audio is bought. Faceless
+    // is unaffected, and owner accounts are unaffected. A request that omits
+    // `mode` renders as Scene, so an omitted mode is refused too, not defaulted
+    // into a paid Scene render.
+    const mode: 'faceless' | 'scene' = input.mode === 'faceless' ? 'faceless' : 'scene';
+    // Only a Scene request is checked, so a Faceless render never pays for this
+    // lookup. The decision itself is the pure rule in sceneAccess.
+    const sceneAllowed = mode === 'scene' ? await isSceneAllowedForUser(input.userId) : true;
+    if (sceneParkedForRequest(mode, sceneAllowed)) {
+      throw new SceneUnavailableError();
+    }
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
     // The consultant UI may send its transcript as `idea`; isolate the actual
@@ -3389,7 +3404,6 @@ export class SceneVideoPipelineService {
     // An image is carried in its OWN planner section; listing it as a spoken
     // component too would re-route it to the voiceover (the F4 spoken rule).
     const inventoryForPlanner = inventory.filter((c) => !isRequestedImageryItem(c, requestedImagery));
-    const mode = input.mode === 'faceless' ? 'faceless' : 'scene';
     // Clamp to the 3-min cap (defense in depth — the route also rejects > MAX).
     const rawDuration = input.durationTarget && Number.isFinite(input.durationTarget) ? input.durationTarget : 30;
     const duration = clamp(Math.round(rawDuration), 1, MAX_SCENE_DURATION);
