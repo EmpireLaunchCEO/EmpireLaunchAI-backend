@@ -158,7 +158,16 @@ export function nearestLegalVeoSeconds(sceneSeconds: number): number {
  *
  * Pure + deterministic. Never exceeds VEO_MOTION_PLAN_CEILING_SECONDS (32s).
  */
-export function planVeoClipDurations(sceneCount: number): number[] {
+export function planVeoClipDurations(sceneCount: number, targetSeconds?: number): number[] {
+  // TARGET-SUM FORM (owner Nov 10): "16 seconds in two calls" is a SUM, not a
+  // count — the scene-shaped plan below cannot express it (n=2 → [6, 8] = 14s).
+  if (Number.isFinite(targetSeconds) && Number(targetSeconds) > 0) {
+    const planned = planVeoTargetSumDurations(
+      Number(targetSeconds),
+      Math.max(1, Math.floor(Number(sceneCount) || 1)),
+    );
+    if (planned.length) return planned;
+  }
   const n = Math.max(0, Math.min(Math.floor(Number(sceneCount) || 0), VEO_MAX_MOTION_WINDOWS));
   if (n === 0) return [];
   if (n === 1) return [VEO_CALL_SECONDS];
@@ -170,6 +179,45 @@ export function planVeoClipDurations(sceneCount: number): number[] {
 /** Total billed seconds for a plan (cost + the 32s ceiling check). */
 export function planVeoClipDurationsTotal(sceneCount: number): number {
   return planVeoClipDurations(sceneCount).reduce((a, b) => a + b, 0);
+}
+/**
+ * FACELESS MOTION BUDGET (owner-approved cost model, rev 192 — Nov 10):
+ * a 30-second Faceless video spends **16 seconds of Veo in TWO 8-second calls**
+ * and the other 14 seconds on stills. Before this, only CAPS existed (a 30s
+ * budget, a 5-window cap, and planVeoClipDurations(2) → [6, 8] = 14s), so there
+ * was no way to express "16 seconds total, in two calls".
+ */
+export const VEO_FACELESS_MOTION_TARGET_SECONDS = 16;
+export const VEO_FACELESS_MOTION_CALLS = 2;
+/**
+ * THE TARGET-SUM PLAN: legal Veo durations (4|6|8) summing to EXACTLY
+ * `targetSeconds` in at most `maxCalls` calls.
+ *
+ * Deterministic: fewest calls first, then the longest tier first, so 16s in two
+ * calls is exactly [8, 8] — never [6, 6, 4] and never the 14s [6, 8] the
+ * scene-shaped planner produces. Returns [] when the target cannot be expressed
+ * with the enum (the caller then falls back to a single legal clip).
+ */
+export function planVeoTargetSumDurations(targetSeconds: number, maxCalls: number = VEO_FACELESS_MOTION_CALLS): number[] {
+  const target = Math.round(Number(targetSeconds));
+  const cap = Math.max(1, Math.min(Math.floor(Number(maxCalls) || 1), VEO_MAX_MOTION_WINDOWS));
+  if (!Number.isFinite(target) || target <= 0) return [];
+  const legal = [...VEO_LEGAL_DURATIONS].sort((a, b) => b - a); // 8, 6, 4
+  const walk = (remaining: number, callsLeft: number, acc: number[]): number[] | null => {
+    if (remaining === 0) return acc;
+    if (callsLeft === 0 || remaining < 0) return null;
+    for (const d of legal) {
+      if (d > remaining) continue;
+      const out = walk(remaining - d, callsLeft - 1, [...acc, d]);
+      if (out) return out;
+    }
+    return null;
+  };
+  for (let calls = 1; calls <= cap; calls++) {
+    const plan = walk(target, calls, []);
+    if (plan) return plan;
+  }
+  return [];
 }
 export const VEO_ASPECT_RATIO = '9:16';
 export const VEO_RESOLUTION = '720p';
@@ -219,7 +267,23 @@ export const VEO_ERRORS = {
   lastFrameRejected:
     `${VEO_PROVIDER_TAG}: the LAST-FRAME image was REJECTED — this clip could not be steered to end on the next scene's designed still. ` +
     `The join target was NOT dropped and the call was NOT downgraded: the scene has no join-steered motion rather than an unaligned one.`,
+  /**
+   * CREATE OUTCOME UNKNOWN — the POST left this process and we never learned what
+   * Vertex did with it. The operation may exist and may be billing; we simply do not
+   * have its name, so we cannot resume it. Retrying would be a SECOND paid
+   * `predictLongRunning` for the same window, which is the one thing that must never
+   * happen: a create that may have reached the provider is NOT retryable as a new
+   * create. Deterministic — the caller stops and names it.
+   */
+  createUncertain:
+    `${VEO_PROVIDER_TAG}: CREATE OUTCOME UNKNOWN — the predictLongRunning POST was sent but the response never arrived (timeout or dropped connection). ` +
+    `Vertex may already be generating and billing this window, and its operation name is lost, so this window is NOT retried: a retry would be a SECOND paid operation for the same window.`,
 } as const;
+/** Loud, named failure for "the create POST may have reached Vertex but we have no
+ *  operation name" — carries the transport detail so the cause is diagnosable. */
+export function veoCreateUncertainMessage(detail: string): string {
+  return `${VEO_ERRORS.createUncertain} (transport: ${detail})`;
+}
 /** Loud, named failure for "the next scene's still (the join target) could not be read". */
 export function veoLastFrameMissingMessage(sceneKey: string, reason: string): string {
   return (
@@ -606,7 +670,7 @@ export class VeoVideoService {
    *   4. Poll (5s→10s backoff) until done / terminal error.
    *   5. Save the video (inline base64 — the Vertex path — or a signed https uri).
    */
-  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean; usedLastFrame?: boolean }> {
+  async generateSceneVideo(opts: VeoSceneGenerateOptions): Promise<{ success: boolean; error?: string; videoPath?: string; operationName?: string; billedSeconds?: number; estimatedUsd?: number; usedImage?: boolean; usedLastFrame?: boolean; createUncertain?: boolean }> {
     const model = VEO_MODEL;
     const billedSeconds = opts.durationSeconds ?? VEO_CALL_SECONDS;
     let operationName: string | undefined = opts.existingOperationName;
@@ -657,12 +721,26 @@ export class VeoVideoService {
         const createUrl = buildVeoCreateUrl(sa.project_id, model);
         console.log(`[Veo] veo_create_post model=${model} project=${sa.project_id} scene=${opts.sceneKey} dur=${billedSeconds}s image=${inputImage ? 'yes' : 'no'} lastFrame=${lastFrameImage ? 'yes' : 'no'}`);
         const token = await this.tokens.getAccessToken(sa);
-        const createRes = await fetch(createUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(60_000),
-        });
+        // NEVER PAY TWICE FOR ONE WINDOW (defect A2). Once the POST has left this
+        // process we cannot know whether Vertex accepted it. A timeout / dropped
+        // connection here used to fall through to the generic catch below, which
+        // returned an error with NO operationName — and isRetryableVeoFailure said
+        // "retryable", so generateOneVeoWindow fired a FRESH predictLongRunning
+        // while the first operation may still have been running and billing.
+        // A create whose outcome we never learned is deterministic: name it, stop.
+        let createRes: Response;
+        try {
+          createRes = await fetch(createUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(60_000),
+          });
+        } catch (createErr: any) {
+          const mapped = veoCreateUncertainMessage(`${createErr?.name || 'error'}: ${createErr?.message || 'no detail'}`);
+          console.error(`[Veo] veo_create_uncertain scene=${opts.sceneKey} dur=${billedSeconds}s error=${mapped}`);
+          return { success: false, error: mapped, operationName: undefined, createUncertain: true };
+        }
         if (!createRes.ok) {
           const text = await createRes.text().catch(() => '');
           // An image-bearing call rejected for image reasons gets its OWN message —

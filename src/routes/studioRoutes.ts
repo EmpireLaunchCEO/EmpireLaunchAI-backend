@@ -14,6 +14,7 @@ import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
+import { isSceneUnavailableError, sceneRefusalBody } from '../services/sceneAccess.js';
 import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
 import { validateOverlayPayload } from '../services/assemblyOverlays.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
@@ -1229,6 +1230,14 @@ router.post('/video-project', async (req: Request, res: Response) => {
     return res.status(202).json({ status: 'processing', projectId });
   } catch (error: any) {
     process.stderr.write(`[SCENE_PIPELINE] route_create_failed error=${error.message}\n`);
+    // SCENE-BASED IS PARKED (owner Nov 9): a non-owner asking for a Scene-Based
+    // video gets the plain-language reason with a 403, not a 500. The renderer is
+    // the choke point (sceneVideoPipelineService.createProject) — this only
+    // translates its typed refusal into the client-facing answer. No media was
+    // bought, so nothing was spent on the refusal.
+    if (isSceneUnavailableError(error)) {
+      return res.status(403).json(sceneRefusalBody());
+    }
     // PLANNING FAILURE (owner Nov 2): the brief could not be planned, so no video was
     // made. Answer with the client-facing reason and the recorded project id — never a
     // generic 500, and never a 202 for a render that will not happen.
@@ -1257,7 +1266,11 @@ router.get('/video-project/:id', async (req: Request, res: Response) => {
 });
 router.post('/scene/:id/regenerate', async (req: Request, res: Response) => {
   try { const userId = await resolveUserId(req.body.userId || (req as any).userId); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
-  catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
+  catch (error: any) {
+    // A parked-Scene refusal on regeneration is an answer, not a crash (owner Nov 9).
+    if (isSceneUnavailableError(error)) return res.status(403).json(sceneRefusalBody());
+    return res.status(500).json({ status: 'error', error: error.message });
+  }
 });
 
 /** List all video projects for the authenticated user (Operations page). */

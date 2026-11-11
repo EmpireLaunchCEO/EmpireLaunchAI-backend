@@ -294,9 +294,19 @@ export const createApproval = async (req: Request, res: Response) => {
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
-        // Render init must not fail the submission receipt / quota; log and
-        // continue so the user still gets a faceless approval row.
+        // NEVER HIDE A FAILED FACELESS RENDER (owner, Nov 10 — roadmap 69). This
+        // used to swallow the error and carry on: the client got a 201 with an
+        // `approved` receipt pointing at a project that does not exist, and the
+        // failure was invisible — including every Veo failure. The submission is
+        // answered honestly instead: the pipeline's own client-facing reason, the
+        // same 422 shape the studio route uses, and no receipt is written (so the
+        // weekly quota is not spent on a video that was never started).
         console.error('[Approval] Faceless render init failed:', renderErr?.message);
+        return res.status(422).json({
+          status: 'error',
+          error: renderErr?.clientMessage || renderErr?.message || 'Your video could not be started — nothing was generated and nothing was charged to your weekly quota. Please try again.',
+          code: renderErr?.code || 'RENDER_INIT_FAILED',
+        });
       }
     }
 
