@@ -29,7 +29,7 @@ import { aiRouter } from './aiRouter.js';
 import { r2Storage } from './r2StorageService.js';
 import { refreshR2Url } from './approvalPayloadRefresh.js';
 import { generateVideoExportVariants, VIDEO_EXPORT_VARIANTS } from './videoExportVariants.js';
-import { resolveVoice, ttsToneInstruction } from './voiceOptions.js';
+import { resolveVoice, resolveDeliveryTone, ttsToneInstruction } from './voiceOptions.js';
 import { isSceneAllowedForUser, sceneParkedForRequest, SceneUnavailableError } from './sceneAccess.js';
 import { ttsReadAloudInstruction } from './creativeTransformation.js';
 import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isChatResidueText, buildTransformationPlannerRule, capNarrationForScene, stripInstructionResidue, finishedEssenceBrief, finishedEssenceSentences, containsLinkInBio, stripLinkInBioPhrases } from './creativeTransformation.js';
@@ -4493,7 +4493,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       componentsFailure,
       missingComponents: qc.missingComponents,
     });
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',mood:input.mood||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
@@ -4532,6 +4532,10 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const mode = pmeta.mode === 'faceless' ? 'faceless' : 'scene';
     const voice = pmeta.voice as 'female' | 'male' | 'none' | undefined;
     const tone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
+    // MOOD REACHES THE VOICE (owner Nov 12): the picked mood must be HEARD, not
+    // just written into the planner prompt. generateSceneAudio derives the
+    // delivery tone from it when the client left tone on auto (explicit tone wins).
+    const mood = typeof pmeta.mood === 'string' && pmeta.mood.trim() !== '' ? pmeta.mood : undefined;
     const sourceImages: string[] = Array.isArray(pmeta.sourceImages)
       ? pmeta.sourceImages.filter((u: any) => typeof u === 'string' && u.length > 0)
       : [];
@@ -4552,7 +4556,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // (allowPlanSpeak, mirroring LINE_CHANGE) and read at a naturally brisk pace
     // (tighten pauses, never words) so all 8 lines land inside the band.
     const hasNarrationOverride = Array.isArray((pmeta.narrationOverride as any)?.script) && (pmeta.narrationOverride as any).script.length > 0;
-    const voiceOpts = { allowPlanSpeak: hasNarrationOverride, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: hasNarrationOverride };
+    const voiceOpts = { allowPlanSpeak: hasNarrationOverride, allowLinkInBio: pmeta.linkInBioAllowed === true, brisk: hasNarrationOverride, mood };
 if (!skipGeneration) {
       // VEO SPAN PRE-PASS (owner Sep 18 — Sora → Veo Lite): generate ONE Veo call PER
       // motion WINDOW before the scene loop (Lite caps a call at 6s — enum 4|6|8), then
@@ -5187,7 +5191,7 @@ if (!skipGeneration) {
       trace(`source_image_outcome_failed project=${projectId} error=${e?.message}`);
     }
   }
-  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean },mode?: 'faceless'|'scene'):Promise<void> {
+  async processScene(scene:any,userId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',sourceImage?: string,spanTakePath?: string,voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean; mood?: string },mode?: 'faceless'|'scene'):Promise<void> {
     trace(`scene_start id=${scene.id} number=${scene.sceneNumber}`); await db.update(schema.videoScenes).set({status:'generating',updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));
     try { let localPath:string; let mime='video/mp4';
       // Did the client's uploaded photo actually drive this scene's still? Recorded
@@ -5835,7 +5839,7 @@ else {
       trace(`scene_veo_operation_persist_failed scene=${sceneId} error=${err?.message}`);
     }
   }
-  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean }):Promise<{url?:string;localPath:string}> {
+  private async generateAudio(text:string,userId:string,sceneId:string,voice?: 'female'|'male'|'none',tone?: 'enthusiastic'|'calm'|'serious'|'warm'|'auto',voiceOpts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean; mood?: string }):Promise<{url?:string;localPath:string}> {
     return generateSceneAudio(text, userId, sceneId, voice, tone, voiceOpts);
   }
   async getProject(projectId:string,userId:string) {
@@ -6031,7 +6035,7 @@ export async function generateSceneAudio(
   sceneId: string,
   voice?: 'female' | 'male' | 'none',
   tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto',
-  opts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean },
+  opts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; brisk?: boolean; mood?: string },
 ): Promise<{ url?: string; localPath: string }> {
   // CONTENT HYGIENE (owner Sep 28): NEVER voice plan-speak. The pipeline and
   // auto-fix paths pass finished copy by construction; this is the last-mile
@@ -6070,9 +6074,18 @@ export async function generateSceneAudio(
   // RENDER #5 PREP (owner script): a brisk-pace helm for the dictated 8-line
   // script — tighten PAUSES, never words (the planner already sized scenes from
   // the spoken rooms; this keeps the read inside the 30s band).
+  // MOOD REACHES THE VOICE (owner Nov 12 — "pick Calm and the read is still the
+  // default lively one"): mood used to stop at the planner prompt. When the client
+  // left tone on auto/unset, the mood now decides the spoken delivery — one derived
+  // tone feeds BOTH the gpt-audio voice id and the read-aloud instruction, so they
+  // can never disagree. An explicit tone still wins (resolveDeliveryTone).
+  const deliveryTone = resolveDeliveryTone(tone, opts?.mood);
+  if (opts?.mood && (tone === undefined || tone === 'auto')) {
+    trace(`scene_audio_mood_delivery sceneId=${sceneId} mood=${opts.mood} tone=${deliveryTone}`);
+  }
   const readInstr = opts?.brisk
-    ? ttsReadAloudInstruction(tone) + ' Speak at a naturally brisk, energetic pace with minimal pauses — concise and punchy, but never rushed.'
-    : ttsReadAloudInstruction(tone);
+    ? ttsReadAloudInstruction(deliveryTone) + ' Speak at a naturally brisk, energetic pace with minimal pauses — concise and punchy, but never rushed.'
+    : ttsReadAloudInstruction(deliveryTone);
   // ---- Attempt 1: gpt-audio (owner's explicitly-enabled model) via Chat Completions ----
   // gpt-audio does NOT map to /v1/audio/speech (404 "Invalid URL"). It is an audio
   // chat model: POST /v1/chat/completions with modalities:['text','audio'] + audio:{voice,format}.
@@ -6083,7 +6096,7 @@ export async function generateSceneAudio(
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'gpt-audio', modalities: ['text', 'audio'],
-        audio: { voice: resolveVoice(g, tone), format: 'mp3' },
+        audio: { voice: resolveVoice(g, deliveryTone), format: 'mp3' },
         messages: [
           // TONE DIRECTION (task 316d1a2f): the gpt-audio chat model speaks the
           // user content in the style the system message sets — an energetic,
@@ -6107,7 +6120,7 @@ export async function generateSceneAudio(
         if (buf.length > 0) {
           const lp = path.join(dir, `${sceneId}.mp3`);
           fs.writeFileSync(lp, buf);
-          trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(g, tone)} sceneId=${sceneId}`);
+          trace(`scene_audio_model_ok model=gpt-audio voice=${resolveVoice(g, deliveryTone)} sceneId=${sceneId}`);
           const url = await uploadAudio(lp, 'audio/mpeg');
           return { url, localPath: lp };
         }
@@ -6129,7 +6142,7 @@ export async function generateSceneAudio(
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model, voice: resolveVoice(g, tone), input: text, response_format: 'mp3',
+        model, voice: resolveVoice(g, deliveryTone), input: text, response_format: 'mp3',
         // gpt-4o-mini-tts supports spoken-delivery instructions (tts-1/tts-1-hd ignore extras).
         ...(model === 'gpt-4o-mini-tts' ? { instructions: readInstr } : {}),
       }),
