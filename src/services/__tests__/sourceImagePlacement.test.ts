@@ -363,3 +363,58 @@ test('(e5) the placement module is the single implementation (no duplicate norma
   );
   assert.match(pipeline, /from '\.\/sourceImagePlacement\.js'/, 'the pipeline must import the shared contract');
 });
+
+// ─── (f) "blur my photo" is a TREATMENT, and her words must produce it ───────
+// Owner Nov 11 (rule 1, stated → use it exactly): "blur my photo into the
+// background" used to parse to `treatment: 'full'` — a SHARP, full-frame hero,
+// the exact opposite of what she said and of the sentence she is shown back. The
+// blurred instruction PR #158 added was therefore unreachable from chat.
+
+test('(f1) every way she asks for a blurred photo ⇒ treatment blurred-backdrop', () => {
+  const rows = [
+    'Use my photo as a blurred background for the whole video.',
+    'Blur the background of my photo and put it behind every scene.',
+    'Use the photo as a blurred backdrop.',
+    'Make my photo the background, blurred out, behind the whole video.',
+  ];
+  for (const sentence of rows) {
+    const p = parseSourceImagePlacement(sentence, CTX);
+    assert.ok(p, `"${sentence}" must still parse to a placement`);
+    assert.equal(p!.mode, 'background', `"${sentence}" ⇒ background`);
+    assert.equal(p!.treatment, 'blurred-backdrop', `"${sentence}" ⇒ blurred-backdrop, never a sharp hero`);
+  }
+});
+
+test('(f2) blur words that name no photo are a LOOK, not a treatment', () => {
+  // "soft focus throughout" describes the video, not the photo: the placement it
+  // sits next to stays a sharp full-frame photo.
+  const p = parseSourceImagePlacement('Use my photo as the background for the whole video. Soft focus throughout.', CTX);
+  assert.ok(p);
+  assert.equal(p!.mode, 'background');
+  assert.equal(p!.treatment, 'full', 'a bare look instruction must not silently blur the photo');
+
+  // And a blur word with no photo anywhere is not a placement at all.
+  assert.equal(parseSourceImagePlacement('Keep the whole thing soft focus throughout.', CTX), undefined);
+});
+
+test('(f3) the receipt she reads says BLURRED — the promise and the prompt agree', () => {
+  for (const sentence of [
+    'Use my photo as a blurred background for the whole video.',
+    'Blur the background of my photo and put it behind every scene.',
+    'Use the photo as a blurred backdrop.',
+    'Make my photo the background, blurred out, behind the whole video.',
+  ]) {
+    const p = parseSourceImagePlacement(sentence, CTX)!;
+    const targets = scenesForSourceImagePlacement(p, FIVE_SCENES);
+    assert.deepEqual(targets, [1, 2, 3, 4, 5], 'a blurred backdrop is behind EVERY scene');
+    assert.match(
+      describeSourceImagePlacement(p, targets),
+      /blurred background behind every scene/i,
+      `"${sentence}" must be described back as blurred`,
+    );
+    // …and the persisted per-scene projection carries the backdrop role, which is
+    // what the renderer reads to build the image/Veo prompt.
+    assert.equal(deriveSceneSourceImageMetadata(p, FIVE_SCENES)[3].role, 'backdrop');
+  }
+});
+
