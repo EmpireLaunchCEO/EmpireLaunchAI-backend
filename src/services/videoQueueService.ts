@@ -6,6 +6,7 @@
 
 import { db, schema } from '../db/index.js';
 import { eq, and, lt } from 'drizzle-orm';
+import { mediaToolTimeoutMs, mediaToolFailure } from './mediaToolDeadline.js';
 
 // ── Faceless engine (zero video API) ─────────────────────────────
 // Customize Video runs the same zero-video-API engine as Faceless videos
@@ -310,7 +311,7 @@ export function startVideoQueueWorker(): void {
                   fsMod.writeFileSync(audioFile, Buffer.from(aud.data as string, 'base64'));
                   const muxed = `${inputVideoPath}.voiced.mp4`;
                   await new Promise<void>((resolve, reject) => {
-                    execFile('ffmpeg', ['-y', '-i', inputVideoPath, '-i', audioFile, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxed], (err: Error | null) => err ? reject(err) : resolve());
+                    execFile('ffmpeg', ['-y', '-i', inputVideoPath, '-i', audioFile, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxed], { timeout: mediaToolTimeoutMs('ffmpeg') }, (err: any, _stdout: any, stderr: any) => err ? reject(mediaToolFailure('ffmpeg', 'videoQueueService.voiceoverMux', err, stderr)) : resolve());
                   });
                   if (fsMod.existsSync(muxed)) { videoPath = muxed; voiceoverPath = audioFile; fsMod.unlinkSync(audioFile); videoUrl = videoPath; }
                 }

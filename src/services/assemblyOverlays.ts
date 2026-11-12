@@ -24,6 +24,7 @@
  * fixture (assemblyOverlayFixture.test.ts).
  */
 import { execFileSync } from 'child_process';
+import { mediaToolTimeoutMs, isMediaToolTimeout } from './mediaToolDeadline.js';
 import fs from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -535,10 +536,13 @@ export function probeClipSeconds(file: string): number {
 
 function probeSeconds(file: string): number {
   try {
-    const d = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 1024 * 1024 }).toString().trim();
+    const d = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim();
     const n = parseFloat(d);
     return Number.isFinite(n) ? n : 0;
-  } catch { return 0; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[AssemblyOverlays] probeSeconds TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${file} — duration is unmeasurable`);
+    return 0;
+  }
 }
 
 /**
@@ -703,7 +707,7 @@ export function applyAssemblyOverlays(
       }
       if (!vf.length) {
         // Nothing to draw — pure passthrough copy (default OFF path).
-        execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', inputFile, '-map', '0:v', '-map', '0:a?', '-c', 'copy', outputFile], { maxBuffer: 64 * 1024 * 1024 });
+        execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', inputFile, '-map', '0:v', '-map', '0:a?', '-c', 'copy', outputFile], { maxBuffer: 64 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') });
         resolve();
         return;
       }
@@ -717,7 +721,7 @@ export function applyAssemblyOverlays(
         '-c:a', 'copy',
         outputFile,
       ];
-      execFileSync('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024 });
+      execFileSync('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') });
       resolve();
     } catch (e:any) {
       reject(new Error('applyAssemblyOverlays failed: ' + String(e?.message ?? e)));

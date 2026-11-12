@@ -39,6 +39,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFile, execFileSync } from 'child_process';
+import { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolFailure } from './mediaToolDeadline.js';
 
 // ─── Tunables (documented, deterministic) ────────────────────────────────────
 /** Frames searched at each end of a join. 12 @30fps = 0.4s — the owner's own
@@ -244,29 +245,32 @@ export function planJoinCuts(
 // ─── FFmpeg-backed helpers ───────────────────────────────────────────────────
 function runFfmpeg(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' }, (err, _stdout, stderr) => {
+    execFile('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024, encoding: 'buffer', timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
       const text = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : String(stderr || '');
-      if (err) reject(new Error(`ffmpeg ${args[0]} failed (code ${(err as any).code ?? ''}): ${text.split('\n').filter(Boolean).slice(-3).join(' ')}`));
+      if (err) reject(mediaToolFailure('ffmpeg', 'sceneJoinService.runFfmpeg', err, text));
       else resolve(text);
     });
   });
 }
 function runFfmpegRaw(args: string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    execFile('ffmpeg', args, { maxBuffer: 128 * 1024 * 1024, encoding: 'buffer' }, (err, stdout, stderr) => {
+    execFile('ffmpeg', args, { maxBuffer: 128 * 1024 * 1024, encoding: 'buffer', timeout: mediaToolTimeoutMs('ffmpeg') }, (err, stdout, stderr) => {
       if (err) {
         const text = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : String(stderr || '');
-        reject(new Error(`ffmpeg (raw) failed: ${text.split('\n').filter(Boolean).slice(-3).join(' ')}`));
+        reject(mediaToolFailure('ffmpeg', 'sceneJoinService.runFfmpegRaw', err, text));
       } else resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout || '')));
     });
   });
 }
 export function probeSecondsOf(file: string): number {
   try {
-    const d = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 1024 * 1024 }).toString().trim();
+    const d = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim();
     const n = parseFloat(d);
     return Number.isFinite(n) && n > 0 ? n : 0;
-  } catch { return 0; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[SceneJoin] probeSecondsOf TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${file} — duration is unmeasurable`);
+    return 0;
+  }
 }
 /** Does this clip carry an audio stream? Deterministic local ffprobe.
  *  WHY THIS EXISTS (owner Nov 4 launch render): every re-encode in this module
@@ -280,10 +284,13 @@ export function probeHasAudio(file: string): boolean {
     const out = execFileSync(
       'ffprobe',
       ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file],
-      { maxBuffer: 1024 * 1024 },
+      { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') },
     ).toString().trim();
     return out.length > 0;
-  } catch { return false; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[SceneJoin] probeHasAudio TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${file} — treating as no audio`);
+    return false;
+  }
 }
 
 /** ─── PICTURE INVARIANT (owner launch render #3, Nov 4 2026) ──────────────────
@@ -310,10 +317,13 @@ export function probeStreams(file: string): ClipStreams {
     const out = execFileSync(
       'ffprobe',
       ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file],
-      { maxBuffer: 1024 * 1024 },
+      { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') },
     ).toString();
     types = out.split('\n').map((s) => s.trim()).filter(Boolean);
-  } catch { types = []; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[SceneJoin] probeStreams TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${file} — no stream list, so the picture invariant will refuse the clip`);
+    types = [];
+  }
   return { hasVideo: types.includes('video'), hasAudio: types.includes('audio'), types };
 }
 
@@ -358,10 +368,13 @@ function audioCarryArgs(carry: boolean): string[] {
 
 export function probeFrameCount(file: string): number {
   try {
-    const out = execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 4 * 1024 * 1024 }).toString().trim();
+    const out = execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'default=noprint_wrappers=1:nokey=1', file], { maxBuffer: 4 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim();
     const n = parseInt(out, 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
-  } catch { return 0; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[SceneJoin] probeFrameCount TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${file} — frame count is unmeasurable`);
+    return 0;
+  }
 }
 
 /** blackdetect a clip and report ONLY its edge dips. */

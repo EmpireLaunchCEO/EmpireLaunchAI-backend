@@ -3,6 +3,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { r2Storage } from './r2StorageService.js';
+import { mediaToolTimeoutMs, mediaToolFailure } from './mediaToolDeadline.js';
 
 /**
  * Video Export Variants — pure-FFmpeg aspect-ratio refits (contain/pad, NO crop).
@@ -46,7 +47,8 @@ function trace(message: string) { process.stderr.write(`[EXPORT_VARIANTS] ${mess
  * target box, then center-pad the remaining space with letterbox/pillarbox bars.
  * Audio is carried through (re-encoded to aac) when present.
  */
-function refitVideo(input: string, output: string, w: number, h: number): Promise<void> {
+/** Exported so a fixture can prove a hung variant encode is killed, not waited on. */
+export function refitVideo(input: string, output: string, w: number, h: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const args = [
       '-y', '-i', input,
@@ -56,10 +58,9 @@ function refitVideo(input: string, output: string, w: number, h: number): Promis
       '-movflags', '+faststart',
       output,
     ];
-    execFile('ffmpeg', args, { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
+    execFile('ffmpeg', args, { maxBuffer: 32 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
       if (err) {
-        const tail = String(stderr || err.message).split('\n').filter(Boolean).slice(-4).join(' ');
-        reject(new Error(`ffmpeg variant exit ${err.code ?? ''}: ${tail}`));
+        reject(mediaToolFailure('ffmpeg', 'videoExportVariants.refitVideo', err, stderr || err.message));
       } else {
         resolve();
       }
