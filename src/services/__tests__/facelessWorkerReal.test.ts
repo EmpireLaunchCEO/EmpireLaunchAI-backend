@@ -14,6 +14,10 @@
  *   A5  a Faceless Veo call sends NO `lastFrame` (the xfade join never reads one).
  *   A6  a lost window reuses the SAME designed still its motion was seeded from —
  *       one image call, not two.
+ *   B1  a video whose storage upload failed is NOT written `completed` with a local
+ *       path, and the client gets a failed card that says why.
+ *   B2  the submission receipt reaches a terminal state (never 'processing' forever)
+ *       and the delivered card names the window that lost its motion.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +29,7 @@ import { db, schema } from '../../db/index.js';
 import { sceneVideoPipelineService, planFacelessVeoSpans, type SoraSpan } from '../sceneVideoPipelineService.js';
 import { renderingEngine } from '../renderingEngine.js';
 import { veoVideoService, VEO_ERRORS } from '../veoVideoService.js';
+import { r2Storage } from '../r2StorageService.js';
 
 const TMP = path.join(process.cwd(), 'temp', 'faceless-worker-real');
 fs.mkdirSync(TMP, { recursive: true });
@@ -158,7 +163,7 @@ function updateChain(table: any, yieldWriteMs?: number): any {
 }
 
 function installDb(
-  seed: { project: Row; scenes: Row[] },
+  seed: { project: Row; scenes: Row[]; approvals?: Row[] },
   onUpdate?: (table: any, values: any) => void,
   /** RACE SIMULATION (defect C3): make the store yield between a read and the write
    *  that follows it, so two concurrent read-modify-write cycles really do interleave
@@ -172,6 +177,9 @@ function installDb(
   store.clear();
   store.set(schema.videoProjects, [seed.project]);
   store.set(schema.videoScenes, seed.scenes);
+  // The submission receipt `createApproval` writes (B2) — the row the client never
+  // used to see. Seeded here so the real worker has to settle it.
+  store.set(schema.approvals, seed.approvals ?? []);
   anyDb.select = () => selectChain(raceOpts?.yieldRead);
   anyDb.update = (t: any) => updateChain(t, raceOpts?.yieldWriteMs);
   anyDb.insert = (t: any) => ({
@@ -236,6 +244,12 @@ function stubProviders(opts: {
   veo: (sceneNumber: number, call: any) => Promise<any> | any;
   onVeo?: (call: any) => void;
   onRender?: (prompt: string) => void;
+  /** Override the image result for a prompt (default: the designed still). */
+  image?: (prompt: string) => any;
+  /** Override the storage result. Default is a WORKING upload (a real http URL);
+   *  B1 passes `(p) => ({ url: p })` — the exact shape `uploadLocalFile` returns
+   *  when R2 is unavailable or the upload failed, which is what the defect is. */
+  storage?: (localPath: string) => { url: string; r2Key?: string };
   /** A REAL narration file, so the measured-narration path (and the growth it
    *  causes) runs on a measurement instead of being skipped. */
   audioPath?: string;
@@ -248,19 +262,33 @@ function stubProviders(opts: {
   const origAudio = Object.prototype.hasOwnProperty.call(svc, 'generateAudio') ? svc.generateAudio : undefined;
   engine.renderImage = async (prompt: string) => {
     opts.onRender?.(String(prompt));
-    return { success: true, imageUrl: STILL };
+    return opts.image?.(String(prompt)) ?? { success: true, imageUrl: STILL };
   };
   veo.generateSceneVideo = async (call: any) => {
     opts.onVeo?.(call);
     const n = Number(String(call.sceneKey).split('scene').pop());
     return opts.veo(n, call);
   };
+  // THE STORAGE BOUNDARY. R2 is unconfigured in the sandbox, so the REAL
+  // uploadLocalFile returns `{ url: localPath }` on every call — which would make
+  // every fixture here "fail to store" and measure B1 instead of what it is about.
+  // A test that is not about storage gets a working upload (an http URL, source
+  // left in place); B1 reproduces the real failure shape explicitly.
+  const r2: any = r2Storage;
+  const hadOwnAvailable = Object.prototype.hasOwnProperty.call(r2, 'isAvailable');
+  const origUploadLocal = r2.uploadLocalFile;
+  Object.defineProperty(r2, 'isAvailable', { configurable: true, get: () => true });
+  r2.uploadLocalFile = async (localPath: string) => (opts.storage
+    ? opts.storage(localPath)
+    : { url: `https://r2.example/${path.basename(localPath)}`, r2Key: `key-${path.basename(localPath)}` });
   // Narration is not what this file is about: no GPT-Audio call, no audio file.
   svc.generateAudio = async () => ({ localPath: opts.audioPath ?? path.join(TMP, 'no-audio.mp3') });
   return () => {
     engine.renderImage = origRender;
     veo.generateSceneVideo = origVeo;
     if (origAudio) svc.generateAudio = origAudio; else delete svc.generateAudio;
+    r2.uploadLocalFile = origUploadLocal;
+    if (!hadOwnAvailable) delete r2.isAvailable;
   };
 }
 
@@ -608,4 +636,122 @@ test('C3 — two concurrent windows both land on the ledger: two calls, $0.48', 
   // lost entry there means a resumed run would re-POST a window already paid for.
   assert.deepEqual(Object.keys(meta.veoJobs || {}).sort(), ['block0-scene1', 'block0-scene2'],
     `ONE WINDOW'S OPERATION VANISHED: ${JSON.stringify(meta.veoJobs)}`);
+});
+
+// ═══ B1/B2 — the receipt the client never saw, and the card that lied ═══════
+const RECEIPT_ID = 'receipt-faceless-1';
+/** The row `createApproval` writes before the paid work starts: status 'approved',
+ *  payload.status 'processing', filed under the projectId. `getPendingApprovals`
+ *  never returned it, so a failure was silent and a success was unannounced. */
+function submissionReceipt() {
+  return {
+    id: RECEIPT_ID,
+    userId: USER_ID,
+    type: 'faceless',
+    status: 'approved',
+    payload: { status: 'processing', projectId: PROJECT_ID, category: 'faceless-video' },
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+const approvalsOf = () => rowsOf(schema.approvals);
+const isHttp = (u: unknown): boolean => typeof u === 'string' && /^https?:\/\//i.test(u);
+
+test('B1 — a video that could not be stored is NOT completed, and the client is told why', async () => {
+  const { project, scenes } = facelessProject();
+  const restoreDb = installDb({ project, scenes, approvals: [submissionReceipt()] });
+  const restore = stubProviders({
+    veo: () => ({ success: true, videoPath: TAKE, billedSeconds: 8, operationName: 'op-s' }),
+    // THE REAL FAILURE SHAPE: uploadLocalFile returns the local path and never throws.
+    storage: (localPath) => ({ url: localPath }),
+  });
+  try {
+    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID);
+  } finally {
+    restore();
+    restoreDb();
+  }
+
+  const p = projectRow();
+  assert.equal(p.status, 'failed', `AN UNOPENABLE VIDEO WAS REPORTED COMPLETED: finalVideoUrl=${p.finalVideoUrl}`);
+  assert.equal(isHttp(p.finalVideoUrl), false, 'a container path is never published as the delivered video');
+  assert.match(String(p.metadata.error), /could not be stored/i, `the project states why: ${p.metadata.error}`);
+
+  // Not one row may claim completion while carrying a URL nobody can open.
+  const lies = approvalsOf().filter(
+    (a) => (a.status === 'completed' || a.payload?.status === 'completed') && !isHttp(a.payload?.videoUrl),
+  );
+  assert.deepEqual(lies.map((a) => a.id), [], 'a completed approval carries an unopenable videoUrl');
+
+  // THE CLIENT IS TOLD: a failed card carrying the reason, in a state the Operations
+  // feed returns (GET /api/approval/pending -> pending | completed | failed).
+  const failedCards = approvalsOf().filter((a) => a.payload?.status === 'failed');
+  assert.ok(failedCards.length >= 1, 'no failed card was written — the client would see silence');
+  for (const c of failedCards) assert.equal(c.status, 'failed', 'a failed card must be returned by the feed');
+  assert.ok(failedCards.some((c) => /could not be stored/i.test(String(c.payload.error))),
+    `the card carries the reason: ${JSON.stringify(failedCards.map((c) => c.payload))}`);
+
+  // AND THE RECEIPT IS TERMINAL — not 'processing' forever.
+  const receipt = approvalsOf().find((a) => a.id === RECEIPT_ID)!;
+  assert.equal(receipt.payload.status, 'failed', `the receipt never left 'processing': ${JSON.stringify(receipt.payload)}`);
+  assert.match(String(receipt.payload.error), /could not be stored/i, 'the receipt carries the reason');
+  assert.equal(receipt.status, 'failed', 'the receipt is returned by the feed so the client can read it');
+});
+
+test('B2 — the receipt reaches a terminal state and the delivered card names the window that lost its motion', async () => {
+  const { project, scenes } = facelessProject();
+  const restoreDb = installDb({ project, scenes, approvals: [submissionReceipt()] });
+  const restore = stubProviders({
+    veo: (n) => n === 1
+      ? { success: true, videoPath: TAKE, billedSeconds: 8, operationName: 'op-1' }
+      // Window 2's call fails: the video still finishes on its still (fail-soft),
+      // and the loss must reach the card.
+      : { success: false, error: `${VEO_ERRORS.imageRejected} (provider refused the frame)` },
+  });
+  try {
+    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID);
+  } finally {
+    restore();
+    restoreDb();
+  }
+
+  assert.equal(projectRow().status, 'completed', `the video still finishes: ${projectRow().metadata.error}`);
+
+  // (1) THE RECEIPT IS TERMINAL.
+  const receipt = approvalsOf().find((a) => a.id === RECEIPT_ID)!;
+  assert.equal(receipt.payload.status, 'completed',
+    `THE RECEIPT NEVER REACHED A TERMINAL STATE: ${JSON.stringify(receipt.payload)}`);
+
+  // (2) THE CARD NAMES THE LOST WINDOW — the master draft is what the client opens.
+  const master = approvalsOf().find((a) => a.type === 'video' && a.payload?.aspectRatio === '9:16');
+  assert.ok(master, 'the master draft was written');
+  assert.ok(isHttp(master!.payload.videoUrl), `the master carries an openable URL: ${master!.payload.videoUrl}`);
+  assert.deepEqual((master!.payload.motionFallbacks || []).map((m: any) => m.sceneNumber), [2],
+    `THE CARD DOES NOT NAME THE WINDOW THAT LOST ITS MOTION: ${JSON.stringify(master!.payload.motionFallbacks)}`);
+  assert.match(String(master!.payload.motionFallbacks[0].reason), /REJECTED|refused/i, 'and says why');
+});
+
+test('B2 — a render that fails mid-pipeline leaves a terminal receipt with the reason, not silence', async () => {
+  const { project, scenes } = facelessProject();
+  const restoreDb = installDb({ project, scenes, approvals: [submissionReceipt()] });
+  const restore = stubProviders({
+    // Scene 2's picture cannot be drawn, so its scene fails and nothing is delivered.
+    image: (prompt) => (/golden hour/i.test(prompt)
+      ? { success: false, error: 'image provider refused' }
+      : { success: true, imageUrl: STILL }),
+    veo: () => ({ success: true, videoPath: TAKE, billedSeconds: 8, operationName: 'op-f' }),
+  });
+  try {
+    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID);
+  } finally {
+    restore();
+    restoreDb();
+  }
+
+  assert.equal(projectRow().status, 'failed', 'the project is failed');
+  const receipt = approvalsOf().find((a) => a.id === RECEIPT_ID)!;
+  assert.equal(receipt.payload.status, 'failed',
+    `THE CLIENT WAS LEFT ON 'processing' FOREVER: ${JSON.stringify(receipt.payload)}`);
+  assert.ok(String(receipt.payload.error || '').length > 0, 'the receipt says why');
+  assert.equal(receipt.status, 'failed', 'and the feed returns it');
 });
