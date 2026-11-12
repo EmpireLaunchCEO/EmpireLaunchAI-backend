@@ -7,6 +7,48 @@ import { eq } from 'drizzle-orm';
 // Maximum conversation history messages to keep context under 128K tokens
 const MAX_HISTORY_MESSAGES = 12;
 
+// ── PLANNER DEADLINE (audit 11 Nov, defect 5) ───────────────────────────────
+// The planning call was the ONE unbounded wait in the pipeline: a stalled LLM
+// connection hung createProject INSIDE the HTTP request — no receipt, no project
+// row, no render, no message, and nothing on the project to explain it. Every
+// model call now carries a deadline, and a stall is a NAMED failure the route
+// can put in front of the client instead of a request that never returns.
+export const DEFAULT_PLANNER_TIMEOUT_MS = 60_000;
+
+/** The whole-call budget in ms. Env-overridable so a fixture can prove the
+ *  deadline in milliseconds instead of waiting a real minute. */
+export function plannerTimeoutMs(): number {
+  const raw = Number(process.env.PLANNER_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.max(50, Math.floor(raw));
+  return DEFAULT_PLANNER_TIMEOUT_MS;
+}
+
+/** Thrown when the planner never answered inside its deadline. The `code` is
+ *  stable so the AI router can recognise a stalled provider without matching
+ *  copy. The message is the ENGINEER-facing half; the client-facing sentence is
+ *  `plannerFailureNotice()`'s. */
+export class PlannerTimeoutError extends Error {
+  readonly code = 'PLANNER_TIMEOUT';
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(
+      `planner call TIMED OUT after ${timeoutMs}ms — the provider never answered, ` +
+      `so no plan was made, no scene was generated and no motion was purchased`,
+    );
+    this.name = 'PlannerTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Did this error come from a deadline we set (AbortSignal.timeout), rather
+ *  than from the provider answering badly? */
+export function isPlannerTimeout(err: unknown): boolean {
+  const e = err as any;
+  if (!e) return false;
+  if (e.code === 'PLANNER_TIMEOUT') return true;
+  return e.name === 'TimeoutError' || e.name === 'AbortError';
+}
+
 export class ReasoningEngine {
 
   /**
@@ -26,6 +68,16 @@ export class ReasoningEngine {
     }
     this.requestTimestamps.push(now);
 
+    // ONE budget for the whole call, shared by the primary and the fallback, so
+    // a stalled provider can never outlive the deadline. With a Gemini key
+    // configured the primary gets 60% of it, leaving the fallback a real chance
+    // to answer inside the SAME deadline.
+    const budgetMs = plannerTimeoutMs();
+    const deadline = Date.now() + budgetMs;
+    const remainingMs = () => Math.max(1, deadline - Date.now());
+    const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+    let stalled = false;
+
     // 1. Try GPT 5.2 (primary)
     const openaiKey = process.env.OPENAI_API_KEY;
     if (openaiKey) {
@@ -44,7 +96,8 @@ export class ReasoningEngine {
             ],
             temperature: 0.5,
             max_completion_tokens: 8192
-          })
+          }),
+          signal: AbortSignal.timeout(geminiKey ? Math.max(1, Math.ceil(budgetMs * 0.6)) : remainingMs()),
         });
         if (response.ok) {
           const data = await response.json();
@@ -57,17 +110,27 @@ export class ReasoningEngine {
         const errBody = await response.text().catch(() => '');
         console.warn(`[ReasoningEngine] GPT 5.2 failed: ${response.status} — ${errBody.slice(0, 200)}`);
       } catch (err) {
-        console.warn('[ReasoningEngine] GPT 5.2 error, falling back to Gemini:', (err as Error).message);
+        if (isPlannerTimeout(err)) {
+          stalled = true;
+          console.warn(`[ReasoningEngine] GPT 5.2 TIMED OUT (deadline ${budgetMs}ms)${geminiKey ? ' — trying Gemini inside the same deadline' : ''}`);
+        } else {
+          console.warn('[ReasoningEngine] GPT 5.2 error, falling back to Gemini:', (err as Error).message);
+        }
       }
     }
 
-    // 2. Fallback to Gemini 2.5 Flash
-    const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+    // 2. Fallback to Gemini 2.5 Flash — inside whatever is left of the deadline.
     if (geminiKey) {
-      const result = await this.tryGeminiModel('gemini-2.5-flash', `${systemPrompt}\n\n${userMessage}`, 0.5, 8192, geminiKey);
-      if (result) return result;
+      try {
+        const result = await this.tryGeminiModel('gemini-2.5-flash', `${systemPrompt}\n\n${userMessage}`, 0.5, 8192, geminiKey, remainingMs());
+        if (result) return result;
+      } catch (err) {
+        if (isPlannerTimeout(err)) stalled = true; else throw err;
+      }
     }
 
+    // A STALLED PROVIDER IS A NAMED FAILURE — never a hang, never a shrug.
+    if (stalled) throw new PlannerTimeoutError(budgetMs);
     throw new Error('AI services temporarily unavailable — both GPT 5.2 and Gemini are down.');
   }
 
@@ -75,7 +138,7 @@ export class ReasoningEngine {
    * Try a single Gemini model. Returns the response text, or null if it failed.
    * On 429 (rate limit), waits 1s and retries once before giving up.
    */
-  private async tryGeminiModel(model: string, prompt: string, temp: number, maxTokens: number, geminiKey: string): Promise<string | null> {
+  private async tryGeminiModel(model: string, prompt: string, temp: number, maxTokens: number, geminiKey: string, timeoutMs?: number): Promise<string | null> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${geminiKey}`;
@@ -85,7 +148,8 @@ export class ReasoningEngine {
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: prompt }] }],
             generationConfig: { temperature: temp, maxOutputTokens: maxTokens }
-          })
+          }),
+          signal: AbortSignal.timeout(Math.max(1, Math.floor(Number(timeoutMs) || plannerTimeoutMs()))),
         });
         if (response.ok) {
           const data = await response.json();
@@ -104,6 +168,10 @@ export class ReasoningEngine {
           console.warn(`[ReasoningEngine] Gemini ${model} HTTP ${response.status} — ${errBody.slice(0, 200)}`);
         }
       } catch (err) {
+        // A STALLED PROVIDER IS NOT A "null": it must reach the caller as a
+        // named timeout so the render fails loudly instead of being planned
+        // from a template nobody asked for.
+        if (isPlannerTimeout(err)) throw err;
         console.warn(`[ReasoningEngine] Gemini ${model} error:`, (err as Error).message);
       }
       return null;
@@ -161,6 +229,15 @@ export class ReasoningEngine {
       const temp = options?.temperature ?? 0.5;
       const maxTokens = options?.maxTokens ?? 8192;
 
+      // PLANNER DEADLINE (audit 11 Nov, defect 5): the router/planner call is
+      // the one the client waits on inside the HTTP request, so it gets a real
+      // deadline and a stall becomes a named failure, not a hung request.
+      const budgetMs = plannerTimeoutMs();
+      const deadline = Date.now() + budgetMs;
+      const remainingMs = () => Math.max(1, deadline - Date.now());
+      const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+      let stalled = false;
+
       // 1. Try GPT 5.2 (primary)
       const openaiKey = process.env.OPENAI_API_KEY;
       if (openaiKey) {
@@ -176,7 +253,8 @@ export class ReasoningEngine {
               messages: [{ role: 'user', content: prompt }],
               temperature: temp,
               max_completion_tokens: maxTokens
-            })
+            }),
+            signal: AbortSignal.timeout(geminiKey ? Math.max(1, Math.ceil(budgetMs * 0.6)) : remainingMs()),
           });
           if (response.ok) {
             const data = await response.json();
@@ -189,17 +267,26 @@ export class ReasoningEngine {
           const errBody = await response.text().catch(() => '');
           console.warn(`[ReasoningEngine] GPT 5.2 failed (reason): ${response.status} — ${errBody.slice(0, 200)}`);
         } catch (err) {
-          console.warn('[ReasoningEngine] GPT 5.2 error (reason), falling back to Gemini:', (err as Error).message);
+          if (isPlannerTimeout(err)) {
+            stalled = true;
+            console.warn(`[ReasoningEngine] GPT 5.2 TIMED OUT (deadline ${budgetMs}ms)${geminiKey ? ' — trying Gemini inside the same deadline' : ''}`);
+          } else {
+            console.warn('[ReasoningEngine] GPT 5.2 error (reason), falling back to Gemini:', (err as Error).message);
+          }
         }
       }
 
-      // 2. Fallback to Gemini
-      const geminiKey = process.env.GOOGLE_STUDIO_API_KEY || process.env.GOOGLE_API_KEY;
+      // 2. Fallback to Gemini — inside whatever is left of the deadline.
       if (geminiKey) {
-        const result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey);
-        if (result) return result;
+        try {
+          const result = await this.tryGeminiModel('gemini-2.5-flash', prompt, temp, maxTokens, geminiKey, remainingMs());
+          if (result) return result;
+        } catch (err) {
+          if (isPlannerTimeout(err)) stalled = true; else throw err;
+        }
       }
 
+      if (stalled) throw new PlannerTimeoutError(budgetMs);
       throw new Error('AI services temporarily unavailable — both GPT 5.2 and Gemini are down.');
     } catch (err) {
       console.error('[ReasoningEngine] reason failed:', (err as Error).message);

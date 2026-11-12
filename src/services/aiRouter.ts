@@ -1,4 +1,4 @@
-import { reasoningEngine } from './reasoningEngine.js';
+import { reasoningEngine, isPlannerTimeout } from './reasoningEngine.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -82,6 +82,13 @@ export class AiRouterService {
       return this.applyDeterministicOverrides(this.parseDecision(raw), request);
     } catch (err: any) {
       console.error('[AiRouter] AI routing failed:', err.message);
+      // A STALLED PROVIDER IS NOT AN ANSWER (audit 11 Nov, defect 5). In generate
+      // mode this call IS the planner: a timeout must reach the pipeline as a
+      // planning failure it can name in plain words ("the step that writes your
+      // shot list could not be reached"), never be reshaped into a chat-shaped
+      // decision that mislabels why the video was not made. Consult mode keeps
+      // degrading to a conversational reply, because a chat is not a plan.
+      if (request.mode !== 'consult' && isPlannerTimeout(err)) throw err;
       // Preserve explicit generation intent even when the model is unavailable.
       return this.applyDeterministicOverrides({
         classification: 'ai_assistant',

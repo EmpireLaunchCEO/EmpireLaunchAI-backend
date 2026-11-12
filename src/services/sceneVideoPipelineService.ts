@@ -233,23 +233,67 @@ function withProjectMetadataLock<T>(projectId: string, fn: () => Promise<T>): Pr
   });
   return run;
 }
+/**
+ * MEDIA DEADLINES (audit 11 Nov, defect 5). Every ffmpeg/ffprobe child in this
+ * file used to run unbounded: a wedged process hung the render request, and the
+ * SYNCHRONOUS probes (`execFileSync`) blocked the whole event loop for every
+ * other user. Each call now carries a deadline; a timeout is a NAMED failure
+ * with a readable reason, never a hang. Both are env-overridable so a fixture
+ * can prove the deadline in milliseconds instead of waiting minutes.
+ */
+const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
+const DEFAULT_FFPROBE_TIMEOUT_MS = 30_000;
+
+export function mediaToolTimeoutMs(tool: 'ffmpeg' | 'ffprobe'): number {
+  const raw = Number(process.env[tool === 'ffprobe' ? 'FFPROBE_TIMEOUT_MS' : 'FFMPEG_TIMEOUT_MS']);
+  const fallback = tool === 'ffprobe' ? DEFAULT_FFPROBE_TIMEOUT_MS : DEFAULT_FFMPEG_TIMEOUT_MS;
+  return Number.isFinite(raw) && raw > 0 ? Math.max(50, Math.floor(raw)) : fallback;
+}
+
+/** Did this child die because WE killed it at its deadline? */
+export function isMediaToolTimeout(err: any): boolean {
+  if (!err) return false;
+  return err.killed === true || err.signal === 'SIGTERM' || err.code === 'ETIMEDOUT' || String(err.code || '') === 'ETIMEDOUT';
+}
+
+/** The one shape a killed-at-deadline media call fails with. */
+export function mediaToolTimeoutError(tool: 'ffmpeg' | 'ffprobe', label: string): Error {
+  return new Error(
+    `${tool} TIMED OUT after ${mediaToolTimeoutMs(tool)}ms and was killed (${label}) — ` +
+    `the step failed with this reason instead of hanging the request`,
+  );
+}
+
+/** execFile failure → one Error, preserving the long-standing "exited with
+ *  code" wording for real failures and naming the deadline for timeouts. */
+function mediaToolFailure(tool: 'ffmpeg' | 'ffprobe', label: string, err: any, stderr: unknown): Error {
+  if (isMediaToolTimeout(err)) return mediaToolTimeoutError(tool, label);
+  return new Error(
+    `${tool} exited with code ${err?.code ?? ''}: ` +
+    String(stderr || err?.message || '').split('\n').filter(Boolean).slice(-3).join(' '),
+  );
+}
+
 function inputHasAudio(input: string): boolean {
   try {
     return execFileSync('ffprobe', [
       '-v', 'error', '-select_streams', 'a:0',
       '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', input,
-    ], { maxBuffer: 1024 * 1024 }).toString().trim().length > 0;
-  } catch {
+    ], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim().length > 0;
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[ScenePipeline] inputHasAudio TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${input} — treating as no audio`);
     return false;
   }
 }
-function probeDuration(input: string): number {
+/** Exported so a fixture can prove a wedged ffprobe is bounded (defect 5). */
+export function probeDuration(input: string): number {
   try {
     return Number(execFileSync('ffprobe', [
       '-v', 'error', '-show_entries', 'format=duration',
       '-of', 'default=noprint_wrappers=1:nokey=1', input,
-    ], { maxBuffer: 1024 * 1024 }).toString().trim()) || 0;
-  } catch {
+    ], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim()) || 0;
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[ScenePipeline] probeDuration TIMED OUT after ${mediaToolTimeoutMs('ffprobe')}ms on ${input} — duration is unmeasurable`);
     return 0;
   }
 }
@@ -311,7 +355,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
       '-v','error','-select_streams','v:0','-show_entries',
       'stream=r_frame_rate,nb_frames,codec_name,width,height',
       '-of','json', media,
-    ], { maxBuffer: 4 * 1024 * 1024 }).toString();
+    ], { maxBuffer: 4 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString();
     const v = JSON.parse(fmt).streams?.[0] || {};
     report.video = { codec: v.codec_name, width: v.width, height: v.height, r_frame_rate: v.r_frame_rate, nb_frames: v.nb_frames };
     // r_frame_rate == 30/1 assert
@@ -331,7 +375,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
     // (source/talent bleed) regardless of voice choice.
     const aList = execFileSync('ffprobe', [
       '-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0', media,
-    ], { maxBuffer: 1024 * 1024 }).toString().trim().split('\n').filter(Boolean);
+    ], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim().split('\n').filter(Boolean);
     report.audioStreams = aList.length;
     const allowSilent = Boolean(opts?.allowSilent);
     if (aList.length > 1 || (aList.length === 0 && !allowSilent)) { report.ok = false; report.flags.push(aList.length === 0 ? 'no_audio' : 'multi_audio_streams'); }
@@ -339,7 +383,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
     try {
       const scene = execFileSync('ffmpeg', [
         '-i', media, '-vf', "select='gt(scene,0.4)'", '-f', 'null', '-',
-      ], { maxBuffer: 1024 * 1024 }).toString();
+      ], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }).toString();
       // ffmpeg writes "Parsed_select" once per selected frame to stderr; count them.
       const hardCuts = (scene.match(/Parsed_select/g) || []).length;
       report.hardCuts = hardCuts;
@@ -353,7 +397,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
     try {
       const sil = execFileSync('ffmpeg', [
         '-i', media, '-af', 'silencedetect=noise=-35dB:d=1', '-f', 'null', '-',
-      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      ], { maxBuffer: 2 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }).toString();
       report.silenceCount = (sil.match(/silence_(start|end)/g) || []).length;
       if ((report.silenceCount || 0) > 0) { report.ok = false; report.flags.push('silence_detected'); }
     } catch { report.silenceCount = -1; }
@@ -361,7 +405,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
     try {
       const fz = execFileSync('ffmpeg', [
         '-i', media, '-vf', 'freezedetect=n=-60dB:d=2', '-f', 'null', '-',
-      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      ], { maxBuffer: 2 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }).toString();
       report.freezeCount = (fz.match(/freeze_(start|end)/g) || []).length;
       if ((report.freezeCount || 0) > 0) { report.ok = false; report.flags.push('freeze_detected'); }
     } catch { report.freezeCount = -1; }
@@ -371,7 +415,7 @@ export function runRenderQC(media: string, opts?: { allowSilent?: boolean; match
     try {
       const blk = execFileSync('ffmpeg', [
         '-i', media, '-vf', 'blackdetect=d=0.1:pix_th=0.10', '-f', 'null', '-',
-      ], { maxBuffer: 2 * 1024 * 1024 }).toString();
+      ], { maxBuffer: 2 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }).toString();
       report.blackCount = (blk.match(/black_(start|end)/g) || []).length;
       if ((report.blackCount || 0) > 0) { report.ok = false; report.flags.push('black_frame_detected'); }
     } catch { report.blackCount = -1; }
@@ -526,8 +570,8 @@ export function renderClip(input: string, output: string, duration: number, audi
     // outlive its own scene, so the assembler cannot bleed it over the next one.
     if (audio) inputs.push('-af', `atrim=0:${String(extending ? audioDur : effective)},asetpts=N/SR/TB,apad=whole_dur=${String(effective)}`);
     inputs.push('-y',output);
-    execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
-      if(err) reject(new Error('ffmpeg exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+    execFile('ffmpeg',inputs,{maxBuffer:32*1024*1024, timeout: mediaToolTimeoutMs('ffmpeg')},(err,_stdout,stderr)=>{
+      if(err) reject(mediaToolFailure('ffmpeg', 'renderClip', err, stderr));
       else resolve();
     });
   });
@@ -551,9 +595,11 @@ export function sliceSoraTake(input: string, output: string, offsetSec: number, 
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       output,
-    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      if (err) reject(new Error('ffmpeg slice exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
-      else resolve();
+    ], { maxBuffer: 32 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
+      if (err) {
+        if (isMediaToolTimeout(err)) reject(mediaToolTimeoutError('ffmpeg', 'sliceSoraTake'));
+        else reject(new Error('ffmpeg slice exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      } else resolve();
     });
   });
 }
@@ -573,9 +619,11 @@ export function padClipToDuration(input: string, targetSec: number): Promise<voi
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       out,
-    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      if (err) reject(new Error('ffmpeg tpad exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
-      else {
+    ], { maxBuffer: 32 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
+      if (err) {
+        if (isMediaToolTimeout(err)) reject(mediaToolTimeoutError('ffmpeg', 'padClipToDuration'));
+        else reject(new Error('ffmpeg tpad exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      } else {
         try { fs.renameSync(out, input); resolve(); }
         catch (e) { reject(e); }
       }
@@ -644,7 +692,7 @@ export function fitClipToDuration(input: string, targetSec: number): Promise<voi
   const out = `${input}.fit.mp4`;
   const probeSeconds = (f: string): number => {
     try {
-      const d = execFileSync('ffprobe', ['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1', f], { maxBuffer: 1024 * 1024 }).toString().trim();
+      const d = execFileSync('ffprobe', ['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1', f], { maxBuffer: 1024 * 1024, timeout: mediaToolTimeoutMs('ffprobe') }).toString().trim();
       const n = parseFloat(d);
       return Number.isFinite(n) && n > 0 ? n : 0;
     } catch { return 0; }
@@ -665,9 +713,11 @@ export function fitClipToDuration(input: string, targetSec: number): Promise<voi
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       out,
-    ], { maxBuffer: 32 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      if (err) reject(new Error('ffmpeg fit exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
-      else {
+    ], { maxBuffer: 32 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
+      if (err) {
+        if (isMediaToolTimeout(err)) reject(mediaToolTimeoutError('ffmpeg', 'fitClipToDuration'));
+        else reject(new Error('ffmpeg fit exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      } else {
         try { fs.renameSync(out, input); resolve(); }
         catch (e) { reject(e); }
       }
@@ -686,9 +736,12 @@ export function measureTrueSpeechEndMs(file: string): number {
   try {
     pcm = execFileSync(
       'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-ac', '1', '-ar', '22050', '-f', 'f32le', '-'],
-      { maxBuffer: 64 * 1024 * 1024 },
+      { maxBuffer: 64 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') },
     );
-  } catch { return 0; }
+  } catch (err) {
+    if (isMediaToolTimeout(err)) console.warn(`[ScenePipeline] measureTrueSpeechEndMs TIMED OUT after ${mediaToolTimeoutMs('ffmpeg')}ms on ${file} — keeping the planned window`);
+    return 0;
+  }
   const arr = new Float32Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 4));
   const TH = 0.006; // -44 dBFS
   for (let i = arr.length - 1; i >= 0; i--) {
@@ -873,17 +926,17 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
   }
   const probe = (f: string): { seconds: number; hasAudio: boolean; audioSeconds: number } => {
     try {
-      const dur = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
+      const dur = execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024,timeout:mediaToolTimeoutMs('ffprobe')}).toString().trim();
       const seconds = Number.isFinite(parseFloat(dur)) ? parseFloat(dur) : 3;
       let hasAudio = false;
       let audioSeconds = 0;
       try {
-        const a = execFileSync('ffprobe',['-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0',f],{maxBuffer:1024*1024}).toString().trim();
+        const a = execFileSync('ffprobe',['-v','error','-select_streams','a','-show_entries','stream=codec_type','-of','csv=p=0',f],{maxBuffer:1024*1024,timeout:mediaToolTimeoutMs('ffprobe')}).toString().trim();
         hasAudio = a.length > 0;
         if (hasAudio) {
           // Duration of the FIRST audio stream (the narration track); falls back
           // to the container duration when the stream duration is unavailable.
-          const ad = execFileSync('ffprobe',['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024}).toString().trim();
+          const ad = execFileSync('ffprobe',['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','default=noprint_wrappers=1:nokey=1',f],{maxBuffer:1024*1024,timeout:mediaToolTimeoutMs('ffprobe')}).toString().trim();
           const aDur = parseFloat(ad);
           audioSeconds = Number.isFinite(aDur) && aDur > 0 ? aDur : seconds;
         }
@@ -1128,8 +1181,9 @@ export function concatClips(inputs: string[], output: string, opts?: ConcatOptio
       args.push('-filter_complex', fc, '-map', videoMapLabel);
       if (audioMap) { args.push('-map', audioMap, '-c:a','aac','-b:a','128k'); }
       args.push('-t', totalSec, '-c:v','libx264','-pix_fmt','yuv420p','-r','30','-y',output);
-      execFile('ffmpeg',args,{maxBuffer:32*1024*1024},(err,_stdout,stderr)=>{
-        if(err) reject(new Error((matchCutReport ? 'ffmpeg match-cut concat' : 'ffmpeg xfade') + ' exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
+      execFile('ffmpeg',args,{maxBuffer:32*1024*1024, timeout: mediaToolTimeoutMs('ffmpeg')},(err,_stdout,stderr)=>{
+        if (err && isMediaToolTimeout(err)) reject(mediaToolTimeoutError('ffmpeg', 'concatClips'));
+        else if(err) reject(new Error((matchCutReport ? 'ffmpeg match-cut concat' : 'ffmpeg xfade') + ' exited with code '+(err.code??'')+': '+String(stderr||err.message).split('\n').filter(Boolean).slice(-4).join(' ')));
         else resolve(matchCutReport);
       });
     })();
