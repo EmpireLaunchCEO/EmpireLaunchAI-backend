@@ -169,12 +169,17 @@ export function buildDraftBase(
   qc?: Record<string, unknown> | null,
 ): Record<string, unknown> {
   const mode = pmeta?.mode === 'faceless' ? 'faceless' : 'scene';
+  // A LOST VEO WINDOW MUST REACH THE CARD (defect B2). The project records which
+  // window fell back to its still and why; without it on the draft payload the
+  // client is told nothing and a 14-second-motion video looks like a 16-second one.
+  const motionFallbacks = (pmeta as any)?.motionFallbacks;
   return {
     projectId,
     mode,
     provider: 'ffmpeg',
     saved: false,
     ...(mode === 'faceless' ? { category: 'faceless-video' } : {}),
+    ...(Array.isArray(motionFallbacks) && motionFallbacks.length ? { motionFallbacks } : {}),
     ...(qc ? { qc } : {}),
   };
 }
@@ -4460,6 +4465,10 @@ if (!skipGeneration) {
         metadata: mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), { failedSceneCount: failedCount, totalScenes: complete.length }),
         updatedAt:new Date()
       }).where(eq(schema.videoProjects.id,projectId));
+      await this.settleSubmissionReceipt(projectId, userId, {
+        status: 'failed',
+        error: `${failedCount} of ${complete.length} scenes could not be rendered — this video was not delivered`,
+      });
       return;
     }
 
@@ -4695,6 +4704,49 @@ if (!skipGeneration) {
         try { const uploaded=await r2Storage.uploadLocalFile(assembled,userId,'video-projects','video/mp4'); finalUrl=uploaded.url||assembled; primaryR2Key=uploaded.r2Key; }
         catch(r2Err:any) { trace(`r2_upload_failed project=${projectId} error=${r2Err.message}`); }
       }
+      // ── AN UNOPENABLE VIDEO IS NOT A FINISHED VIDEO (defect B1) ──────────
+      // `uploadLocalFile` returns `{ url: localPath }` on BOTH of its failure modes
+      // (R2 unavailable / source missing, and the upload itself failing) instead of
+      // throwing, so `finalUrl` silently stayed a container path such as
+      // /app/temp/scene-projects/<id>/final.mp4. Writing that as `completed` is a
+      // lie the client pays for: nothing downstream can open a non-http URL — the
+      // Operations card's isUsableMediaUrl rejects it (Save and Download dead, no
+      // explanation) and the stream route has no R2 key to resolve. So a reachable
+      // URL is REQUIRED here, outside the isAvailable block, and its absence is a
+      // failed delivery with a reason the client can read.
+      if (!isRemoteUrl(finalUrl)) {
+        const reason = 'Video assembled but could not be stored — no reachable URL';
+        trace(`project_store_failed project=${projectId} finalUrl=${finalUrl}`);
+        await db.update(schema.videoProjects).set({
+          status: 'failed',
+          metadata: mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta), { error: reason, sceneCount: complete.length }),
+          updatedAt: new Date(),
+        }).where(eq(schema.videoProjects.id, projectId));
+        await this.settleSubmissionReceipt(projectId, userId, { status: 'failed', error: reason });
+        // ONE honest card, so the client reads WHY instead of finding a dead Save.
+        try {
+          await db.insert(schema.approvals).values({
+            id: uuidv4(),
+            userId,
+            type: 'video',
+            status: 'failed',
+            payload: {
+              assetId: uuidv4(),
+              title: String((projectRow as any)?.title || 'Faceless Video'),
+              status: 'failed',
+              error: reason,
+              platforms: [],
+              ...buildDraftBase(projectId, pmeta, qc),
+            },
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+          trace(`store_failure_card project=${projectId}`);
+        } catch (cardErr: any) {
+          trace(`store_failure_card_failed project=${projectId} err=${cardErr?.message}`);
+        }
+        return;
+      }
       const delivered = resolveDeliveredDuration({ qcDuration: qc?.duration, sceneRows: complete });
       if (delivered.source === 'projected') trace(`delivered_duration_projected project=${projectId} reason=render_qc_unavailable`);
       const completeMeta: Record<string, any> = {
@@ -4712,6 +4764,7 @@ if (!skipGeneration) {
       };
       if (variantIssue) completeMeta.variantExportError = variantIssue;
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:completeMeta}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
+      await this.settleSubmissionReceipt(projectId, userId, { status: 'completed' });
       // ── Deliver to Operations page AS DRAFTS (owner auto-save change) ────
       //    Videos + variants do NOT auto-go to the Library. They land in Operations
       //    as draft approval rows; the client previews/downloads there and taps
@@ -4736,7 +4789,10 @@ if (!skipGeneration) {
         // carry category:'faceless-video' (consistent with the receipt) so the
         // Operations queue classifies them into the Faceless box. saved:false
         // flags drafts as not-yet-in-Library.
-        const draftBase = buildDraftBase(projectId, pmeta, qc);
+        // LIVE metadata, not the process-start snapshot: `motionFallbacks` is
+        // written by recordMotionFallbacks() AFTER `pmeta` was taken, so the
+        // snapshot can never carry it and the card could never name the window.
+        const draftBase = buildDraftBase(projectId, await liveProjectMetadata(projectId, pmeta), qc);
 
         // Primary 9:16 master — labelled "Vertical · TikTok" alongside variants.
         await db.insert(schema.approvals).values({
@@ -4800,6 +4856,7 @@ if (!skipGeneration) {
     } catch(assemblyErr:any) {
       trace(`assembly_failed project=${projectId} error=${assemblyErr.message}`);
       await db.update(schema.videoProjects).set({status:'failed',metadata:mergeCompletionMetadata(await liveProjectMetadata(projectId, pmeta),{error:`Assembly: ${assemblyErr.message}`,sceneCount:complete.length}),updatedAt:new Date()}).where(eq(schema.videoProjects.id,projectId));
+      await this.settleSubmissionReceipt(projectId, userId, { status: 'failed', error: `Assembly: ${assemblyErr.message}` });
     }
   }
   /**
@@ -5307,6 +5364,50 @@ else {
       await db.update(schema.videoProjects).set({ metadata: meta, updatedAt: new Date() }).where(eq(schema.videoProjects.id, projectId));
       trace(`motion_fallbacks project=${projectId} scenes=[${lost.map((l) => l.sceneNumber).join(',')}]`);
     } catch { /* best-effort */ }
+  }
+  /**
+   * THE SUBMISSION RECEIPT MUST REACH A TERMINAL STATE (defect B2).
+   *
+   * `createApproval` writes a receipt row (`status:'approved'`, `payload.status:
+   * 'processing'`, `payload.projectId`) before the paid work starts, and NOTHING
+   * ever updated it — this is the first writer of the approvals table. Because
+   * `getPendingApprovals` returns `pending|completed|failed`, the receipt was never
+   * returned to the client at all: not a stuck badge, a row that vanished. A render
+   * that then failed said nothing — a 201, then silence.
+   *
+   * The receipt is found by the projectId it was filed under (the worker never sees
+   * the receipt id). The ROW status becomes 'failed' on a failure so the feed
+   * returns it and the card can say what happened; a success keeps the receipt's own
+   * status because the finished video already arrives as its own draft card and a
+   * second, asset-less 'completed' receipt would be a dead card in the queue.
+   */
+  private async settleSubmissionReceipt(
+    projectId: string,
+    userId: string,
+    outcome: { status: 'completed' | 'failed'; error?: string },
+  ): Promise<void> {
+    try {
+      const rows: any[] = await db.select().from(schema.approvals).where(and(
+        eq(schema.approvals.userId, userId),
+        eq(schema.approvals.type, 'faceless'),
+      ));
+      const receipt = rows.find((r) => String((r.payload as any)?.projectId || '') === projectId);
+      if (!receipt) return;
+      const payload = {
+        ...((receipt.payload as any) || {}),
+        status: outcome.status,
+        ...(outcome.error ? { error: outcome.error } : {}),
+      };
+      await db.update(schema.approvals).set({
+        status: outcome.status === 'failed' ? 'failed' : receipt.status,
+        payload,
+        updatedAt: new Date(),
+      }).where(eq(schema.approvals.id, receipt.id));
+      trace(`receipt_settled project=${projectId} status=${outcome.status}`);
+    } catch (err: any) {
+      // Bookkeeping never fails a render — but it is never silent either.
+      trace(`receipt_settle_failed project=${projectId} error=${err?.message}`);
+    }
   }
   /** Persist a Veo window's operation name in project metadata under `veoJobs[sceneKey]`
    *  = {operation, status:'in_progress', createdAt} BEFORE polling (durable, exactly-once

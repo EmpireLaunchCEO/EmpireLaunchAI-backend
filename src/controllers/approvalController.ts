@@ -22,13 +22,18 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    // Fetch all non-failed approvals for this user (pending + completed)
+    // Fetch this user's approvals that have something to SHOW: pending, completed,
+    // and FAILED. 'failed' is in the list because a render that failed must reach
+    // the client as a visible note (defect B2) — the receipt row is moved to
+    // 'failed' with its reason on the payload, and a filter that excluded it turned
+    // an honest failure back into silence. The card renders in the failed treatment
+    // (Save/Download disabled, reason shown, Delete available to dismiss it).
     const pendingItems = await db.select()
       .from(approvals)
       .where(
         and(
           eq(approvals.userId, userId),
-          inArray(approvals.status, ['pending', 'completed'])
+          inArray(approvals.status, ['pending', 'completed', 'failed'])
         )
       )
       .orderBy(approvals.createdAt)
