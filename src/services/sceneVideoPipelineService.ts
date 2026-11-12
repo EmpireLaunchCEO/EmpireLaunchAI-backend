@@ -38,6 +38,7 @@ import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isCha
 // on the project, and produce the client-facing failure copy.
 import { PlanningFailedError, applyTemplateFill, classifyPlannerOutcome, describeNonPlanResponse, planPayloadFromDecision, plannerFailureNotice, runPlanningAttempts, suppliedScriptPlannerOutcome, usableSceneCount, type PlannerOutcome } from './plannerOutcome.js';
 import { normalizeAssemblyOverlays, applyAssemblyOverlays, resolveSceneVideoStarts, probeClipSeconds } from './assemblyOverlays.js';
+import { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolTimeoutError, mediaToolFailure } from './mediaToolDeadline.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -237,42 +238,16 @@ function withProjectMetadataLock<T>(projectId: string, fn: () => Promise<T>): Pr
  * MEDIA DEADLINES (audit 11 Nov, defect 5). Every ffmpeg/ffprobe child in this
  * file used to run unbounded: a wedged process hung the render request, and the
  * SYNCHRONOUS probes (`execFileSync`) blocked the whole event loop for every
- * other user. Each call now carries a deadline; a timeout is a NAMED failure
- * with a readable reason, never a hang. Both are env-overridable so a fixture
- * can prove the deadline in milliseconds instead of waiting minutes.
+ * other user. Each call carries a deadline; a timeout is a NAMED failure with a
+ * readable reason, never a hang. Both are env-overridable so a fixture can prove
+ * the deadline in milliseconds instead of waiting minutes.
+ *
+ * The definition now lives in mediaToolDeadline.ts so the export-variant refit,
+ * the match-cut joiner, the overlay pass and the queue mux carry the SAME number
+ * and the SAME failure shape. Re-exported here because every caller and fixture
+ * imports them from this file.
  */
-const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
-const DEFAULT_FFPROBE_TIMEOUT_MS = 30_000;
-
-export function mediaToolTimeoutMs(tool: 'ffmpeg' | 'ffprobe'): number {
-  const raw = Number(process.env[tool === 'ffprobe' ? 'FFPROBE_TIMEOUT_MS' : 'FFMPEG_TIMEOUT_MS']);
-  const fallback = tool === 'ffprobe' ? DEFAULT_FFPROBE_TIMEOUT_MS : DEFAULT_FFMPEG_TIMEOUT_MS;
-  return Number.isFinite(raw) && raw > 0 ? Math.max(50, Math.floor(raw)) : fallback;
-}
-
-/** Did this child die because WE killed it at its deadline? */
-export function isMediaToolTimeout(err: any): boolean {
-  if (!err) return false;
-  return err.killed === true || err.signal === 'SIGTERM' || err.code === 'ETIMEDOUT' || String(err.code || '') === 'ETIMEDOUT';
-}
-
-/** The one shape a killed-at-deadline media call fails with. */
-export function mediaToolTimeoutError(tool: 'ffmpeg' | 'ffprobe', label: string): Error {
-  return new Error(
-    `${tool} TIMED OUT after ${mediaToolTimeoutMs(tool)}ms and was killed (${label}) — ` +
-    `the step failed with this reason instead of hanging the request`,
-  );
-}
-
-/** execFile failure → one Error, preserving the long-standing "exited with
- *  code" wording for real failures and naming the deadline for timeouts. */
-function mediaToolFailure(tool: 'ffmpeg' | 'ffprobe', label: string, err: any, stderr: unknown): Error {
-  if (isMediaToolTimeout(err)) return mediaToolTimeoutError(tool, label);
-  return new Error(
-    `${tool} exited with code ${err?.code ?? ''}: ` +
-    String(stderr || err?.message || '').split('\n').filter(Boolean).slice(-3).join(' '),
-  );
-}
+export { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolTimeoutError } from './mediaToolDeadline.js';
 
 function inputHasAudio(input: string): boolean {
   try {
