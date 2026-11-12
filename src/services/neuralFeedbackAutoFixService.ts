@@ -262,6 +262,7 @@ async function remixLineChange(
   userId: string,
   projectVoice: 'female' | 'male' | undefined,
   projectTone: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined,
+  projectMood: string | undefined,
   lineChange: { sceneNumber?: number; oldText?: string; newText?: string },
 ): Promise<
   { finalUrl: string; r2Key?: string; qc: Record<string, any>; sceneNumber?: number; oldText?: string; newText?: string }
@@ -301,7 +302,7 @@ async function remixLineChange(
     // CONTENT HYGIENE (owner Sep 28): the user's edited line is THEIR finished
     // copy — allowPlanSpeak:true voices it verbatim (the hygiene guard only
     // rewrites auto-generated plan-speak, never a deliberate user edit).
-    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone, { allowPlanSpeak: true });
+    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone, { allowPlanSpeak: true, mood: projectMood });
     if (!audio?.localPath) {
       return { error: 'audio_failed', reason: 'could not regenerate the edited line audio', lineChange: { sceneNumber: match.sceneNumber, oldText: match.narration, newText: lineChange.newText } };
     }
@@ -550,8 +551,11 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
     const pmeta: any = (project.metadata as any) || {};
     const projectVoice = pmeta.voice as 'female' | 'male' | undefined;
     const projectTone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
+    // MOOD REACHES THE VOICE (owner Nov 12): a re-voiced line must keep the read
+    // the client picked — same mood-derived delivery as the original render.
+    const projectMood = typeof pmeta.mood === 'string' && pmeta.mood.trim() !== '' ? pmeta.mood : undefined;
 
-    const lcResult = await remixLineChange(projectId, userId, projectVoice, projectTone, lineChange);
+    const lcResult = await remixLineChange(projectId, userId, projectVoice, projectTone, projectMood, lineChange);
     if ('error' in lcResult) {
       if (lcResult.error === 'line_not_found') {
         return { status: 'line_not_found', intent, reason: lcResult.reason, lineChange: lcResult.lineChange };

@@ -149,3 +149,32 @@ export function gptAudioPayload(
     messages: [{ role: 'user', content: text }],
   };
 }
+
+/**
+ * MOOD → SPOKEN-DELIVERY TONE (owner Nov 12: "pick Calm and the read is still
+ * the default lively one" — the mood reached the planner prompt but never the
+ * voice). The Faceless box sends `mood` (energetic|sad|calm|romantic|playful|
+ * dramatic|inspiring) and `tone`; an EXPLICIT tone always wins, otherwise the
+ * mood decides the delivery so the chosen mood is actually heard.
+ *
+ * Mapping is the delivery equivalent of each mood (VoiceTone only carries
+ * enthusiastic|calm|serious|warm): a calm/sad video is read calmly, a
+ * romantic/inspiring one warmly, a dramatic one seriously, and
+ * energetic/playful with enthusiasm. No mood and no tone → 'auto' (the model's
+ * natural lively default — the pre-existing behaviour, unchanged).
+ */
+export function resolveDeliveryTone(tone?: VoiceTone, mood?: string): VoiceTone {
+  // An explicit tone is the client's own instruction — never overridden by mood.
+  if (tone && tone !== 'auto') return tone;
+  const m = String(mood || '').trim().toLowerCase();
+  const byMood: Partial<Record<FacelessMood, VoiceTone>> = {
+    calm: 'calm',
+    sad: 'calm',
+    romantic: 'warm',
+    inspiring: 'warm',
+    dramatic: 'serious',
+    energetic: 'enthusiastic',
+    playful: 'enthusiastic',
+  };
+  return byMood[m as FacelessMood] ?? 'auto';
+}
