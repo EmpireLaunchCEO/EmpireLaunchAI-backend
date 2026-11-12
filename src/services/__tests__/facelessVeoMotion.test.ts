@@ -437,6 +437,6 @@ test('WIRING: the motion still is uploaded like every other still (it used to pa
   const at = SERVICE_SRC.indexOf('private async renderSceneStillForMotion');
   assert.ok(at > 0);
   const fn = SERVICE_SRC.slice(at, at + 2600);
-  assert.ok(/renderImage\(\s*\n\s*withSourceSubject\(visualPrompt, usableSource\),\s*\n\s*userId,/.test(fn),
+  assert.ok(/renderImage\(\s*\n\s*(?:withSourceSubject|buildSceneImagePrompt)\(visualPrompt, usableSource[^\n]*\),\s*\n\s*userId,/.test(fn),
     'the motion still passes the userId, so the frame Veo started from is retrievable from R2');
 });
