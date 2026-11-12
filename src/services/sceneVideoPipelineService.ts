@@ -2088,12 +2088,31 @@ export function isDirectImageUrl(value: string): boolean {
 /** THE FINAL IMAGE PROMPT for a scene: the exact string handed to gpt-image-2 /
  *  Veo for that scene. Exported so a fixture can assert on the prompt that
  *  actually goes out (design principle 13) rather than on an intermediate. */
-export function buildSceneImagePrompt(visualPrompt: string, sourceImage?: string): string {
-  return withSourceSubject(visualPrompt, sourceImage);
+export function buildSceneImagePrompt(visualPrompt: string, sourceImage?: string, treatment?: SourceImageTreatment): string {
+  return withSourceSubject(visualPrompt, sourceImage, treatment);
 }
-function withSourceSubject(prompt: string, sourceImage?: string): string {
+function withSourceSubject(prompt: string, sourceImage?: string, treatment?: SourceImageTreatment): string {
   if (!sourceImage) return prompt;
+  // THE BLURRED BACKDROP IS A DIFFERENT INSTRUCTION (owner Nov 11). The client is
+  // told "your photo is the blurred background behind every scene", so the model
+  // must NOT be told the photo is the hero: that rendered her backdrop photo as the
+  // SUBJECT of every scene — the exact opposite of what she was promised.
+  if (treatment === 'blurred-backdrop') {
+    return `${prompt} — Use the user's uploaded reference image as a blurred BACKGROUND PLATE behind this scene: ${sourceImage}. Render it heavily out of focus and darkened, filling the whole frame as a soft backdrop, with the subject described above drawn sharp and fully in front of it. The reference image itself is never the scene's subject.`;
+  }
   return `${prompt} — Use the user's uploaded reference image as the hero and continuous subject: ${sourceImage}. Keep this exact subject visible and consistent across every scene; do NOT swap it for a different subject.`;
+}
+/**
+ * THE TREATMENT A SCENE'S REFERENCE IMAGE MUST BE RENDERED WITH (owner Nov 11).
+ * `deriveSceneSourceImageMetadata` already records, per scene, whether the photo
+ * IS the frame ('full-frame') or the plate BEHIND it ('backdrop') — that is the
+ * placement's `treatment`, derived once at createProject and written on the scene
+ * row. Both renderers (the still path and the Veo seed still) read it from here,
+ * so the image instruction can never disagree with the sentence the client was
+ * shown, and re-running a scene cannot quietly lose the treatment either.
+ */
+export function sourceImageTreatmentForScene(scene: any): SourceImageTreatment {
+  return (scene?.metadata as any)?.sourceImage?.role === 'backdrop' ? 'blurred-backdrop' : 'full';
 }
 /**
  * ─── UPLOADED-PHOTO PLACEMENT (owner Oct 30) ──────────────────────────────────
@@ -2141,13 +2160,59 @@ import type {
   SceneTiming,
   SourceImagePlacement,
   SourceImagePlacementContext,
+  SourceImageTreatment,
 } from './sourceImagePlacement.js';
 export type {
   SceneSourceImageMetadata,
   SceneTiming,
   SourceImagePlacement,
   SourceImagePlacementContext,
+  SourceImageTreatment,
 };
+
+/**
+ * THE CLIENT'S OWN WORDS ARE THE PLACEMENT SPEC (owner Nov 11 — "make sure that
+ * when a client uploads a photo it will be used how they want it used").
+ *
+ * The app has never sent `sourceImagePlacement`, and `createProject` never read her
+ * sentence, so whatever she actually said — "use it as the background for the whole
+ * video", "from scene 3 on", "don't use the photo" — was ignored and EVERY photo
+ * project rendered as scene 1 only. This is the ONE place that turns what she said
+ * into the spec that gets persisted, and it uses the ONE parser
+ * (`parseSourceImagePlacement`) — never a second parser in the app, so the rule
+ * holds for every client, not just this one.
+ *
+ * Precedence: an explicit spec always wins (an object, a JSON string, or a plain
+ * placement sentence). The conversation/brief is only read when no explicit spec
+ * was supplied. Anything the parser is not confident about returns `null` ⇒ the
+ * caller keeps today's behaviour (scene 1 only) rather than guessing.
+ */
+export function resolveSourceImagePlacementSpec(
+  explicit: unknown,
+  clientWords: { idea?: string; conversation?: ConversationTurn[] },
+  scenes: Array<{ duration?: number | null }>,
+  durationSeconds?: number,
+): SourceImagePlacement | null {
+  const sceneSeconds = (scenes || [])
+    .map((s) => Number(s?.duration))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const context: SourceImagePlacementContext = {
+    sceneCount: (scenes || []).length,
+    sceneSeconds,
+    ...(Number.isFinite(Number(durationSeconds)) ? { durationSeconds: Number(durationSeconds) } : {}),
+  };
+  const stated = normalizeSourceImagePlacement(explicit);
+  if (stated) return stated;
+  if (typeof explicit === 'string' && explicit.trim()) {
+    const fromSpec = parseSourceImagePlacement(explicit, context);
+    if (fromSpec) return fromSpec;
+  }
+  const chat = [String(clientWords?.idea ?? ''), userConversationText(clientWords?.conversation)]
+    .filter((t) => t.trim().length > 0)
+    .join('\n');
+  if (!chat.trim()) return null;
+  return parseSourceImagePlacement(chat, context) ?? null;
+}
 
 /** Enrich the scene-script GPT prompt so the planner keeps the uploaded image as the subject. */
 function sourceScriptHint(sourceImage?: string): string {
@@ -4318,11 +4383,25 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     const visualPromptOverridesMeta = Array.isArray(input.visualPromptOverrides)
       ? (input.visualPromptOverrides as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       : undefined;
-    // Uploaded-photo placement (owner Oct 30): normalised here, next to the other
-    // per-scene override normalisers, and persisted so the renderer can honour it
-    // (and so regeneration reads the SAME spec). Absent ⇒ scene 1 only.
-    const sourceImagePlacementMeta = normalizeSourceImagePlacement(input.sourceImagePlacement);
+    // Uploaded-photo placement (owner Oct 30, owner Nov 11): resolved here, next to
+    // the other per-scene override normalisers, and persisted so the renderer can
+    // honour it (and so regeneration reads the SAME spec). An EXPLICIT spec always
+    // wins; with a photo uploaded and no explicit spec, the client's OWN WORDS are
+    // read with the ONE parser, so "background for the whole video" / "from scene 3
+    // on" / "don't use the photo" is honoured instead of silently collapsing to
+    // scene 1. Not confident ⇒ null ⇒ unchanged behaviour (scene 1 only).
     const hasUploadedPhoto = Array.isArray(input.sourceImages) && input.sourceImages.some((u: any) => typeof u === 'string' && u.length > 0);
+    const sourceImagePlacementMeta = hasUploadedPhoto
+      ? resolveSourceImagePlacementSpec(
+          input.sourceImagePlacement,
+          { idea: cleanIdea, conversation: input.conversation },
+          planned,
+          deliveredVideoDuration(planned),
+        )
+      : normalizeSourceImagePlacement(input.sourceImagePlacement);
+    if (sourceImagePlacementMeta) {
+      trace(`source_image_placement_stated project=${projectId} mode=${sourceImagePlacementMeta.mode} scenes=[${sourceImagePlacementMeta.sceneNumbers.join(',')}] treatment=${sourceImagePlacementMeta.treatment} from=${input.sourceImagePlacement !== undefined && input.sourceImagePlacement !== null && String(input.sourceImagePlacement).trim() ? 'explicit' : 'client-words'}`);
+    }
     if (sourceImagePlacementMeta && !hasUploadedPhoto) {
       trace(`source_image_placement_without_photo project=${projectId} placement=${JSON.stringify(sourceImagePlacementMeta)}`);
     }
@@ -5023,7 +5102,9 @@ if (!skipGeneration) {
       // Use the uploaded source image as the continuous subject. Where the provider
       // supports an input image we pass it; otherwise we inject the reference URL
       // strongly into the prompt so the subject is derived from it.
-      const subjectPrompt = buildSceneImagePrompt(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined);
+      // THE TREATMENT IS PART OF THE INSTRUCTION (owner Nov 11): a 'blurred-backdrop'
+      // placement is a plate BEHIND the subject, never the subject itself.
+      const subjectPrompt = buildSceneImagePrompt(scene.visualPrompt, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, sourceImageTreatmentForScene(scene));
       // FACELESS FAIL-SOFT (owner, Nov 10): a Faceless motion window whose take
       // never arrived renders its STILL instead of failing the scene. The still is
       // the SAME designed frame the motion clip would have started from — it already
@@ -5413,7 +5494,7 @@ else {
       // Veo clip began from was unreachable after the run. Same call as the still
       // path, which has always passed it.
       const result = await renderingEngine.renderImage(
-        withSourceSubject(visualPrompt, usableSource),
+        buildSceneImagePrompt(visualPrompt, usableSource, sourceImageTreatmentForScene(scene)),
         userId,
         usableSource,
         { size: '1024x1792', noText: true },
