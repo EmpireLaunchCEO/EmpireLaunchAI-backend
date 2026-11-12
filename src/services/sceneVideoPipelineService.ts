@@ -4659,6 +4659,9 @@ if (!skipGeneration) {
       return;
     }
 
+    // ONE work dir for narration audio, shared by the growth pass and the assembly
+    // loop below, so the same file is resolved (and, from R2, downloaded) once.
+    const narrationWorkDir = path.join(process.cwd(), 'temp', 'scene-projects', projectId, 'narration');
     // MEASURED-TRUTH WINDOW GROWTH (task 42ff404a — owner Faceless 2bd309e3
     // tripped NARRATION_OVERLAP_INVARIANT: track=4 start=24095ms <
     // prevSpeechEnd=24354ms — the live planner sizes windows from the word-count
@@ -4672,12 +4675,29 @@ if (!skipGeneration) {
     // dictation. Best-effort: a measurement failure keeps the planned window.
     try {
       const sceneRowsAny = complete as any[];
-      const measuredEnds: Array<number | null | undefined> = sceneRowsAny.map((sc) => {
-        const audioLocal = String((sc.metadata as any)?.audioLocalPath || '');
-        if (!audioLocal || !fs.existsSync(audioLocal)) return null;
-        const ms = measureTrueSpeechEndMs(audioLocal);
-        return ms > 0 ? ms : null;
-      });
+      // MEASURED FROM WHATEVER ACTUALLY RESOLVES (owner audit, Nov 11): this pass
+      // used to read ONLY `metadata.audioLocalPath` + fs.existsSync, while the
+      // assembly resolves the same narration from R2 as a fallback. After a restart
+      // or any temp wipe the narration still PLAYED but the window was never grown —
+      // the speech was cut mid-sentence, with nothing but a `..._skip` line in the
+      // trace. The growth pass now uses the SAME resolver the assembly uses, in the
+      // SAME work dir, so a file fetched from storage is fetched once and reused.
+      const measuredEnds: Array<number | null | undefined> = [];
+      for (const sc of sceneRowsAny) {
+        const resolvedNarration = await resolveSceneNarrationAudio({
+          sceneId: sc.id,
+          sceneNumber: Number(sc.sceneNumber),
+          liveMetadata: await liveSceneMetadata(sc.id, {}),
+          audioUrl: sc.audioUrl,
+          workDir: narrationWorkDir,
+        });
+        if (!resolvedNarration) { measuredEnds.push(null); continue; }
+        const ms = measureTrueSpeechEndMs(resolvedNarration.path);
+        measuredEnds.push(ms > 0 ? ms : null);
+        if (resolvedNarration.source === 'downloaded') {
+          trace(`narration_measured_from_storage project=${projectId} scene=${sc.sceneNumber} speechEnd=${ms}ms`);
+        }
+      }
       const sizing = growSceneWindowsToMeasured(complete, measuredEnds);
       if (sizing.grown.length) {
         const byScene = new Map(sizing.scenes.map((s) => [s.sceneNumber, s.duration]));
@@ -4716,17 +4736,22 @@ if (!skipGeneration) {
       // and a scene that should speak but has no audio FAILS the render loudly
       // instead of shipping silence.
       const missingNarration: number[] = [];
+      const missingSceneFiles: number[] = [];
       for (const scene of complete) {
         const liveMeta = await liveSceneMetadata(scene.id, {});
         const local=String(liveMeta.localPath||'');
-        if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber}`); continue; }
+        // A VANISHED SCENE IS A FAILED DELIVERY (owner audit, Nov 11): this used to
+        // log `scene_missing_local` and `continue`, so the beat AND its narration
+        // left the video and the client was handed a shorter file marked
+        // `completed`. It is recorded here and thrown below, naming the scene.
+        if(!local||!fs.existsSync(local)) { trace(`scene_missing_local project=${projectId} scene=${scene.sceneNumber} path=${local}`); missingSceneFiles.push(scene.sceneNumber); continue; }
         const clip=path.join(dir,`scene-${scene.sceneNumber}.mp4`);
         const narration = await resolveSceneNarrationAudio({
           sceneId: scene.id,
           sceneNumber: scene.sceneNumber,
           liveMetadata: liveMeta,
           audioUrl: (scene as any).audioUrl,
-          workDir: path.join(dir, 'narration'),
+          workDir: narrationWorkDir,
         });
         const audioLocal = narration?.path || '';
         if (!audioLocal && shouldGenerateSceneNarration(scene.narration, voice)) missingNarration.push(scene.sceneNumber);
@@ -4767,6 +4792,29 @@ if (!skipGeneration) {
         // 29.5–30.5s band because the planner sized scenes ≥ the narration rooms
         // (tighten pauses, never words).
         kbOpts.padVideoToAudio = !!sceneAudio && scene.sceneNumber === lastSceneNumber;
+        // ── NARRATION IS NEVER CUT MID-SENTENCE (owner audit, Nov 11) ──────────
+        // renderClip fits the narration into the window with `atrim`, so a window
+        // shorter than the speech silently loses the end of the sentence. The last
+        // scene is already protected (padVideoToAudio makes the narration the timing
+        // authority); every other scene is measured here against the window it is
+        // about to be fitted into and the window is GROWN to hold the whole sentence
+        // (grow-only, the same precedent as the measured-truth growth above). If the
+        // speech still cannot fit, the delivery fails naming the scene.
+        if (sceneAudio && !kbOpts.padVideoToAudio) {
+          const speechEndMs = measureTrueSpeechEndMs(sceneAudio) || Math.round(probeDuration(sceneAudio) * 1000);
+          const windowMs = Math.round((Number(scene.duration) || 3) * 1000);
+          if (speechEndMs > windowMs) {
+            const grownSeconds = Math.max(3, Math.ceil((speechEndMs + MEASURED_NARRATION_MARGIN_MS) / 1000));
+            scene.duration = grownSeconds;
+            await db.update(schema.videoScenes).set({ duration: grownSeconds, updatedAt: new Date() }).where(eq(schema.videoScenes.id, scene.id));
+            trace(`scene_window_grown_at_assembly project=${projectId} scene=${scene.sceneNumber} speechEnd=${speechEndMs}ms planned=${windowMs}ms grown=${grownSeconds}s`);
+            if (speechEndMs > grownSeconds * 1000) {
+              throw new Error(
+                `SCENE_NARRATION_TRUNCATED scene=${scene.sceneNumber} — the narration runs to ${speechEndMs}ms but its window can only hold ${grownSeconds}s. Refusing to deliver a sentence cut mid-word.`,
+              );
+            }
+          }
+        }
         // ── C1: A GROWN MOTION WINDOW IS RE-FITTED, NEVER REPLAYED ─────────────
         // `growSceneWindowsToMeasured` above can widen a motion scene AFTER its take
         // was fitted to the planned window, and renderClip's `-stream_loop 1` then
@@ -4801,6 +4849,14 @@ if (!skipGeneration) {
         kbOpts.sceneEntryFadeIn = clips.length === 0 && scene.sceneNumber !== lastSceneNumber;
         await renderClip(local,clip,scene.duration||3,sceneAudio,kbOpts);
         clips.push(clip);
+      }
+      if (missingSceneFiles.length) {
+        // LOUD, NOT SILENT: the picture for these scenes is not on disk, so that beat
+        // and its narration cannot be in the video. A shorter video that looks
+        // finished is the most expensive possible outcome — fail and say which scene.
+        throw new Error(
+          `SCENE_FILE_MISSING scenes=[${missingSceneFiles.join(',')}] — the picture for scene ${missingSceneFiles.join(', ')} is not on disk, so that beat and its narration cannot be in the video. Refusing to deliver a video that is quietly missing ${missingSceneFiles.length === 1 ? 'a scene' : `${missingSceneFiles.length} scenes`}.`,
+        );
       }
       if (clips.length === 0) throw new Error('No scene clips available for assembly');
       if (missingNarration.length) {

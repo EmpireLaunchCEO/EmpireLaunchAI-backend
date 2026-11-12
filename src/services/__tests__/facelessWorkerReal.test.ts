@@ -24,9 +24,10 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import http from 'http';
 
 import { db, schema } from '../../db/index.js';
-import { sceneVideoPipelineService, planFacelessVeoSpans, type SoraSpan } from '../sceneVideoPipelineService.js';
+import { sceneVideoPipelineService, planFacelessVeoSpans, renderClip, measureTrueSpeechEndMs, type SoraSpan } from '../sceneVideoPipelineService.js';
 import { renderingEngine } from '../renderingEngine.js';
 import { veoVideoService, VEO_ERRORS } from '../veoVideoService.js';
 import { r2Storage } from '../r2StorageService.js';
@@ -754,4 +755,194 @@ test('B2 — a render that fails mid-pipeline leaves a terminal receipt with the
     `THE CLIENT WAS LEFT ON 'processing' FOREVER: ${JSON.stringify(receipt.payload)}`);
   assert.ok(String(receipt.payload.error || '').length > 0, 'the receipt says why');
   assert.equal(receipt.status, 'failed', 'and the feed returns it');
+});
+
+
+// ═══ N1 + N2 — NOTHING FAILS SILENTLY (owner audit, Nov 11) ═════════════════
+// N1  narration is never cut mid-sentence. The narration audio lives in R2 only
+//     (the local temp copy was wiped by a restart) and is LONGER than its planned
+//     window. The growth pass must measure it from storage, grow the window, and
+//     the DELIVERED file must contain the whole sentence — proven by decoding the
+//     delivered audio and measuring the last word's tone, not by matching a filter.
+// N2  a scene whose picture file is gone is a FAILED delivery, not a shorter video.
+
+const LAST_WORD_HZ = 1500; // the final word — NOT a harmonic of the 440Hz body
+const BODY_HZ = 440;
+
+/** A narration track built from segments: [[freq, seconds], ...]. */
+function toneFile(file: string, segments: Array<[number, number]>): void {
+  if (fs.existsSync(file)) return;
+  const args: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
+  for (const [freq, secs] of segments) args.push('-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=${secs}:sample_rate=44100`);
+  if (segments.length === 1) args.push('-c:a', 'pcm_s16le', file);
+  else {
+    const labels = segments.map((_, i) => `[${i}:a]`).join('');
+    args.push('-filter_complex', `${labels}concat=n=${segments.length}:v=0:a=1[out]`, '-map', '[out]', '-c:a', 'pcm_s16le', file);
+  }
+  execFileSync('ffmpeg', args, { maxBuffer: 32 * 1024 * 1024 });
+}
+
+/** Single-bin Goertzel over the WHOLE decoded audio of a file. A tone that is
+ *  present anywhere in the delivered audio reads far above the numerical floor;
+ *  a tone that was trimmed away reads at it. This measures the artefact. */
+function tonePowerWhole(file: string, freq: number): number {
+  const raw = execFileSync(
+    'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-ac', '1', '-ar', '44100', '-f', 'f32le', '-'],
+    { maxBuffer: 96 * 1024 * 1024 },
+  );
+  const arr = new Float32Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 4));
+  const N = arr.length;
+  if (N < 200) return -200;
+  const k = Math.round((freq * N) / 44100);
+  const w = (2 * Math.PI * k) / N;
+  const coeff = 2 * Math.cos(w);
+  let q1 = 0, q2 = 0, q0 = 0;
+  for (let i = 0; i < N; i++) { q0 = coeff * q1 - q2 + arr[i]; q2 = q1; q1 = q0; }
+  const mag = Math.sqrt(q1 * q1 + q2 * q2 - coeff * q1 * q2);
+  return 20 * Math.log10((mag / N) * 2 + 1e-9);
+}
+
+/** Serve one file over HTTP — the shape of an R2 narration URL the assembly
+ *  downloads when the local copy is gone. */
+function serveFile(file: string): Promise<{ url: string; close: () => Promise<void> }> {
+  const body = fs.readFileSync(file);
+  return new Promise((resolve) => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': String(body.length) });
+      res.end(body);
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as any).port;
+      resolve({
+        url: `http://127.0.0.1:${port}/narration-2.wav`,
+        // A fetch keep-alive socket would otherwise hold `close()` open.
+        close: () => new Promise<void>((r) => { (server as any).closeAllConnections?.(); server.close(() => r()); }),
+      });
+    });
+  });
+}
+
+function stillFrame(file: string, hex: string): string {
+  if (!fs.existsSync(file)) {
+    execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+      '-i', `color=c=0x${hex}:s=540x960`, '-frames:v', '1', file]);
+  }
+  return file;
+}
+
+/** Three completed still scenes — the video that reaches assembly. */
+function stillScenes(files: string[]) {
+  return files.map((f, i) => ({
+    id: `still-scene-${i + 1}`,
+    projectId: PROJECT_ID,
+    sceneNumber: i + 1,
+    duration: 3,
+    visualType: 'still',
+    narration: `line ${i + 1}`,
+    visualPrompt: `still ${i + 1}`,
+    status: 'completed',
+    metadata: { localPath: f },
+  }));
+}
+
+test('N1 — a narration longer than its window (its local copy gone, only the stored audio left) is measured, its window grown, and the WHOLE sentence is in the delivered file', async () => {
+  fs.rmSync(projectDir(), { recursive: true, force: true });
+  // The sentence: 4.5s of speech, then the last word as its own tone. 5.5s of
+  // speech inside a 3s planned window — the exact shape that used to be cut.
+  const SENTENCE = path.join(TMP, 'narration-sentence.wav');
+  toneFile(SENTENCE, [[BODY_HZ, 4.5], [LAST_WORD_HZ, 1.0]]);
+  const SHORT = path.join(TMP, 'narration-short.wav');
+  toneFile(SHORT, [[BODY_HZ, 2.0]]);
+  const stills = [
+    stillFrame(path.join(TMP, 'n1-still-1.png'), '203040'),
+    stillFrame(path.join(TMP, 'n1-still-2.png'), '304050'),
+    stillFrame(path.join(TMP, 'n1-still-3.png'), '405060'),
+  ];
+  const speechEnd = measureTrueSpeechEndMs(SENTENCE);
+  assert.ok(Math.abs(speechEnd - 5500) < 150, `the fixture narration really is 5.5s of speech (measured ${speechEnd}ms)`);
+
+  // 0) THE DISCRIMINATOR IS REAL: rendered at the PLANNED 3s window (the exact
+  //    renderClip call assembly makes), the last word is GONE — measured on the
+  //    decoded clip, so this is not a claim about the filter string.
+  const plannedClip = path.join(TMP, 'n1-planned-window.mp4');
+  await renderClip(stills[1], plannedClip, 3, SENTENCE, { kenburns: false });
+  const cutPower = tonePowerWhole(plannedClip, LAST_WORD_HZ);
+  assert.ok(cutPower < -50, `a 3s window MUST cut the sentence (last word measured at ${cutPower.toFixed(1)}dB) — otherwise this fixture proves nothing`);
+
+  const server = await serveFile(SENTENCE);
+  const scenes = stillScenes(stills);
+  // Scene 2 (a MIDDLE scene): its local narration file was wiped by a restart; the
+  // audio itself is still in storage, which is what the assembly falls back to.
+  scenes[1].metadata = { ...scenes[1].metadata, audioLocalPath: path.join(TMP, 'wiped-by-a-restart.wav') } as any;
+  (scenes[1] as any).audioUrl = server.url;
+  (scenes[0] as any).audioUrl = undefined;
+  (scenes[2] as any).audioUrl = undefined;
+  scenes[0].metadata = { ...scenes[0].metadata, audioLocalPath: SHORT } as any;
+  scenes[2].metadata = { ...scenes[2].metadata, audioLocalPath: SHORT } as any;
+  const project = { id: PROJECT_ID, userId: USER_ID, status: 'generating', metadata: { mode: 'faceless', voice: 'female' } };
+
+  const restoreDb = installDb({ project, scenes, approvals: [submissionReceipt()] });
+  const restore = stubProviders({ veo: () => ({ success: false, error: 'not used — generation skipped' }) });
+  try {
+    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID, true);
+  } finally {
+    restore();
+    restoreDb();
+    await server.close();
+  }
+
+  const p = projectRow();
+  assert.equal(p.status, 'completed', `the video must finish: ${p.metadata.error}`);
+  // The sentence came from STORAGE (the local path is still the wiped one).
+  assert.equal(fs.existsSync(path.join(TMP, 'wiped-by-a-restart.wav')), false, 'the local narration copy really is gone');
+  assert.ok(fs.existsSync(path.join(projectDir(), 'narration', 'narration-2.wav')), 'the narration was resolved from the stored audioUrl');
+  // The window GREW to hold the whole sentence (5.5s + 400ms margin -> 6s).
+  const grown = scenesOf().find((s) => s.sceneNumber === 2)!;
+  assert.equal(grown.duration, 6, `the middle window grew to hold the sentence (got ${grown.duration}s for ${speechEnd}ms of speech)`);
+
+  // THE DELIVERED FILE: decode its audio and measure the last word.
+  const delivered = path.join(projectDir(), 'final.mp4');
+  assert.ok(fs.existsSync(delivered), 'a delivered MP4 exists');
+  const lastWord = tonePowerWhole(delivered, LAST_WORD_HZ);
+  const body = tonePowerWhole(delivered, BODY_HZ);
+  assert.ok(lastWord > -45, `THE DELIVERED VIDEO LOST THE END OF THE SENTENCE (last word measured ${lastWord.toFixed(1)}dB)`);
+  assert.ok(body > -45, `the spoken body is in the delivered audio (${body.toFixed(1)}dB)`);
+  assert.ok(lastWord > cutPower + 20, `the whole sentence is measurably present, not trimmed (${lastWord.toFixed(1)}dB vs the cut ${cutPower.toFixed(1)}dB)`);
+  // And the video really is longer than the planned budget, because it holds the words.
+  const deliveredSeconds = probeSeconds(delivered);
+  assert.ok(deliveredSeconds > 9.5, `delivered ${deliveredSeconds.toFixed(2)}s — the grown window is in the file (planned budget ~7.4s)`);
+});
+
+test('N2 — a scene whose picture is gone FAILS the delivery, naming the scene, instead of shipping a shorter video', async () => {
+  fs.rmSync(projectDir(), { recursive: true, force: true });
+  const stills = [
+    stillFrame(path.join(TMP, 'n2-still-1.png'), '203040'),
+    stillFrame(path.join(TMP, 'n2-still-3.png'), '405060'),
+  ];
+  const scenes = stillScenes([stills[0], stills[1], stills[0]]);
+  // The MIDDLE scene's picture vanished (temp wiped / file lost).
+  scenes[1].metadata = { localPath: path.join(TMP, 'n2-vanished-scene-2.mp4') } as any;
+  const project = { id: PROJECT_ID, userId: USER_ID, status: 'generating', metadata: { mode: 'faceless', voice: 'none' } };
+
+  const restoreDb = installDb({ project, scenes, approvals: [submissionReceipt()] });
+  const restore = stubProviders({ veo: () => ({ success: false, error: 'not used — generation skipped' }) });
+  try {
+    await sceneVideoPipelineService.processProject(PROJECT_ID, USER_ID, true);
+  } finally {
+    restore();
+    restoreDb();
+  }
+
+  const p = projectRow();
+  // NOT A SHORTER VIDEO: the delivery fails, and it says which scene is missing.
+  assert.equal(p.status, 'failed', `A VIDEO MISSING A SCENE WAS DELIVERED AS ${p.status}: ${p.finalVideoUrl || ''}`);
+  assert.match(String(p.metadata.error), /SCENE_FILE_MISSING scenes=\[2\]/, `the project names the vanished scene: ${p.metadata.error}`);
+  assert.equal(p.finalVideoUrl, undefined, 'nothing was published as the delivered video');
+  assert.equal(fs.existsSync(path.join(projectDir(), 'final.mp4')), false, 'no assembled file was produced');
+  // Nothing claims completion, and the client is told.
+  const deliveredRows = approvalsOf().filter((a) => a.payload?.status === 'completed' || a.status === 'completed');
+  assert.deepEqual(deliveredRows.map((a) => a.id), [], 'no completed card exists for a video missing a beat');
+  const receipt = approvalsOf().find((a) => a.id === RECEIPT_ID)!;
+  assert.equal(receipt.payload.status, 'failed', `the receipt never left 'processing': ${JSON.stringify(receipt.payload)}`);
+  assert.match(String(receipt.payload.error), /SCENE_FILE_MISSING scenes=\[2\]/, 'the receipt names the vanished scene');
 });
