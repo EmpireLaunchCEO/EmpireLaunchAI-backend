@@ -190,6 +190,22 @@ export function planVeoClipDurationsTotal(sceneCount: number): number {
 export const VEO_FACELESS_MOTION_TARGET_SECONDS = 16;
 export const VEO_FACELESS_MOTION_CALLS = 2;
 /**
+ * HOW FAR A TAKE MAY BE SLOWED TO FILL ITS SLOT (owner outcome, Nov 11: "every
+ * paid second of Veo motion actually appears in the video, at normal speed").
+ *
+ * `fitClipToDuration` stretches a short take with `setpts` to land exactly on its
+ * narration window. That is right for the small mismatch it was built for (a 6.0s
+ * take into a 6.8s slot = 13% slower, invisible on a product shot). It is WRONG
+ * for a mismatch that comes from the window being much longer than the take: an
+ * 8s take stretched into a 15s slot crawls at 1.875x and the client sees slow
+ * motion instead of the shot she paid for.
+ *
+ * 1.25 is the ceiling. Past it the take plays at the cap and the REMAINDER of the
+ * slot holds the take's last frame (defect C1's `freezeTail`), which reads as a
+ * pause on one frame rather than a shot that is visibly crawling.
+ */
+export const VEO_WINDOW_MAX_STRETCH_RATIO = 1.25;
+/**
  * THE TARGET-SUM PLAN: legal Veo durations (4|6|8) summing to EXACTLY
  * `targetSeconds` in at most `maxCalls` calls.
  *

@@ -20,6 +20,7 @@ import {
   planVeoTargetSumDurations,
   VEO_FACELESS_MOTION_TARGET_SECONDS,
   VEO_FACELESS_MOTION_CALLS,
+  VEO_WINDOW_MAX_STRETCH_RATIO,
   veoCostUsd,
 } from './veoVideoService.js';
 import { planMatchCutCuts, JOIN_GOOD_PSNR, JOIN_VISIBLE_PSNR, assertClipPicture, type MatchCutReport } from './sceneJoinService.js';
@@ -618,12 +619,26 @@ export function isRetryableVeoFailure(error: string | undefined): boolean {
  *      the clip lands EXACTLY on its window.
  *  So: trim when the take is long enough, stretch when it is short, never pad.
  *  Pure FFmpeg; zero paid seconds. */
-/** How far a motion take may be SLOWED to fill a window that grew after the take
- *  was already fitted (defect C1). 2x is already a deliberate slow motion; past
- *  that the honest answer is to hold the LAST frame, because a freeze reads as a
- *  pause while a `-stream_loop` replay reads as the picture jumping back to its
+/** How far a motion take may be SLOWED to fill its window — ONE policy for the
+ *  whole pipeline (defect C1 and the Faceless window fit). It is the same number
+ *  the window fitter uses, deliberately: 1.25x is invisible on a product shot,
+ *  while the 1.875x an 8s take needed for a 15s slot read as slow motion. Past
+ *  the cap the honest answer is to hold the LAST frame, because a freeze reads as
+ *  a pause while a `-stream_loop` replay reads as the picture jumping back to its
  *  opening frame mid-shot. */
-export const MAX_TAKE_STRETCH_RATIO = 2;
+export const MAX_TAKE_STRETCH_RATIO = VEO_WINDOW_MAX_STRETCH_RATIO;
+/** A still scene is never squeezed below this to make room for a motion slot. */
+export const MIN_STILL_SCENE_SECONDS = 6;
+/** The seconds a take may be fitted to for a slot: the slot itself when the take
+ *  can reach it inside the stretch cap, the cap when it cannot. NEVER more than
+ *  the take × MAX_TAKE_STRETCH_RATIO, so no shot is visibly slowed; NEVER more
+ *  than the slot, so nothing is padded. Pure + deterministic. */
+export function cappedTakeFitSeconds(slotSeconds: number, takeSeconds: number): number {
+  const slot = Number.isFinite(slotSeconds) && slotSeconds > 0 ? Number(slotSeconds) : 0;
+  const take = Number.isFinite(takeSeconds) && takeSeconds > 0 ? Number(takeSeconds) : 0;
+  if (slot <= 0 || take <= 0) return Math.max(0.1, slot);
+  return Math.round(Math.min(slot, take * MAX_TAKE_STRETCH_RATIO) * 1000) / 1000;
+}
 export function fitClipToDuration(input: string, targetSec: number): Promise<void> {
   const t = Math.max(0.1, Number(targetSec) || 0.1);
   const out = `${input}.fit.mp4`;
@@ -1925,6 +1940,87 @@ export function planFacelessVeoSpans(script: SceneScript[]): SoraSpan[] {
     windows,
     prompt: buildSpanPrompt(run, undefined, windows),
   }];
+}
+export interface MotionSlotFit {
+  /** Scenes whose slot was grown to the take they host (paid seconds that used to
+   *  be trimmed away now have somewhere to land). */
+  grown: Array<{ sceneNumber: number; from: number; to: number }>;
+  /** Seconds handed to the motion slots out of the still scenes' slack. */
+  borrowedSeconds: number;
+  /** Seconds the stills could not give (the delivered video is this much longer
+   *  than the client's target — stated, never hidden). */
+  unabsorbedSeconds: number;
+  /** The delivered length after the fit (after the xfade overlaps are folded). */
+  deliveredSeconds: number;
+}
+
+/**
+ * THE WINDOW DECIDES THE SLOT (owner outcome, Nov 11 — "every paid second of Veo
+ * motion actually appears in the video, at normal speed").
+ *
+ * `planFacelessVeoSpans` buys two 8-second takes on the hook and the payoff, but a
+ * 30s/5-scene plan's slots are ~7s and ~6s once the dissolves are compensated. The
+ * old fit trimmed each paid take down to its slot: 16s bought, ~13s on screen, and
+ * a paid second the client never saw. Growing the SLOT to the take instead is the
+ * only fit that loses nothing and slows nothing:
+ *
+ *   - a motion scene's slot is never shorter than the take it hosts (growth only —
+ *     a long scene is never shrunk, which would cut narration and shorten the video);
+ *   - the extra time comes out of the STILL scenes' slack, largest first, never
+ *     below MIN_STILL_SCENE_SECONDS (their narration is protected downstream by the
+ *     measured-narration window growth, which can only grow a window);
+ *   - whatever the stills cannot give is reported (`unabsorbedSeconds`), so a video
+ *     that comes out longer than the client's target says so on the record.
+ *
+ * Pure + deterministic. Zero paid calls.
+ */
+export function fitMotionWindowsToSlots(
+  script: SceneScript[],
+  spans: SoraSpan[],
+  opts: { minStillSeconds?: number } = {},
+): { script: SceneScript[]; report: MotionSlotFit } {
+  const takeByScene = new Map<number, number>();
+  for (const span of spans) {
+    for (const w of span.windows ?? []) {
+      if (Number.isFinite(w.motionSeconds) && w.motionSeconds > 0) takeByScene.set(w.sceneNumber, w.motionSeconds);
+    }
+  }
+  const minStill = Number.isFinite(opts.minStillSeconds)
+    ? Math.max(1, Number(opts.minStillSeconds))
+    : MIN_STILL_SCENE_SECONDS;
+  const grown: Array<{ sceneNumber: number; from: number; to: number }> = [];
+  const out: SceneScript[] = script.map((s) => {
+    const take = takeByScene.get(s.sceneNumber);
+    const have = Number.isFinite(s.duration) ? Number(s.duration) : 0;
+    if (!take || have >= take) return { ...s };
+    grown.push({ sceneNumber: s.sceneNumber, from: have, to: take });
+    return { ...s, duration: take };
+  });
+  let extra = grown.reduce((a, g) => a + (g.to - g.from), 0);
+  const needed = extra;
+  // Largest still first, one second at a time: deterministic, and it spreads the
+  // loss over the scenes that can best afford it instead of gutting one scene.
+  while (extra > 0) {
+    let bestIndex = -1;
+    let bestDuration = -1;
+    for (let i = 0; i < out.length; i++) {
+      if (takeByScene.has(out[i].sceneNumber)) continue;
+      const d = Number.isFinite(out[i].duration) ? Number(out[i].duration) : 0;
+      if (d > minStill && d > bestDuration) { bestDuration = d; bestIndex = i; }
+    }
+    if (bestIndex === -1) break;
+    out[bestIndex] = { ...out[bestIndex], duration: bestDuration - 1 };
+    extra -= 1;
+  }
+  return {
+    script: out,
+    report: {
+      grown,
+      borrowedSeconds: needed - extra,
+      unabsorbedSeconds: extra,
+      deliveredSeconds: Math.round(deliveredVideoDuration(out) * 100) / 100,
+    },
+  };
 }
 /** Project the elected windows onto the plan: windowed scenes become `motion`
  *  (block 0), every other scene becomes a `still`. Keeps the persisted plan,
@@ -4067,6 +4163,18 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       ? capVeoMotionWindows(planned, planVeoSceneSpans(planned)).spans
       : planFacelessVeoSpans(planned);
     planned.splice(0, planned.length, ...applyVeoSceneMotion(planned, spanPlans));
+    // THE WINDOW DECIDES THE SLOT (Faceless, Nov 11). The two 8-second takes are
+    // fixed by the approved cost model; the SCENE SLOTS are what was wrong. A slot
+    // shorter than its take trimmed paid motion off the end (16s bought, ~13s on
+    // screen). Grow the slot to the take, pay for the difference out of the stills'
+    // slack, and every paid second lands at normal speed.
+    const slotFit = mode === 'faceless'
+      ? fitMotionWindowsToSlots(planned, spanPlans)
+      : { script: planned, report: undefined as MotionSlotFit | undefined };
+    if (slotFit.report && slotFit.report.grown.length) {
+      planned.splice(0, planned.length, ...slotFit.script);
+      trace(`faceless_motion_slots project=${projectId} grown=[${slotFit.report.grown.map((g) => `${g.sceneNumber}:${g.from}->${g.to}`).join(',')}] borrowed=${slotFit.report.borrowedSeconds}s unabsorbed=${slotFit.report.unabsorbedSeconds}s delivered=${slotFit.report.deliveredSeconds}s`);
+    }
     const motionSeconds = spanPlans.reduce((a, sp) => a + sp.windows.reduce((b, w) => b + w.motionSeconds, 0), 0);
     trace(`${mode === 'scene' ? 'veo_whole_video_motion' : 'faceless_veo_motion'} project=${projectId} windows=${spanPlans.reduce((a, sp) => a + sp.windows.length, 0)} motionSeconds=${motionSeconds} stillScenes=${planned.filter((s) => s.visualType !== 'motion').length} usd=${veoCostUsd(motionSeconds)}`);
     const motionWindowByScene = new Map<number, MotionWindow>();
@@ -4265,7 +4373,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       componentsFailure,
       missingComponents: qc.missingComponents,
     });
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
@@ -4592,7 +4700,14 @@ if (!skipGeneration) {
           const targetSeconds = Number(scene.duration) || 3;
           const haveSeconds = probeDuration(local);
           if (haveSeconds > 0 && haveSeconds < targetSeconds - 0.05) {
-            const reachable = Math.min(targetSeconds, haveSeconds * MAX_TAKE_STRETCH_RATIO);
+            // THE CAP IS MEASURED FROM THE TAKE, NOT FROM THE FITTED CLIP: the window
+            // path already stretched this take to min(slot, billed × cap), so
+            // stretching `haveSeconds` again would compound past the cap (8s → 10s →
+            // 12.5s = 1.56x). The billed take length is the honest base.
+            const takeSeconds = Number(liveMeta.motionSeconds) > 0
+              ? Number(liveMeta.motionSeconds)
+              : haveSeconds;
+            const reachable = cappedTakeFitSeconds(targetSeconds, takeSeconds);
             await fitClipToDuration(local, reachable);
             if (reachable < targetSeconds - 0.05) kbOpts.freezeTail = true;
             trace(`motion_window_refit project=${projectId} scene=${scene.sceneNumber} have=${haveSeconds.toFixed(2)}s window=${targetSeconds}s fitted=${reachable.toFixed(2)}s freeze=${Boolean(kbOpts.freezeTail)}`);
@@ -4968,9 +5083,16 @@ else {
             // Re-assert the exact length here as a cheap guarantee that picture and
             // narration cannot drift.
             const sceneSeconds = scene.duration || 3;
-            await fitClipToDuration(spanTakePath, sceneSeconds);
+            // ALREADY FITTED AT THE CAP: generateOneVeoWindow fitted this take to
+            // min(slot, billed × MAX_TAKE_STRETCH_RATIO). Re-asserting the slot here
+            // must not stretch it a SECOND time past the cap.
+            const fittedSeconds = cappedTakeFitSeconds(
+              sceneSeconds,
+              Number.isFinite(motionWindow) ? motionWindow : sceneSeconds,
+            );
+            await fitClipToDuration(spanTakePath, fittedSeconds);
             localPath = spanTakePath;
-            trace(`scene_veo_window_ready id=${scene.id} window=${sceneSeconds}s`);
+            trace(`scene_veo_window_ready id=${scene.id} window=${sceneSeconds}s fitted=${fittedSeconds}s`);
           } else {
             // One 16s take per soraBlock (owner Sep 14), sliced CONTIGUOUSLY into each
             // scene's IMPORTANT-SECONDS window [motionStart, +motionSeconds) — 3×5s →
@@ -5248,11 +5370,17 @@ else {
         fs.mkdirSync(dir, { recursive: true });
         const slicedPath = path.join(dir, `veo-${sceneKey}.mp4`);
         await sliceSoraTake(result.videoPath, slicedPath, 0, billedSeconds);
-        // NARRATION SYNC: land the picture EXACTLY on the scene's planned window.
-        await fitClipToDuration(slicedPath, sceneSeconds);
+        // NARRATION SYNC — INSIDE THE STRETCH CAP (owner outcome, Nov 11). The take
+        // lands on the scene's planned window, but it is never slowed past
+        // MAX_TAKE_STRETCH_RATIO to get there: an 8s take stretched into a 15s slot
+        // crawls at 1.875x. Past the cap the take plays at the cap and the rest of
+        // the slot holds its last frame at assembly (freezeTail), so no paid second
+        // is dropped and no shot is visibly slowed.
+        const fittedSeconds = cappedTakeFitSeconds(sceneSeconds, billedSeconds);
+        await fitClipToDuration(slicedPath, fittedSeconds);
         await this.recordVeoCost(projectId, sceneKey, result.billedSeconds ?? billedSeconds);
         void this.markVeoJobStatus(projectId, sceneKey, 'completed');
-        trace(`veo_window_take_fitted project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s still=${stillPath ? 'yes' : 'no'} lastFrame=${result.usedLastFrame ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
+        trace(`veo_window_take_fitted project=${projectId} ${sceneKey} billed=${result.billedSeconds}s scene=${sceneSeconds}s fitted=${fittedSeconds}s still=${stillPath ? 'yes' : 'no'} lastFrame=${result.usedLastFrame ? 'yes' : 'no'} usd=${veoCostUsd(result.billedSeconds ?? billedSeconds)}`);
         return slicedPath;
       }
       lastError = result.error || 'no video path';
