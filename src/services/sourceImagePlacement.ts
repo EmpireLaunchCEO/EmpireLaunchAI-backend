@@ -246,6 +246,25 @@ const NOT_PHOTO_MEDIA_RE = /\b(?:music|song|soundtrack|audio|voice|voiceover|nar
 const SCENE_EDITING_RE = /\b(?:longer|shorter|faster|slower|duration|length)\b/i;
 const FIRST_LAST_SCENE_RE = /\b(?:first|last|final|opening|closing)\s+scene\b|\bscene\s+(?:at\s+the\s+)?(?:very\s+)?(?:end|last)\b/i;
 const FOR_FIRST_SECONDS_RE = /\bfor\s+the\s+(?:first|last|final)\s+\d+(?:\.\d+)?\s*(?:seconds?|secs?|s)\b/i;
+/**
+ * Words that ask for the PHOTO ITSELF to be blurred rather than shown sharp —
+ * "blur my photo into the background", "a blurred backdrop", "bokeh", "soft focus".
+ */
+const BLUR_WORDS_RE = /\b(?:blur|blurs|blurred|blurring|blurry|out\s+of\s+focus|soft\s+focus|bokeh|de-?focus(?:ed)?)\b/i;
+/**
+ * Does the client's own wording ask for the photo to be BLURRED? (owner Nov 11 —
+ * rule 1, "stated → use it exactly"). "Blur my photo into the background" used to
+ * parse to a `full` placement, i.e. a sharp full-frame hero — the exact opposite
+ * of what she asked for, and the opposite of the sentence she is shown back.
+ *
+ * The gate is SENTENCE-level and needs BOTH halves: a blur word AND a reference to
+ * the photo in that same sentence. A bare look instruction — "soft focus
+ * throughout", "keep it blurry" — names no photo and therefore stays `full`.
+ */
+function asksForBlurredPhoto(sentence: string): boolean {
+  return BLUR_WORDS_RE.test(sentence) && PHOTO_REFERENCE_RE.test(sentence);
+}
+
 /** Verbs/nouns that make a neighbouring sentence a placement instruction. */
 const PLACEMENT_CUE_RE = /\b(?:background|backdrop|behind|throughout|whole|entire|every\s+scene|all\s+scenes|scene|scenes|show|shows|showing|use|using|put|place|display|keep|appear|starts?|starting|ends?|ending|first|last|final|opening|closing|for)\b/i;
 
@@ -367,10 +386,14 @@ export function parseSourceImagePlacement(
       placementIndexes.add(i);
     }
   });
-  const placementText = sentences.filter((_s, i) => placementIndexes.has(i)).join(' ');
+  const placementSentences = sentences.filter((_s, i) => placementIndexes.has(i));
+  const placementText = placementSentences.join(' ');
   if (!placementText) return undefined;
 
-  const base = { anchor: 'start' as SourceImagePlacementAnchor, fit: 'cover' as SourceImageFit, treatment: 'full' as SourceImageTreatment, stated: true };
+  // "Blur my photo into the background" ⇒ blurred-backdrop, never a sharp hero.
+  const treatment: SourceImageTreatment = placementSentences.some(asksForBlurredPhoto) ? 'blurred-backdrop' : 'full';
+
+  const base = { anchor: 'start' as SourceImagePlacementAnchor, fit: 'cover' as SourceImageFit, treatment, stated: true };
 
   // 1. Explicit "don't use it" beats everything else.
   if (NEGATION_PATTERNS.some((re) => re.test(placementText))) {

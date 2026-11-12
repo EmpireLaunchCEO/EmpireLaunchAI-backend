@@ -34,7 +34,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
+  buildMotionWindowPrompt,
   buildSceneImagePrompt,
+  buildWindowPrompt,
   deriveSceneSourceImageMetadata,
   parseScenePlan,
   resolveSourceImagePlacementSpec,
@@ -188,6 +190,75 @@ test('the treatment reaches the renderer through the scene metadata the worker r
   );
   assert.equal(sourceImageTreatmentForScene({ metadata: { sourceImage: fullMeta[3] } }), 'full');
   assert.match(buildSceneImagePrompt(sceneRow.visualPrompt, PHOTO, 'full'), /hero and continuous subject/);
+});
+
+/* ─────────── 3. the Veo MOTION prompt carries the same treatment ─────────── */
+
+test('her words alone produce the blurred backdrop, all the way to the Veo motion prompt', () => {
+  const placement = resolveFromChat('Blur my photo into the background for the whole video.');
+  assert.ok(placement, 'her sentence must produce a placement');
+  assert.equal(placement!.mode, 'background');
+  assert.equal(placement!.treatment, 'blurred-backdrop', '"blur my photo" must not become a sharp hero');
+
+  const sceneTimings = PLANNED.map((s) => ({ sceneNumber: s.sceneNumber, duration: s.duration }));
+  const meta = deriveSceneSourceImageMetadata(placement, sceneTimings);
+  const sceneRow = {
+    sceneNumber: 3,
+    duration: 6,
+    visualPrompt: 'A tidy pastry display case in morning light',
+    metadata: { sourceImage: meta[3] },
+  };
+  assert.equal(meta[3].role, 'backdrop');
+
+  // THE STRING THAT ACTUALLY REACHES VEO for this scene's motion window.
+  const window = { sceneNumber: 3, motionStartSeconds: 0, motionSeconds: 6 };
+  const motionPrompt = buildMotionWindowPrompt(window, sceneRow, PHOTO);
+  assert.match(motionPrompt, /blurred BACKGROUND PLATE behind this scene/);
+  assert.ok(motionPrompt.includes(PHOTO), 'the photo is still named as the plate');
+  assert.ok(!/hero and continuous subject/i.test(motionPrompt), 'the motion clip must NOT call the photo the hero');
+  assert.ok(!/do NOT swap it/i.test(motionPrompt));
+
+  // …and the seed still for the SAME scene says the same thing: no contradiction
+  // between the first frame and the motion that follows it.
+  assert.match(buildSceneImagePrompt(sceneRow.visualPrompt, PHOTO, sourceImageTreatmentForScene(sceneRow)), /blurred BACKGROUND PLATE/);
+});
+
+test('a plain background scene keeps the OLD hero motion prompt, byte-identical', () => {
+  const sceneTimings = PLANNED.map((s) => ({ sceneNumber: s.sceneNumber, duration: s.duration }));
+  const fullMeta = deriveSceneSourceImageMetadata(
+    normalizeSourceImagePlacement({ mode: 'background', stated: true })!,
+    sceneTimings,
+  );
+  const sceneRow = {
+    sceneNumber: 3,
+    duration: 6,
+    visualPrompt: 'A tidy pastry display case in morning light',
+    metadata: { sourceImage: fullMeta[3] },
+  };
+  const window = { sceneNumber: 3, motionStartSeconds: 0, motionSeconds: 6 };
+  const now = buildMotionWindowPrompt(window, sceneRow, PHOTO);
+  // Exactly how the window prompt was composed before the treatment existed.
+  const before = buildSceneImagePrompt(buildWindowPrompt(window, sceneRow), PHOTO, 'full');
+  assert.equal(now, before, 'the default motion prompt must not change for a non-blurred photo');
+  assert.match(now, /hero and continuous subject/);
+});
+
+test('the Veo window prompt is built by the one function that applies the treatment', () => {
+  const at = SERVICE_SRC.indexOf('private async generateOneVeoWindow(');
+  assert.ok(at > 0, 'generateOneVeoWindow must exist');
+  const body = SERVICE_SRC.slice(at, SERVICE_SRC.indexOf('for (let attempt', at));
+  assert.match(body, /const windowPrompt = buildMotionWindowPrompt\(w, scene, heroSource\)/, 'the window prompt must carry the treatment');
+  // …and that helper is the ONLY place a Veo window prompt is composed, so no call
+  // site can quietly go back to a treatment-less (sharp-hero) motion prompt.
+  const builderAt = SERVICE_SRC.indexOf('export function buildMotionWindowPrompt(');
+  assert.ok(builderAt > 0, 'buildMotionWindowPrompt must exist');
+  assert.match(
+    SERVICE_SRC.slice(builderAt, builderAt + 400),
+    /withSourceSubject\(buildWindowPrompt\(w, scene\), heroSource \|\| undefined, sourceImageTreatmentForScene\(scene\)\)/,
+    'the helper must pass the scene treatment',
+  );
+  const compositions = SERVICE_SRC.split('withSourceSubject(buildWindowPrompt').length - 1;
+  assert.equal(compositions, 1, 'the treatment-carrying helper must be the only window-prompt composition');
 });
 
 /* ─────────── wiring: the rules above are on the REAL request path ─────────── */

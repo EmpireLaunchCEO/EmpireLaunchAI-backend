@@ -2115,6 +2115,18 @@ export function sourceImageTreatmentForScene(scene: any): SourceImageTreatment {
   return (scene?.metadata as any)?.sourceImage?.role === 'backdrop' ? 'blurred-backdrop' : 'full';
 }
 /**
+ * THE FINAL PROMPT HANDED TO VEO FOR ONE MOTION WINDOW (owner Nov 11). This is the
+ * exact string that reaches `veoVideoService.generateSceneVideo({prompt})`. It MUST
+ * carry the scene's reference-image treatment: without it a `blurred-backdrop`
+ * scene's seed still said "blurred background plate behind the subject" while its
+ * motion clip said "the photo is the hero … do NOT swap it" — two contradictory
+ * instructions inside ONE scene. Exported so a fixture asserts on the string that
+ * actually goes out (design principle 13), never on the argument list.
+ */
+export function buildMotionWindowPrompt(w: MotionWindow, scene?: any, heroSource?: string): string {
+  return withSourceSubject(buildWindowPrompt(w, scene), heroSource || undefined, sourceImageTreatmentForScene(scene));
+}
+/**
  * ─── UPLOADED-PHOTO PLACEMENT (owner Oct 30) ──────────────────────────────────
  * "Anything the client uploads or agrees to in chat must actually change the
  * output." The renderer used to hand the uploaded photo to EVERY still scene,
@@ -5465,7 +5477,7 @@ else {
   ): Promise<string> {
     // A4: this call renders THIS window's beat at THIS window's real length — never
     // the span's "16-second single take" text, which described the other beat too.
-    const windowPrompt = withSourceSubject(buildWindowPrompt(w, scene), heroSource || undefined);
+    const windowPrompt = buildMotionWindowPrompt(w, scene, heroSource);
     // What the call COSTS is the legal Veo duration; what the scene NEEDS is its own
     // planned narration window. They are deliberately different numbers.
     const billedSeconds = Number.isFinite(w.motionSeconds) ? w.motionSeconds : VEO_CALL_SECONDS;
