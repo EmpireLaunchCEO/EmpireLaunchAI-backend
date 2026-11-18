@@ -1916,18 +1916,49 @@ export function planVeoSceneSpans(script: SceneScript[]): SoraSpan[] {
  * capped at the video's own planned length (never buy more motion than there is
  * video) with the legal 4s floor; a single-scene video buys one call.
  */
+/** The largest legal (4|6|8) take plan that sums to AT MOST `budget` in at most
+ *  `maxCalls` calls — i.e. the motion a plan of this length can actually show.
+ *  [] when even a single 4s clip is more than the budget (a video too short for
+ *  motion), which leaves the video on stills rather than buying motion it cannot
+ *  display. Pure + deterministic. */
+export function bestVeoTargetSum(budget: number, maxCalls: number): number[] {
+  const ceiling = Math.floor(Number.isFinite(budget) ? Number(budget) : 0);
+  for (let target = ceiling; target >= 4; target--) {
+    const plan = planVeoTargetSumDurations(target, maxCalls);
+    if (plan.length) return plan;
+  }
+  return [];
+}
 export function planFacelessVeoWindows(script: SceneScript[]): MotionWindow[] {
   if (!script.length) return [];
-  const plannedTotal = script.reduce((a, s) => a + (Number.isFinite(s.duration) ? s.duration : 0), 0);
-  const target = Math.min(VEO_FACELESS_MOTION_TARGET_SECONDS, Math.max(4, Math.ceil(plannedTotal)));
+  const dur = (s: SceneScript) => (Number.isFinite(s.duration) ? Number(s.duration) : 0);
+  const plannedTotal = script.reduce((a, s) => a + dur(s), 0);
   const hook = script[0];
   const payoff = script[script.length - 1];
   const elected = hook.sceneNumber === payoff.sceneNumber
     ? [hook.sceneNumber]
     : [hook.sceneNumber, payoff.sceneNumber];
-  const durations = planVeoTargetSumDurations(target, Math.min(VEO_FACELESS_MOTION_CALLS, elected.length));
-  // Not expressible with the 4|6|8 enum (a very short video) → one legal clip.
-  const seconds = durations.length ? durations : [nearestLegalVeoSeconds(Math.max(1, target))];
+  const electedSet = new Set(elected);
+  const slotSum = script.filter((s) => electedSet.has(s.sceneNumber)).reduce((a, s) => a + dur(s), 0);
+  const stillSlack = script
+    .filter((s) => !electedSet.has(s.sceneNumber))
+    .reduce((a, s) => a + Math.max(0, dur(s) - MIN_STILL_SCENE_SECONDS), 0);
+  // How much motion this plan can actually SHOW: the motion slots themselves plus
+  // the stills' slack above their floor. Buying more grows the slots and the file
+  // ships longer than she asked for.
+  const hostable = Math.floor(slotSum + stillSlack);
+  // THE REQUEST DECIDES THE MOTION, NOT THE PRODUCT CONSTANT (owner Nov 18 — "the
+  // 15-second clip coming out at 20 seconds"). 16s of Veo was applied to every video
+  // whatever its length: a 15s request plans 3 scenes (6/6/5), and two 8s takes grew
+  // BOTH slots to 8, so 22 scene-seconds − 1.6s of dissolves = 20.4s shipped for a
+  // 15s ask. The model's 16s is bought only when the plan can host it inside the
+  // same 1s the delivered length is judged by; otherwise the video buys what it can
+  // show — which is at most her own length.
+  const modelSeconds = VEO_FACELESS_MOTION_TARGET_SECONDS;
+  const budget = hostable >= modelSeconds - 1
+    ? Math.min(modelSeconds, Math.floor(plannedTotal))
+    : Math.min(modelSeconds, hostable);
+  const seconds = bestVeoTargetSum(budget, Math.min(VEO_FACELESS_MOTION_CALLS, elected.length));
   const windows: MotionWindow[] = [];
   let offset = 0;
   for (let i = 0; i < Math.min(seconds.length, elected.length); i++) {
@@ -2419,7 +2450,16 @@ const PLATFORM_PATTERNS: Array<{ re: RegExp; name: string }> = [
   { re: /\breels?/i, name: 'Reels' },
   { re: /\bshorts\b/i, name: 'Shorts' },
 ];
-const COLOR_WORDS = ['teal','magenta','pastel','neon','gold','silver','rose','navy','cream','beige','lavender','peach','coral','emerald','jade','burgundy','maroon','mustard','olive','charcoal','slate','ivory','blush','lilac','mint','sage','terracotta','cobalt','ruby','amber','turquoise','aqua','fuchsia','plum','indigo','violet','cyan','tangerine','apricot','sky blue','baby blue'];
+const COLOR_WORDS = ['red','blue','green','black','white','pink','orange','yellow','purple','brown','grey','gray','teal','magenta','pastel','neon','gold','silver','rose','navy','cream','beige','lavender','peach','coral','emerald','jade','burgundy','maroon','mustard','olive','charcoal','slate','ivory','blush','lilac','mint','sage','terracotta','cobalt','ruby','amber','turquoise','aqua','fuchsia','plum','indigo','violet','cyan','tangerine','apricot','sky blue','baby blue'];
+/** True when an inventory candidate is nothing but a colour (one word, or a
+ *  two-word colour name) — style guidance, never a spoken component. */
+export function isColourOnlyComponent(raw: string): boolean {
+  const v = normalizeComponent(raw).toLowerCase().replace(/[^a-z\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!v) return false;
+  if (COLOR_WORDS.includes(v)) return true;
+  const words = v.split(' ');
+  return words.length === 1 && COLOR_WORDS.includes(words[0]);
+}
 const CTA_PATTERNS: RegExp[] = [
   /\bfollow\s+@?[a-z0-9_.]+/i,
   /\blink in bio\b/i,
@@ -2482,7 +2522,27 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
     // check, and get appended verbatim to scene 1's visualPrompt — painted into the
     // still. It is routed to the planner as style guidance instead (buildStyleGuidance).
     if (isDirectiveInstruction(v)) return;
-    if (out.some(o => o.toLowerCase() === v.toLowerCase())) return;
+    // A COLOUR IS STYLE GUIDANCE, NOT A SPOKEN COMPONENT (owner Nov 18). It had
+    // nowhere to live: buildPlannerComponentsSection demands every component be
+    // SPOKEN while stripBenefitTextFromVisualPrompts strips every component out of
+    // every visual prompt, so one word — "red" — could only ever block the render.
+    // The same word now reaches the planner through buildStyleGuidance.
+    if (isColourOnlyComponent(v)) return;
+    // CONTAINMENT DEDUPE (owner Nov 18): a candidate that is already INSIDE an
+    // accepted item, or contains one, is the same statement. Keep the client's own
+    // shortest form. This is what removes "This platform will be all you need"
+    // (contained in the longer clause) and the synthesised "EmpireLaunchAi — the
+    // This platform is a must have…" splice, which no plan could ever contain.
+    const lower = v.toLowerCase();
+    const dup = out.findIndex(o => {
+      const lo = o.toLowerCase();
+      return lo === lower || lo.includes(lower) || lower.includes(lo);
+    });
+    if (dup !== -1) {
+      if (out[dup].length <= v.length) return;
+      out[dup] = v;
+      return;
+    }
     out.push(v);
   };
   // (a) Explicit components — highest priority, keep client's order.
@@ -2545,6 +2605,10 @@ export function buildStyleGuidance(input: ComponentInventoryInput): string[] {
     : stripInstructionResidue(input.cleanBrief ?? '');
   for (const c of chunkText(briefSource)) if (isDirectiveInstruction(c)) push(c);
   for (const c of chunkText(stripInstructionResidue(userText))) if (isDirectiveInstruction(c)) push(c);
+  // COLOURS (owner Nov 18): a colour the client named is direction for the look, and
+  // it is the ONLY place it can live — see the predicate in buildComponentInventory.
+  const colourText = `${input.cleanBrief ?? ''} ${userText}`;
+  for (const c of COLOR_WORDS) if (new RegExp(`\\b${c}\\b`, 'i').test(colourText)) push(c);
   return out.slice(0, 8);
 }
 
@@ -2954,11 +3018,29 @@ export function injectSellingPointsIntoNarration(
   let midCursor = Math.max(1, Math.floor(count / 2));
   const isHookish = (c: string) => /empirelaunch ai|go-to content creation platform|your go-to|introducing/i.test(c);
     const isCtaPrice = (c: string) => /go to empirelaunchai|introductory price|\$\s?\d|sign up|link in bio|subscribe|follow|visit|shop now|order now|buy now|learn more|join us/i.test(c);
+  // ONE SENTENCE PER SCENE (owner Nov 18 — "the broken narration"). The target used
+  // to be the same index for EVERY hook-ish or CTA item in a pass (only the middle
+  // branch advanced its cursor), so two missing hook sentences were both appended to
+  // scene 2 and the video said "Introducing EmpireLaunchAi. EmpireLaunchAi." — and
+  // it always happened, because the second F4 pass runs after enforceDictatedOpening.
+  // Every append now CLAIMS its scene; a second item aimed at a taken scene moves to
+  // the next free one.
+  const claimed = new Set<number>();
+  const claimTarget = (preferred: number): number => {
+    const floor = opts?.skipSceneZero ? 1 : 0;
+    const usable = (i: number) => i >= floor && i < count && !claimed.has(i);
+    if (usable(preferred)) return preferred;
+    for (let i = preferred + 1; i < count; i++) if (usable(i)) return i;
+    for (let i = floor; i < preferred; i++) if (usable(i)) return i;
+    return preferred; // every scene already took one — nothing left to distribute
+  };
   for (const c of missing) {
-    let target: number;
-    if (isCtaPrice(c)) target = last;
-    else if (isHookish(c)) target = opts?.skipSceneZero ? Math.max(1, Math.min(last - 1, Math.floor(count / 2))) : 0;
-    else { target = midCursor; midCursor = (midCursor + 1) % Math.max(1, count - 1); if (midCursor === last) midCursor = Math.max(1, last - 1); }
+    let preferred: number;
+    if (isCtaPrice(c)) preferred = last;
+    else if (isHookish(c)) preferred = opts?.skipSceneZero ? Math.max(1, Math.min(last - 1, Math.floor(count / 2))) : 0;
+    else { preferred = midCursor; midCursor = (midCursor + 1) % Math.max(1, count - 1); if (midCursor === last) midCursor = Math.max(1, last - 1); }
+    const target = claimTarget(preferred);
+    claimed.add(target);
     const s = next[target];
     s.narration = composeNarrationWithPhrase(s.narration, c, s.duration);
     injected.push(c);
@@ -3801,6 +3883,81 @@ export function componentsNotPlacedNotice(missing: string[]): ComponentsFailure 
   };
 }
 
+/**
+ * THE COMPONENT GATE, DECIDED IN ONE PURE PLACE (owner Nov 18 — the refusal that
+ * cost her a video). The gate must never block a video for OBEYING the brief, and it
+ * must still block a video that DROPS something she stated. Three things decide it:
+ *
+ *   1. A placement the one repair pass WON is placed. The repair's assignments are
+ *      merged into the plan; the splice sanitiser may afterwards clean the copy out
+ *      of the narration (it strips component text on purpose), and counting that as
+ *      missing refused renders the repair had already saved.
+ *   2. FRAMING IS NOT A COMPONENT. The brief sentence, the finished-essence copy and
+ *      her own chat turns are the SUBJECT the planner turns into scenes — they can
+ *      never appear verbatim in a plan. The old exemption looked only at the brief,
+ *      so every conversation-derived sentence was outside it by definition.
+ *   3. A COMPONENT SHE RELAYED ALWAYS GATES: an explicit component, or a canonical
+ *      token she named (a platform, a price, a CTA). Exempting those is how the gate
+ *      would become useless.
+ */
+export function resolveGateMissingComponents(input: {
+  missingComponents: string[];
+  cleanIdea: string;
+  conversation?: Array<{ role?: string; content?: unknown }> | null;
+  explicitComponents?: string[] | null;
+  repairedPlaced?: string[] | null;
+}): string[] {
+  const key = (c: unknown) => normalizeComponent(String(c ?? '')).toLowerCase();
+  const repaired = new Set((input.repairedPlaced ?? []).map(key).filter(Boolean));
+  const explicit = new Set((input.explicitComponents ?? []).map(key).filter(Boolean));
+  const framing = new Set(framingChunkTexts(input.cleanIdea, input.conversation).map(c => c.toLowerCase()));
+  return (input.missingComponents ?? [])
+    .map(c => normalizeComponent(c))
+    .filter(Boolean)
+    .filter(c => {
+      const lower = c.toLowerCase();
+      if (explicit.has(lower)) return true;
+      if (repaired.has(lower)) return false;
+      return !framing.has(lower);
+    });
+}
+
+/** Sentence chunks of everything the client's words were TRANSFORMED into — the
+ *  brief, the finished-essence copy, and her own chat turns. A canonical stated
+ *  token (a platform she named, a price, a CTA) is NOT framing: that is a component
+ *  and it still gates. Pure. */
+function framingChunkTexts(
+  cleanIdea: string,
+  conversation?: Array<{ role?: string; content?: unknown }> | null,
+): string[] {
+  const userText = (conversation ?? [])
+    .filter(m => m?.role === 'user' && typeof m?.content === 'string')
+    .map(m => String(m.content))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const essence = extractCreativeEssence(cleanIdea ?? '');
+  const sources = [
+    stripInstructionResidue(cleanIdea ?? ''),
+    finishedEssenceBrief(essence),
+    stripInstructionResidue(userText),
+  ];
+  return sources.flatMap(s => chunkText(s)).filter(c => !isCanonicalStatedToken(c));
+}
+
+/** A platform / price / CTA the client named — a component, never framing. */
+function isCanonicalStatedToken(raw: string): boolean {
+  const lower = normalizeComponent(raw).toLowerCase();
+  if (!lower) return false;
+  if (PLATFORM_PATTERNS.some(p => p.name.toLowerCase() === lower)) return true;
+  if (new RegExp(`^${PRICE_RE.source}$`, 'i').test(lower)) return true;
+  if (new RegExp(`^${PCT_OFF_RE.source}$`, 'i').test(lower)) return true;
+  return CTA_PATTERNS.some(re => {
+    const m = lower.match(new RegExp(re.source, 'i'));
+    return !!m && m[0].trim().toLowerCase() === lower;
+  });
+}
+
 /** Thrown by createProject when an item could not be placed, AFTER the failed row is
  *  written (mirrors PlanningFailedError so the route answers 422 in plain words). */
 export class ComponentsNotPlacedError extends Error {
@@ -4476,10 +4633,22 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // explicit component, a named thing in chat) still gate; the brief's own sentence
     // chunks are what the planner turns into scenes and are covered by the assignment
     // check (2b), so they are audited in componentsMissing but never block.
-    const briefFraming = new Set(
-      chunkText(stripInstructionResidue(cleanIdea)).map(c => c.toLowerCase()),
-    );
-    const gateMissing = qc.missingComponents.filter(c => !briefFraming.has(c.toLowerCase()));
+    // ...and it is decided AFTER the splice sanitiser, on the plan that is actually
+    // persisted, treating a placement the ONE repair pass won as placed (its
+    // assignments were merged above; the sanitiser may since have cleaned the copy
+    // out of the narration, and counting that as missing refused a render the repair
+    // had already saved). See resolveGateMissingComponents.
+    const gateMissing = resolveGateMissingComponents({
+      missingComponents: qc.missingComponents,
+      cleanIdea,
+      conversation: input.conversation,
+      explicitComponents: input.components,
+      repairedPlaced: componentRepair.placed,
+    });
+    if (qc.missingComponents.length && gateMissing.length !== qc.missingComponents.length) {
+      const blocking = new Set(gateMissing.map(c => c.toLowerCase()));
+      trace(`components_gate project=${projectId} missing=${qc.missingComponents.length} blocking=${gateMissing.length} exempt=[${qc.missingComponents.filter(c => !blocking.has(c.toLowerCase())).join(' | ')}]`);
+    }
     const componentsFailure = componentsNotPlacedNotice(gateMissing);
     // PLANNING GATE (owner Nov 2): no plan ⇒ no video. The row is still written (so
     // the bypass is recorded and the client can see why) but it is written as failed,

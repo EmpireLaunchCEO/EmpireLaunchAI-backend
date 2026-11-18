@@ -49,7 +49,13 @@ export function enforceDictatedOpening(
   const next = script.map((s) => ({ ...s }));
   const target = next[0];
   if (target === undefined) return { script, patched: false };
-  target.narration = /[.!?]$/.test(want) ? want : `${want}.`;
+  const line = /[.!?]$/.test(want) ? want : `${want}.`;
+  // PREPEND, NEVER REPLACE (owner Nov 18 — the duplicated-narration defect).
+  // Replacing scene 1 threw away what the planner had already planned there, and
+  // the second F4 pass then re-injected those very items onto one scene, so the
+  // video said "Introducing EmpireLaunchAi. EmpireLaunchAi." Her line goes first,
+  // verbatim; whatever the scene already said is kept after it.
+  target.narration = cur && cur !== line ? `${line} ${cur}`.replace(/\s+/g, ' ').trim() : line;
   return { script: next, patched: true };
 }
 
@@ -673,10 +679,62 @@ function removeSplice(body: string, hit: PhraseHit): string {
     if (!head) return after.trim();
     return `${head}${after.trim() ? ` ${after.trim()}` : ''}`.replace(/\s+/g, ' ').trim();
   }
-  return `${before}${after ? ` ${after}` : ''}`
+  const joined = `${before}${after ? ` ${after}` : ''}`
     .replace(/\s+/g, ' ')
     .replace(/\s+([,.;:!?])/g, '$1')
     .trim();
+  // THE VERB WITH NO DESTINATION (owner Nov 18 — "the broken narration"): deleting
+  // the fragment used to leave its host clause dangling mid-air, so
+  // "…and the process is Go to Empirelaunchai.com." became "…and the process is Go
+  // to" — a spoken sentence that stops before it says anything. If the remainder
+  // ends on a preposition/particle, or the clause it ends in has no finite verb,
+  // the whole incomplete clause goes with the fragment. Clean text is untouched.
+  return trimIncompleteTail(joined);
+}
+
+/** Function words that cannot END a spoken clause. */
+const DANGLING_TAIL_WORDS = new Set<string>([
+  'a', 'an', 'the', 'and', 'or', 'but', 'so', 'because', 'then', 'if', 'when', 'while',
+  'that', 'which', 'who', 'whom', 'whose', 'to', 'of', 'for', 'with', 'in', 'on', 'at',
+  'by', 'from', 'as', 'into', 'onto', 'about', 'like', 'via', 'per', 'plus', 'than',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am', 'do', 'does', 'did', 'has',
+  'have', 'had', 'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'it', 'its', 'this', 'these', 'those', 'your', 'our', 'my', 'their', 'his', 'her',
+  'we', 'you', 'they', 'them', 'us', 'me', 'he', 'she', 'not', 'no', 'very', 'just',
+  'also', 'both', 'each', 'every', 'all', 'any', 'some', 'more', 'most',
+]);
+
+/** Coordinating / subordinating words that start a new clause mid-sentence. */
+const CLAUSE_CONJUNCTION_RE = /\b(?:and|but|so|because|then|which|that|while|when)\b/gi;
+
+/**
+ * Drop the LAST clause of `text` when it cannot stand as spoken language on its own
+ * — it ends on a function word ("…the process is Go to") or carries no finite verb.
+ * The clause before it is returned, so the line ends on something complete. Text
+ * that already ends on a complete clause comes back byte-identical. Pure.
+ */
+function trimIncompleteTail(text: string): string {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return t;
+  const starts = [0];
+  for (let i = 0; i < t.length; i++) if (CLAUSE_BOUNDARY.test(t[i] ?? '')) starts.push(i + 1);
+  CLAUSE_CONJUNCTION_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CLAUSE_CONJUNCTION_RE.exec(t)) !== null) starts.push(m.index);
+  starts.sort((a, b) => a - b);
+  const lastStart = starts[starts.length - 1] ?? 0;
+  const tail = t.slice(lastStart).replace(/^[\s\u2014\u2013;:,-]+/, '').trim();
+  if (!tail) return t;
+  const words = tail.split(' ').filter(Boolean);
+  const lastWord = (words[words.length - 1] ?? '').toLowerCase().replace(/[^a-z']/g, '');
+  const endsDangling = !lastWord || DANGLING_TAIL_WORDS.has(lastWord);
+  if (!endsDangling && hasFiniteVerb(tail)) return t;
+  const head = t
+    .slice(0, lastStart)
+    .replace(/[\s\u2014\u2013;:,-]+$/, '')
+    .trim();
+  // Nothing complete in front of the broken clause → the sentence has no remainder.
+  return head;
 }
 
 export interface NarrationSanitizeOptions {
