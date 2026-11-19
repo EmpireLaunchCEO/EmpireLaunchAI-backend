@@ -181,14 +181,52 @@ export function planVeoClipDurationsTotal(sceneCount: number): number {
   return planVeoClipDurations(sceneCount).reduce((a, b) => a + b, 0);
 }
 /**
- * FACELESS MOTION BUDGET (owner-approved cost model, rev 192 — Nov 10):
- * a 30-second Faceless video spends **16 seconds of Veo in TWO 8-second calls**
- * and the other 14 seconds on stills. Before this, only CAPS existed (a 30s
- * budget, a 5-window cap, and planVeoClipDurations(2) → [6, 8] = 14s), so there
- * was no way to express "16 seconds total, in two calls".
+ * FACELESS MOTION BUDGET — **THE OWNER'S DURATION TABLE** (owner, Nov 19, in her
+ * words): *"a 15 seconds video should get 6 seconds of Veo. a 10 second video gets
+ * 4 seconds of Veo, a 30 second video gets 16 seconds of veo."*
+ *
+ * These are **total Veo seconds per video**, not per call: 10s → one 4s take,
+ * 15s → one 6s take, 30s → two 8s takes. A 15s video used to buy the flat 16s
+ * product constant (10s of motion after the plan could only host that much) at
+ * twice the cost of the 6s she asked for.
+ *
+ * Between the anchors the budget is LINEAR and ROUNDED DOWN, so the pipeline never
+ * buys more motion than the table allows: 20s → 9s (→ the 8s take plan),
+ * 25s → 12s (→ 8 + 4). Outside the anchors it clamps: nothing buys less than the
+ * 4s floor and nothing buys more than 16s.
  */
+export const VEO_FACELESS_MOTION_BUDGET_TABLE: ReadonlyArray<readonly [number, number]> = [
+  [10, 4],
+  [15, 6],
+  [30, 16],
+];
+/** The most any Faceless video buys (the table's top anchor, a 30s video). */
 export const VEO_FACELESS_MOTION_TARGET_SECONDS = 16;
 export const VEO_FACELESS_MOTION_CALLS = 2;
+/**
+ * THE DURATION TABLE AS A FUNCTION: the Veo budget for a video of
+ * `videoSeconds`, linear between the anchors and rounded DOWN to a whole second.
+ * Pure + deterministic. The caller then rounds that budget down again to the
+ * largest legal take plan (4|6|8s takes, at most two calls) it can actually host.
+ *
+ * The length is read on WHOLE seconds (the table's own unit): a 30s request whose
+ * plan lands at 29.8s of delivered picture is a 30-second video and must still buy
+ * the anchor's 16s, not the 15s a 29.8 would interpolate to.
+ */
+export function veoFacelessMotionBudgetSeconds(videoSeconds: number): number {
+  const table = VEO_FACELESS_MOTION_BUDGET_TABLE;
+  const first = table[0];
+  const last = table[table.length - 1];
+  const d = Number.isFinite(Number(videoSeconds)) ? Math.round(Number(videoSeconds)) : last[0];
+  if (d <= first[0]) return first[1];
+  if (d >= last[0]) return last[1];
+  for (let i = 0; i < table.length - 1; i++) {
+    const [x0, y0] = table[i];
+    const [x1, y1] = table[i + 1];
+    if (d <= x1) return Math.floor(y0 + ((d - x0) * (y1 - y0)) / (x1 - x0));
+  }
+  return last[1];
+}
 /**
  * HOW FAR A TAKE MAY BE SLOWED TO FILL ITS SLOT (owner outcome, Nov 11: "every
  * paid second of Veo motion actually appears in the video, at normal speed").
