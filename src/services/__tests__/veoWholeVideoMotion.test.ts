@@ -64,6 +64,7 @@ import {
 import {
   planVeoSceneWindows,
   planVeoSceneSpans,
+  planFacelessVeoSpans,
   applyVeoSceneMotion,
   capVeoMotionWindows,
   fitClipToDuration,
@@ -284,19 +285,38 @@ test('CAP: capVeoMotionWindows keeps the whole 4 × 6s + 1 × 8s plan and demote
 });
 
 // ═══ (8) FACELESS carries its own motion; SCENE keeps its election ══════════
-test('FACELESS: its own deterministic election (two 8s calls); SCENE keeps planVeoSceneSpans', () => {
-  const src = fs.readFileSync(path.join(process.cwd(), 'src', 'services', 'sceneVideoPipelineService.ts'), 'utf8');
-  const callSites = src.split('\n')
-    .filter(l => l.includes('planVeoSceneSpans('))
-    .filter(l => !l.includes('export function planVeoSceneSpans')); // the definition is not a call
-  assert.equal(callSites.length, 1, 'planVeoSceneSpans has exactly ONE call site');
-  // FACELESS MOTION (owner, Nov 10 — rev 192): Faceless is no longer excluded from
-  // the Veo pre-pass. The guard is now a TWO-BRANCH choice — Scene keeps its
-  // whole-video election, Faceless gets the owner-approved 16s-in-two-8s-calls one.
-  assert.ok(/let spanPlans = mode === 'scene'\s*\n\s*\? capVeoMotionWindows\(planned, planVeoSceneSpans\(planned\)\)\.spans\s*\n\s*: planFacelessVeoSpans\(planned\);/.test(src),
-    'Scene → its own spans; Faceless → two 8s windows (16s)');
-  assert.equal(src.split('veoVideoService.generateSceneVideo(').length - 1, 2,
-    'exactly two Veo call sites (the per-window path and the legacy per-scene path)');
+test('FACELESS: its election is LENGTH-AWARE (30s → two 8s calls, 15s → 6+4); SCENE keeps planVeoSceneSpans', () => {
+  // 30s — the owner-approved 16s, in two 8-second calls.
+  const thirty = [1, 2, 3, 4, 5].map(n => scene(n, 6));
+  const faceless30 = planFacelessVeoSpans(thirty);
+  assert.equal(faceless30.length, 1, 'one span carries every Faceless window');
+  assert.deepEqual(faceless30[0].windows.map(w => w.motionSeconds), [8, 8], 'a 30s video buys 16s in two 8s calls');
+  assert.equal(faceless30[0].totalSeconds, 16);
+
+  // 15s — THE REQUEST DECIDES THE MOTION (owner Nov 18 — "the 15-second clip coming
+  // out at 20 seconds"). The plan can only show 6 + 4, so that is what it buys.
+  const fifteen = [scene(1, 6), scene(2, 6), scene(3, 5)];
+  const faceless15 = planFacelessVeoSpans(fifteen);
+  assert.deepEqual(
+    faceless15[0].windows.map(w => w.motionSeconds),
+    [6, 4],
+    'a 15s plan buys only what it can show — 6 + 4',
+  );
+  assert.equal(faceless15[0].totalSeconds, 10, '10s of paid motion, not the 16s product constant');
+  assert.ok(faceless15[0].totalSeconds <= 15, 'never more motion than the video itself');
+
+  // SCENE is untouched by any of this — the same 30s script keeps its own election.
+  const sceneSpans = planVeoSceneSpans(thirty);
+  assert.equal(sceneSpans[0].windows.length, 5, 'Scene still elects a window per scene');
+  assert.equal(sceneSpans[0].totalSeconds, 32, 'and still buys its 4 × 6s + 1 × 8s');
+
+  // Both branches really exist in the source — counting CODE lines, not comments.
+  const raw = fs.readFileSync(path.join(process.cwd(), 'src', 'services', 'sceneVideoPipelineService.ts'), 'utf8');
+  const code = raw.split('\n').filter(l => !/^\s*(\*|\/\/|\/\*)/.test(l));
+  const spanCallSites = code.filter(l => l.includes('planVeoSceneSpans(') && !l.includes('export function'));
+  assert.equal(spanCallSites.length, 1, 'planVeoSceneSpans has exactly ONE call site');
+  const veoCallSites = code.filter(l => l.includes('veoVideoService.generateSceneVideo('));
+  assert.equal(veoCallSites.length, 2, 'exactly two Veo call sites (the per-window path and the legacy per-scene path)');
 });
 
 // ═══ (5) THE JOINS — measured on real frames ═════════════════════════════════
