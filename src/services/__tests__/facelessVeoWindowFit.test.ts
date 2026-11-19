@@ -164,10 +164,14 @@ test('STRETCH CAP: a take is never fitted past 1.25x — the 1.875x slow is gone
 // ═══ 4. A LONG SCENE IS NEVER SHRUNK TO ITS TAKE ════════════════════════════
 test('LONG SCENES: the slot is never shrunk (that would cut narration), the take is capped instead', () => {
   // A two-scene plan is the shape that produced the 1.875x slow: 15s slots, 8s takes.
-  const long: SceneScript[] = [
+  const longRaw: SceneScript[] = [
     { sceneNumber: 1, duration: 15, visualType: 'still', visualPrompt: 'The bakery floor at dawn', narration: 'Fresh bread, baked before the sun comes up, every single morning.' },
     { sceneNumber: 2, duration: 15, visualType: 'still', visualPrompt: 'The bakery storefront at golden hour', narration: 'Come by this weekend and try it yourself.' },
   ];
+  // THE PRODUCTION SHAPE: createProject normalizes the plan onto the requested 30s
+  // (dissolve-compensated) BEFORE the motion election, so the plan the election sees
+  // reads as a 30-second video and gets the duration table's 16s anchor.
+  const long = normalizePlanTimeBudget(longRaw, DURATION, { dissolveCompensate: true });
   const spans = planFacelessVeoSpans(long);
   const planned = fitMotionWindowsToSlots(applyVeoSceneMotion(long, spans), spans);
   assert.equal(planned.script.length, 2, 'fixture: a two-scene plan');

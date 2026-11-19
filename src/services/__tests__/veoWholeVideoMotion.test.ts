@@ -60,6 +60,8 @@ import {
   VEO_ERRORS,
   veoImageRejectedMessage,
   veoImageMissingMessage,
+  veoFacelessMotionBudgetSeconds,
+  VEO_FACELESS_MOTION_BUDGET_TABLE,
 } from '../veoVideoService.js';
 import {
   planVeoSceneWindows,
@@ -68,6 +70,9 @@ import {
   applyVeoSceneMotion,
   capVeoMotionWindows,
   fitClipToDuration,
+  fitMotionWindowsToSlots,
+  parseScenePlan,
+  normalizePlanTimeBudget,
   concatClips,
   isRetryableVeoFailure,
   type SceneScript,
@@ -285,25 +290,64 @@ test('CAP: capVeoMotionWindows keeps the whole 4 × 6s + 1 × 8s plan and demote
 });
 
 // ═══ (8) FACELESS carries its own motion; SCENE keeps its election ══════════
-test('FACELESS: its election is LENGTH-AWARE (30s → two 8s calls, 15s → 6+4); SCENE keeps planVeoSceneSpans', () => {
-  // 30s — the owner-approved 16s, in two 8-second calls.
+/** MIRROR of createProject's Faceless motion sequence, in its order: parse ->
+ *  dissolve-compensated time budget -> election -> slot fit. */
+function facelessPlanFor(target: number, shapes: Array<[number, number]>) {
+  const raw = {
+    scenes: shapes.map(([n, d]) => ({
+      sceneNumber: n, duration: d, visualType: 'still', visualPrompt: `beat ${n}`, narration: `Line ${n}.`,
+    })),
+  };
+  const parsed = parseScenePlan(raw as any, `A ${target} second launch video.`, target, 'faceless');
+  const normalized = normalizePlanTimeBudget(parsed, target, { dissolveCompensate: true });
+  const spans = planFacelessVeoSpans(normalized);
+  const planned = applyVeoSceneMotion(normalized, spans);
+  const fit = fitMotionWindowsToSlots(planned, spans);
+  const takes = spans.reduce<number[]>((a, sp) => a.concat(sp.windows.map((w) => w.motionSeconds)), []);
+  return { normalized, spans, fit, takes, motionSeconds: takes.reduce((a, b) => a + b, 0) };
+}
+
+test('FACELESS: THE OWNER\'S DURATION TABLE — 10s→4s, 15s→6s, 30s→16s of Veo (20s→8s, 25s→12s interpolated), delivered within 1s; SCENE keeps planVeoSceneSpans', () => {
+  // THE TABLE AS A FUNCTION — the owner's anchors, verbatim, then linear between them.
+  assert.deepEqual(VEO_FACELESS_MOTION_BUDGET_TABLE, [[10, 4], [15, 6], [30, 16]], "the owner's duration table");
+  assert.equal(veoFacelessMotionBudgetSeconds(10), 4, 'a 10 second video gets 4 seconds of Veo');
+  assert.equal(veoFacelessMotionBudgetSeconds(15), 6, 'a 15 second video gets 6 seconds of Veo');
+  assert.equal(veoFacelessMotionBudgetSeconds(30), 16, 'a 30 second video gets 16 seconds of Veo');
+  assert.equal(veoFacelessMotionBudgetSeconds(20), 9, 'between the anchors it is linear and rounded DOWN');
+  assert.equal(veoFacelessMotionBudgetSeconds(25), 12, 'and 25s sits on the same line');
+  assert.equal(veoFacelessMotionBudgetSeconds(6), 4, 'below the table nothing buys less than the 4s floor');
+  assert.equal(veoFacelessMotionBudgetSeconds(60), 16, 'above the table 16s is the most any video buys');
+
+  // THE TAKE PLAN, per requested length: the largest legal (4|6|8s, at most two
+  // calls) plan that does not exceed the budget — and the delivered length it buys.
+  const cases: Array<{ target: number; shapes: Array<[number, number]>; takes: number[]; total: number }> = [
+    { target: 10, shapes: [[1, 5], [2, 5]], takes: [4], total: 4 },
+    { target: 15, shapes: [[1, 5], [2, 5], [3, 5]], takes: [6], total: 6 },
+    { target: 20, shapes: [[1, 5], [2, 5], [3, 5], [4, 5]], takes: [8], total: 8 },
+    { target: 25, shapes: [[1, 5], [2, 5], [3, 5], [4, 5], [5, 5]], takes: [8, 4], total: 12 },
+    { target: 30, shapes: [[1, 6], [2, 6], [3, 6], [4, 6], [5, 6]], takes: [8, 8], total: 16 },
+  ];
+  for (const c of cases) {
+    const plan = facelessPlanFor(c.target, c.shapes);
+    assert.deepEqual(plan.takes, c.takes, `a ${c.target}s video buys ${c.total}s of Veo (${c.takes.join('+')})`);
+    assert.equal(plan.motionSeconds, c.total, `a ${c.target}s video buys exactly ${c.total}s of Veo`);
+    assert.ok(
+      plan.motionSeconds <= veoFacelessMotionBudgetSeconds(c.target),
+      `${c.target}s: never more motion than the table allows`,
+    );
+    assert.ok(plan.takes.length <= 2, `${c.target}s: at most the two approved calls`);
+    assert.ok(
+      Math.abs(plan.fit.report.deliveredSeconds - c.target) <= 1,
+      `a ${c.target}s request delivers ${plan.fit.report.deliveredSeconds}s — within 1s of the request`,
+    );
+  }
+
+  // THE 30s CASE IS UNCHANGED: 16s in two 8s calls, still one span.
   const thirty = [1, 2, 3, 4, 5].map(n => scene(n, 6));
-  const faceless30 = planFacelessVeoSpans(thirty);
+  const faceless30 = planFacelessVeoSpans(normalizePlanTimeBudget(thirty, 30, { dissolveCompensate: true }));
   assert.equal(faceless30.length, 1, 'one span carries every Faceless window');
   assert.deepEqual(faceless30[0].windows.map(w => w.motionSeconds), [8, 8], 'a 30s video buys 16s in two 8s calls');
   assert.equal(faceless30[0].totalSeconds, 16);
-
-  // 15s — THE REQUEST DECIDES THE MOTION (owner Nov 18 — "the 15-second clip coming
-  // out at 20 seconds"). The plan can only show 6 + 4, so that is what it buys.
-  const fifteen = [scene(1, 6), scene(2, 6), scene(3, 5)];
-  const faceless15 = planFacelessVeoSpans(fifteen);
-  assert.deepEqual(
-    faceless15[0].windows.map(w => w.motionSeconds),
-    [6, 4],
-    'a 15s plan buys only what it can show — 6 + 4',
-  );
-  assert.equal(faceless15[0].totalSeconds, 10, '10s of paid motion, not the 16s product constant');
-  assert.ok(faceless15[0].totalSeconds <= 15, 'never more motion than the video itself');
 
   // SCENE is untouched by any of this — the same 30s script keeps its own election.
   const sceneSpans = planVeoSceneSpans(thirty);
@@ -317,6 +361,10 @@ test('FACELESS: its election is LENGTH-AWARE (30s → two 8s calls, 15s → 6+4)
   assert.equal(spanCallSites.length, 1, 'planVeoSceneSpans has exactly ONE call site');
   const veoCallSites = code.filter(l => l.includes('veoVideoService.generateSceneVideo('));
   assert.equal(veoCallSites.length, 2, 'exactly two Veo call sites (the per-window path and the legacy per-scene path)');
+  assert.equal(
+    code.filter(l => l.includes('veoFacelessMotionBudgetSeconds(')).length, 1,
+    'the election reads the owner\'s duration table in exactly ONE place',
+  );
 });
 
 // ═══ (5) THE JOINS — measured on real frames ═════════════════════════════════

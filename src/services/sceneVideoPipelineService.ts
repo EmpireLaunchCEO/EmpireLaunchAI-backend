@@ -18,8 +18,8 @@ import {
   nearestLegalVeoSeconds,
   planVeoClipDurations,
   planVeoTargetSumDurations,
-  VEO_FACELESS_MOTION_TARGET_SECONDS,
   VEO_FACELESS_MOTION_CALLS,
+  veoFacelessMotionBudgetSeconds,
   VEO_WINDOW_MAX_STRETCH_RATIO,
   veoCostUsd,
 } from './veoVideoService.js';
@@ -1903,16 +1903,19 @@ export function planVeoSceneSpans(script: SceneScript[]): SoraSpan[] {
   }];
 }
 /**
- * FACELESS MOTION WINDOWS (owner-approved cost model, rev 192 — Nov 10):
- * **16 seconds of Veo in TWO 8-second calls**, the rest of a 30s video on stills.
+ * FACELESS MOTION WINDOWS — **THE OWNER'S DURATION TABLE** (owner, Nov 19):
+ * *"a 10 second video gets 4 seconds of Veo, a 15 second video gets 6, a 30 second
+ * video gets 16"* — total Veo seconds per video, not per call. So a 30s video is
+ * two 8s calls, a 15s video one 6s call, a 10s video one 4s call; every length in
+ * between is interpolated linearly, rounded down, and then rounded down again to
+ * the largest legal take plan (4|6|8s, at most two calls) it can host.
  * Faceless was locked out of motion by four conditions — parse forced `still`,
  * createProject forced `still`, `spanPlans` was `mode==='scene'` only, and
  * `veoWindowReady` was written only for Scene. This is the election that replaces
  * them, and it is the ONE place that decides which Faceless scenes move.
  *
  * WHICH scenes move is DETERMINISTIC FROM THE NARRATION, never the planner's
- * taste: the HOOK (the first scene) and the PAYOFF (the last scene). Each window
- * is one 8s Veo call, so a 30s video is exactly 2 calls / 16s. The target is
+ * taste: the HOOK (the first scene) and the PAYOFF (the last scene). The budget is
  * capped at the video's own planned length (never buy more motion than there is
  * video) with the legal 4s floor; a single-scene video buys one call.
  */
@@ -1947,14 +1950,16 @@ export function planFacelessVeoWindows(script: SceneScript[]): MotionWindow[] {
   // the stills' slack above their floor. Buying more grows the slots and the file
   // ships longer than she asked for.
   const hostable = Math.floor(slotSum + stillSlack);
-  // THE REQUEST DECIDES THE MOTION, NOT THE PRODUCT CONSTANT (owner Nov 18 — "the
-  // 15-second clip coming out at 20 seconds"). 16s of Veo was applied to every video
-  // whatever its length: a 15s request plans 3 scenes (6/6/5), and two 8s takes grew
-  // BOTH slots to 8, so 22 scene-seconds − 1.6s of dissolves = 20.4s shipped for a
-  // 15s ask. The model's 16s is bought only when the plan can host it inside the
-  // same 1s the delivered length is judged by; otherwise the video buys what it can
-  // show — which is at most her own length.
-  const modelSeconds = VEO_FACELESS_MOTION_TARGET_SECONDS;
+  // THE REQUEST DECIDES THE MOTION, NOT A PRODUCT CONSTANT (owner Nov 18 — "the
+  // 15-second clip coming out at 20 seconds"; owner Nov 19 — THE DURATION TABLE:
+  // "a 10 second video gets 4 seconds of Veo, a 15 second video gets 6, a 30 second
+  // video gets 16"). The budget is read off the length she asked for — the plan's own
+  // delivered length, which is what her request produces — instead of the flat 16s
+  // every video used to buy. It is then rounded DOWN to the largest legal take plan
+  // (4|6|8s takes, at most two calls) this plan can actually host: buying more grows
+  // the slots and ships a file longer than she asked for.
+  const requestedSeconds = deliveredVideoDuration(script);
+  const modelSeconds = veoFacelessMotionBudgetSeconds(requestedSeconds);
   const budget = hostable >= modelSeconds - 1
     ? Math.min(modelSeconds, Math.floor(plannedTotal))
     : Math.min(modelSeconds, hostable);
@@ -4441,8 +4446,9 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       ? capVeoMotionWindows(planned, planVeoSceneSpans(planned)).spans
       : planFacelessVeoSpans(planned);
     planned.splice(0, planned.length, ...applyVeoSceneMotion(planned, spanPlans));
-    // THE WINDOW DECIDES THE SLOT (Faceless, Nov 11). The two 8-second takes are
-    // fixed by the approved cost model; the SCENE SLOTS are what was wrong. A slot
+    // THE WINDOW DECIDES THE SLOT (Faceless, Nov 11). The takes are fixed by the
+    // owner's duration table (8+8 for 30s, one 6 for 15s, one 4 for 10s); the SCENE
+    // SLOTS are what was wrong. A slot
     // shorter than its take trimmed paid motion off the end (16s bought, ~13s on
     // screen). Grow the slot to the take, pay for the difference out of the stills'
     // slack, and every paid second lands at normal speed.
