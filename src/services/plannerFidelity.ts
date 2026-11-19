@@ -50,12 +50,14 @@ export function enforceDictatedOpening(
   const target = next[0];
   if (target === undefined) return { script, patched: false };
   const line = /[.!?]$/.test(want) ? want : `${want}.`;
-  // PREPEND, NEVER REPLACE (owner Nov 18 — the duplicated-narration defect).
-  // Replacing scene 1 threw away what the planner had already planned there, and
-  // the second F4 pass then re-injected those very items onto one scene, so the
-  // video said "Introducing EmpireLaunchAi. EmpireLaunchAi." Her line goes first,
-  // verbatim; whatever the scene already said is kept after it.
-  target.narration = cur && cur !== line ? `${line} ${cur}`.replace(/\s+/g, ' ').trim() : line;
+  // REPLACE, VERBATIM (owner Nov 18 — the contract of this function, and the reason
+  // the five fidelity.opening tests exist). Scene 1 says exactly what she dictated.
+  // The duplicated-narration defect was NEVER this line: it was the F4 injector,
+  // which aimed every missing sentence of a pass at one index. That is fixed at the
+  // source (injectSellingPointsIntoNarration claims a scene per append), and the
+  // second pass skips scene 0 — so nothing can be re-injected onto the line that
+  // was overwritten here.
+  target.narration = line;
   return { script: next, patched: true };
 }
 

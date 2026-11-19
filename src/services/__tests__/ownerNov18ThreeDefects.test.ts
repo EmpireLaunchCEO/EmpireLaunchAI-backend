@@ -159,24 +159,30 @@ const THREE_SCENES: SceneScript[] = [
 const HOOK_POINTS = ['Introducing EmpireLaunchAi', 'Your go-to content creation platform'];
 const DICTATED = 'Hey, I am so glad you are here';
 
-test('THE NARRATION: two F4 passes never stack two sentences on one scene, and her line is prepended', () => {
+test('THE NARRATION: her line plays VERBATIM in scene 1 and the two F4 passes never repeat a sentence', () => {
   // The real sequence: full injection → dictated opening → skip-scene-zero re-injection.
   const pass1 = injectSellingPointsIntoNarration(THREE_SCENES, HOOK_POINTS);
   assert.ok(pass1.injected.length > 0, 'fixture: the points really were missing');
 
   const fidelity = enforceDictatedOpening(pass1.script, DICTATED);
+  assert.equal(fidelity.patched, true, 'fixture: scene 1 did not already start with her line');
   const pass2 = injectSellingPointsIntoNarration(fidelity.script, HOOK_POINTS, { skipSceneZero: true });
 
-  // (a) HER LINE IS PREPENDED, not a replacement: scene 1 still carries the planner's
-  //     own copy after her opening.
-  const first = String(pass2.script[0].narration);
-  assert.ok(first.toLowerCase().startsWith(DICTATED.toLowerCase()), `scene 1 opens with her dictated line (got: "${first}")`);
-  assert.ok(
-    first.toLowerCase().includes('fresh bread'),
-    `her line is PREPENDED — scene 1 keeps what the planner wrote (got: "${first}")`,
+  // (a) HER LINE IS SCENE 1, EXACTLY — the replace contract this function exists for.
+  assert.equal(
+    pass2.script[0].narration,
+    `${DICTATED}.`,
+    `scene 1 is her dictated line verbatim (got: "${pass2.script[0].narration}")`,
   );
 
-  // (b) NO SCENE CARRIES TWO OF THE POINTS — the old second pass put both on scene 2.
+  // (b) THE DUPLICATE IS STILL GONE. The defect said "Introducing EmpireLaunchAi.
+  //     EmpireLaunchAi." on one scene; every point is now spoken EXACTLY ONCE in the
+  //     whole script — nothing repeated, nothing lost to a crushed scene.
+  const whole = pass2.script.map((s) => String(s.narration)).join(' ').toLowerCase();
+  for (const point of HOOK_POINTS) {
+    const hits = whole.split(point.toLowerCase()).length - 1;
+    assert.equal(hits, 1, `"${point}" is spoken exactly once (got ${hits}): ${whole}`);
+  }
   for (const scene of pass2.script) {
     const held = HOOK_POINTS.filter((p) => String(scene.narration).toLowerCase().includes(p.toLowerCase()));
     assert.ok(
@@ -185,15 +191,17 @@ test('THE NARRATION: two F4 passes never stack two sentences on one scene, and h
     );
   }
 
-  // (c) THE CAUSE: with her line prepended nothing was erased, so the second pass has
-  //     nothing to re-add. This is the assertion that fails on the old code.
-  assert.deepEqual(pass2.injected, [], 'the re-injection pass has nothing to re-add (nothing was erased)');
-  assert.deepEqual(verifySellingPointsSpoken(pass2.script, HOOK_POINTS).missing, [], 'and every point is still spoken');
-  assert.equal(
-    pass2.script.map((s) => String(s.narration)).join(' ').toLowerCase().split('fresh bread').length - 1,
-    1,
-    'scene 1 is not duplicated either',
+  // (c) THE OVERWRITE'S CONSEQUENCE, HANDLED: only the line the replace erased comes
+  //     back, and it lands on a scene that holds no point — never on scene 1, never on
+  //     top of the other point.
+  assert.deepEqual(pass2.injected, ['Introducing EmpireLaunchAi'], 'only the erased line is re-added');
+  const reAdded = pass2.script.findIndex((s) => String(s.narration).includes('Introducing EmpireLaunchAi'));
+  const alreadyHad = pass2.script.findIndex((s) =>
+    String(s.narration).includes('Your go-to content creation platform'),
   );
+  assert.notEqual(reAdded, alreadyHad, 'the re-added hook does not land on the scene already holding a point');
+  assert.notEqual(reAdded, 0, 'and never on scene 1 — her line is untouchable');
+  assert.deepEqual(verifySellingPointsSpoken(pass2.script, HOOK_POINTS).missing, [], 'every point is still spoken');
 
   // NEGATIVE CONTROL — a genuinely missing sentence still gets injected, exactly once.
   const missing = injectSellingPointsIntoNarration(THREE_SCENES, ['76 video creations a month']);

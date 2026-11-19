@@ -3024,14 +3024,29 @@ export function injectSellingPointsIntoNarration(
   // scene 2 and the video said "Introducing EmpireLaunchAi. EmpireLaunchAi." — and
   // it always happened, because the second F4 pass runs after enforceDictatedOpening.
   // Every append now CLAIMS its scene; a second item aimed at a taken scene moves to
-  // the next free one.
+  // the next free one. A scene that ALREADY speaks one of the requested sentences is
+  // taken before the pass starts — otherwise a later pass (the skipSceneZero
+  // re-injection) stacks a second sentence onto a scene that already has one, and the
+  // length cap then crushes both into "…the same way Your go-to content Introducing
+  // EmpireLaunchAi." One sentence per scene, whichever pass put it there.
   const claimed = new Set<number>();
+  // A scene that ALREADY speaks one of the requested sentences is the LAST place to put
+  // another. Without this, the skipSceneZero re-injection (which exists because the
+  // dictated opening overwrites scene 1) aims its one re-added sentence at a scene that
+  // already carries a point, and the length cap crushes both into "…the same way Your
+  // go-to content Introducing EmpireLaunchAi." — a spoken sentence nobody planned.
+  const speaksAPoint = (i: number) => {
+    const said = String(next[i]?.narration ?? '').toLowerCase();
+    return sellingPoints.some((p) => said.includes(String(p).toLowerCase().replace(/[.!?]+$/, '')));
+  };
   const claimTarget = (preferred: number): number => {
     const floor = opts?.skipSceneZero ? 1 : 0;
     const usable = (i: number) => i >= floor && i < count && !claimed.has(i);
-    if (usable(preferred)) return preferred;
-    for (let i = preferred + 1; i < count; i++) if (usable(i)) return i;
-    for (let i = floor; i < preferred; i++) if (usable(i)) return i;
+    const order = [preferred, ...Array.from({ length: count }, (_, i) => i).filter((i) => i !== preferred)];
+    // First choice: a free scene that does not already speak a point.
+    for (const i of order) if (usable(i) && !speaksAPoint(i)) return i;
+    // Then a free scene (capacity wins over tidiness).
+    for (const i of order) if (usable(i)) return i;
     return preferred; // every scene already took one — nothing left to distribute
   };
   for (const c of missing) {
