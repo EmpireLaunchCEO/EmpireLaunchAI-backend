@@ -433,6 +433,7 @@ test('helpers: seeds, hook phrasing and autocomplete parsing', () => {
     /^The truth about ".+"$/,
     /^What nobody tells you about ".+"$/,
     /^Is ".+" worth it\?$/,
+    /^The part of ".+" nobody explains$/,
   ];
   for (let i = 0; i < 12; i++) {
     const text = buildContentHook('ai powered business analytics tools', i, 'AI Powered Business Tool');
@@ -533,14 +534,60 @@ test('her real niche: no niche in the hook text, and off-niche suggestions are d
   for (const expected of [
     'Why people keep searching "ai powered business analytics tools"',
     '3 things to check before you buy "best ai powered business intelligence tools"',
-    'The mistake most people make with "what are the best ai tools"',
-    'The truth about "ai powered business tools for small business"',
-    'What nobody tells you about "ai powered business analytics tools"',
+    'The truth about "what are the best ai tools"',
+    'What nobody tells you about "ai powered business tools for small business"',
+    'Is "ai powered business analytics tools" worth it?',
   ]) {
     assert.ok(texts.includes(expected), `missing: ${expected} in ${texts.join(' | ')}`);
   }
   // Five hooks, not five rewordings of one line.
   assert.equal(new Set(texts).size, texts.length);
+});
+
+test('a question-shaped suggestion never takes a buying frame', async () => {
+  clearIntelCaches();
+  // The live sentence that read wrong: `Is "how to build an ai tool" worth it?`
+  const http = suggestionsStub({
+    'AI Powered Business Tool': [
+      'how to build an ai tool',
+      'what are the best ai tools',
+      'why ai tools fail',
+      'ai powered business tool pricing',
+    ],
+  });
+  const service = new IntelService({ httpGetJson: http, etsy: fakeEtsy({ configured: false }), now: () => NOW });
+  const { data } = await service.researchTrends({ niche: 'AI Powered Business Tool' });
+
+  const QUESTION = /^(how|what|why|where|when|which)\b/i;
+  assert.ok(data.contentIdeas.length >= 5, `expected >= 5 hooks, got ${data.contentIdeas.length}`);
+  for (const idea of data.contentIdeas) {
+    const phrase = idea.detail!.replace('From the real search suggestion "', '').replace(/" for .*$/, '');
+    if (!QUESTION.test(phrase)) continue;
+    assert.ok(!/^Is ".+" worth it\?$/.test(idea.text), `question took the worth-it frame: ${idea.text}`);
+    assert.ok(
+      !/^3 things to check before you buy /.test(idea.text),
+      `question took the buy-checklist frame: ${idea.text}`,
+    );
+    // It still gets a real frame, not an empty line.
+    assert.ok(/^The truth about "/.test(idea.text) || /^What nobody tells you about "/.test(idea.text) ||
+      /^The part of "/.test(idea.text) || /^Why people keep searching "/.test(idea.text) ||
+      /^The mistake most people make with "/.test(idea.text), `no frame: ${idea.text}`);
+  }
+  // Five ideas, five different patterns, even when every suggestion is a question.
+  const pattern = (text: string) => text.replace(/"[^"]*"/g, '"…"');
+  assert.equal(new Set(data.contentIdeas.map((i) => pattern(i.text))).size, data.contentIdeas.length);
+  // A statement-shaped suggestion still earns the buying frames, unchanged.
+  assert.equal(
+    buildContentHook('ai powered business tool pricing', 5, 'AI Powered Business Tool'),
+    'Is "ai powered business tool pricing" worth it?',
+  );
+  // …while the same slot on a question phrase does not.
+  const questionAtFive = buildContentHook('how to build an ai tool', 5, 'AI Powered Business Tool');
+  assert.ok(!/^Is "/.test(questionAtFive) && !/^3 things to check/.test(questionAtFive), questionAtFive);
+  // The niche never enters the hook text.
+  for (const idea of data.contentIdeas) {
+    assert.equal(countNicheMentions(idea.text.replace(/"[^"]*"/g, ''), 'AI Powered Business Tool'), 0);
+  }
 });
 
 test('the niche relevance test: one significant shared word keeps a suggestion', () => {
