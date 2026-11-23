@@ -176,12 +176,77 @@ test('createProject: a photo that does not resolve fails at $0 — before the pl
     .createProject(baseInput({ sourceImages: ['https://photo.invalid/does-not-resolve.png'] }))
     .then(() => null, (e) => e);
   assert.equal(err?.check, 'photo', `got ${err?.check}: ${err?.message}`);
-  assert.match(err.message, /photo you uploaded does not resolve/);
+  assert.match(err.message, /photo you uploaded \(does-not-resolve\.png\) does not resolve/, 'the refusal names the file she uploaded');
   // The allowance was FRESH and it was read and passed — so the refusal above is
   // the photo check's, never a quota refusal standing in front of it.
   assert.equal(quotaReads, 1, 'the pre-flight must read the fresh allowance exactly once');
   assert.equal(quotaAllowance, FRESH_ALLOWANCE, 'the fixture must start with a full allowance');
   allZero('dead photo');
+});
+
+test('the photo: a STALE SIGNED LINK is refreshed and retried — the video proceeds', async () => {
+  // Owner, 23 Nov: repair before refusal. A stored upload URL is a presigned link; when
+  // its signature has expired the OBJECT is still there. Refusing on the first failed
+  // fetch threw away a video that one free re-sign could have made.
+  const stale = 'https://acct.r2.cloudflarestorage.com/bucket/brands/u1/uploads/hand-poured-candle.png?X-Amz-Signature=expired';
+  const fresh = 'https://acct.r2.cloudflarestorage.com/bucket/brands/u1/uploads/hand-poured-candle.png?X-Amz-Signature=new';
+  const probed: string[] = [];
+  const result = await runCostPreflight(healthy(
+    { sourceImages: [stale] },
+    {
+      ...healthyDeps,
+      probeUrl: async (url: string) => {
+        probed.push(url);
+        return url === fresh ? { ok: true, status: 206 } : { ok: false, status: 403, detail: 'HTTP 403' };
+      },
+      refreshUrl: async (url: string) => (url === stale ? fresh : null),
+    },
+  ));
+
+  assert.equal(result.ok, true, `a stale signature must not refuse the video: ${result.reason}`);
+  assert.deepEqual(probed, [stale, fresh], 'the fresh link is probed exactly once, after the stored one');
+  assert.deepEqual(result.sourceImages, [fresh], 'the render must be handed the URL that actually resolves');
+  assert.equal(result.photoRepairs?.length, 1, 'and the repair is recorded so the client can be told');
+  assert.equal(result.photoRepairs?.[0].from, stale);
+  assert.equal(result.photoRepairs?.[0].to, fresh);
+});
+
+test('the photo: genuinely GONE after a refresh still refuses — names her file, buys nothing', async () => {
+  const stale = 'https://acct.r2.cloudflarestorage.com/bucket/brands/u1/uploads/hand-poured-candle.png?X-Amz-Signature=expired';
+  const fresh = 'https://acct.r2.cloudflarestorage.com/bucket/brands/u1/uploads/hand-poured-candle.png?X-Amz-Signature=new';
+  let refreshed = 0;
+  const result = await runCostPreflight(healthy(
+    { sourceImages: [stale] },
+    {
+      ...healthyDeps,
+      probeUrl: async () => ({ ok: false, status: 404, detail: 'HTTP 404' }),
+      refreshUrl: async () => { refreshed += 1; return fresh; },
+    },
+  ));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.check, 'photo');
+  assert.equal(refreshed, 1, 'the repair is attempted before anything is refused');
+  assert.match(result.reason!, /hand-poured-candle\.png/, 'the refusal names the file she uploaded');
+  assert.match(result.reason!, /no longer there/, 'and says it is gone, not that the check was skipped');
+  assert.match(result.reason!, /not started/);
+});
+
+test('the photo: a link we CANNOT re-sign refuses rather than inventing one', async () => {
+  const result = await runCostPreflight(healthy(
+    { sourceImages: ['https://cdn.example.com/uploads/photo.png'] },
+    { ...healthyDeps, probeUrl: async () => ({ ok: false, status: 403 }), refreshUrl: async () => null },
+  ));
+  assert.equal(result.check, 'photo');
+  assert.match(result.reason!, /photo\.png/);
+});
+
+test('wiring: the refreshed link is the link the render uses, and the client is told what was repaired', () => {
+  // The pre-flight can only SAVE a video if the pipeline adopts the fresh URL and
+  // records the repair in a sentence a client can read.
+  assert.match(SERVICE_SRC, /input\.sourceImages = preflight\.sourceImages/, 'the fresh link must replace the stored one before anything reads it');
+  assert.match(SERVICE_SRC, /repairs:\{photoUrlRefreshed:/, 'the repair is recorded on the project');
+  assert.match(SERVICE_SRC, /The link to your uploaded photo had expired/, 'in a plain sentence, never a code');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

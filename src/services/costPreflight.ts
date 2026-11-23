@@ -41,6 +41,7 @@ import { spawnSync } from 'child_process';
 // resolver and the UI use, so a pre-flight can never disagree with what the
 // renderer can actually speak or deliver.
 import { GPT_AUDIO_VOICES, VOICE_GENDERS, VOICE_TONES } from './voiceOptions.js';
+import { refreshR2Url } from './approvalPayloadRefresh.js';
 
 /** The code the route answers with, so the client sees the pre-flight reason. */
 export const COST_PREFLIGHT_FAILED_CODE = 'COST_PREFLIGHT_FAILED';
@@ -75,12 +76,20 @@ export const MIN_FREE_RENDER_BYTES = 300 * 1024 * 1024;
 export type CostPreflightCheck =
   | 'duration' | 'voice' | 'tone' | 'quota' | 'ffmpeg' | 'workdir' | 'photo';
 
+/** One stale upload link that was re-signed, so the pipeline can use the fresh URL
+ *  and the client can be told what was repaired. */
+export interface PhotoRepair { from: string; to: string }
+
 export interface CostPreflightResult {
   ok: boolean;
   /** Which check refused. Present exactly when ok === false. */
   check?: CostPreflightCheck;
   /** The reason, in the words the client is shown. Present exactly when ok === false. */
   reason?: string;
+  /** The photo URL(s) the render must use — present only when a link was refreshed. */
+  sourceImages?: string[];
+  /** What was repaired, so the client is told. Present only when a repair happened. */
+  photoRepairs?: PhotoRepair[];
 }
 
 export interface UrlProbeResult { ok: boolean; status?: number; detail?: string }
@@ -90,6 +99,8 @@ export interface CostPreflightDeps {
   probeUrl?: (url: string) => Promise<UrlProbeResult>;
   probeFfmpeg?: () => { ok: boolean; missing: string[]; detail?: string };
   probeWorkDir?: (projectId: string) => { ok: boolean; detail?: string };
+  /** Re-sign a stored URL. A fixture injects one; production re-signs the R2 key. */
+  refreshUrl?: (url: string) => Promise<string | null>;
 }
 
 export interface CostPreflightInput {
@@ -184,6 +195,32 @@ async function probeUrlOnce(url: string): Promise<UrlProbeResult> {
   }
 }
 
+/** The file name the client would recognise from the upload — used only when the
+ *  object is genuinely gone, so the refusal names HER file and not a URL. */
+export function photoFileName(url: string): string {
+  try {
+    const name = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || '');
+    return name || 'the photo you uploaded';
+  } catch {
+    return 'the photo you uploaded';
+  }
+}
+
+/**
+ * Re-sign a stored upload link. A stored URL is usually a PRESIGNED link whose
+ * signature expired — the object is still in R2, so the same key signs again.
+ * Anything we cannot re-sign (another host, R2 not configured, any error) returns
+ * null and the caller refuses: no silent substitution, no invented link.
+ */
+async function refreshPhotoUrlOnce(url: string): Promise<string | null> {
+  try {
+    const fresh = await refreshR2Url(url);
+    return fresh && fresh !== url ? fresh : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Run every free check, in order of cost (the request itself, then one DB read,
  * then the local machine, then the network). The FIRST failure is returned: it is
@@ -249,17 +286,42 @@ export async function runCostPreflight(input: CostPreflightInput): Promise<CostP
   }
 
   // 7. THE UPLOADED PHOTO — a dead link would have been silently dropped.
+  // REPAIR BEFORE REFUSAL (owner, 23 Nov): a stored upload URL is usually a SIGNED
+  // link whose signature has expired, and the object is still there. So a failed
+  // probe re-signs the same object and probes the fresh link once before anything is
+  // refused — the repair costs nothing and the render then uses the fresh URL. Only
+  // a link that still cannot be reached after the refresh is refused, and it names
+  // HER file.
   const probeUrl = input.deps?.probeUrl ?? probeUrlOnce;
+  const refreshUrl = input.deps?.refreshUrl ?? refreshPhotoUrlOnce;
   const photos = (input.sourceImages ?? []).filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)).slice(0, 3);
+  const resolvedPhotos: string[] = [];
+  const photoRepairs: PhotoRepair[] = [];
   for (const url of photos) {
-    const res = await probeUrl(url);
-    if (!res.ok) {
+    const first = await probeUrl(url);
+    if (first.ok) {
+      resolvedPhotos.push(url);
+      continue;
+    }
+    const fresh = await refreshUrl(url);
+    if (fresh) {
+      const retry = await probeUrl(fresh);
+      if (retry.ok) {
+        photoRepairs.push({ from: url, to: fresh });
+        resolvedPhotos.push(fresh);
+        continue;
+      }
       return fail(
         'photo',
-        `The photo you uploaded does not resolve${res.status ? ` (HTTP ${res.status})` : res.detail ? ` (${res.detail})` : ''} — the video would have been made without it, so it was not started.`,
+        `The photo you uploaded (${photoFileName(url)}) is no longer there${retry.status ? ` (HTTP ${retry.status})` : retry.detail ? ` (${retry.detail})` : ''} — a fresh link could not reach it either, so the video was not started.`,
       );
     }
+    return fail(
+      'photo',
+      `The photo you uploaded (${photoFileName(url)}) does not resolve${first.status ? ` (HTTP ${first.status})` : first.detail ? ` (${first.detail})` : ''} — the video would have been made without it, so it was not started.`,
+    );
   }
 
+  if (photoRepairs.length) return { ok: true, sourceImages: resolvedPhotos, photoRepairs };
   return { ok: true };
 }

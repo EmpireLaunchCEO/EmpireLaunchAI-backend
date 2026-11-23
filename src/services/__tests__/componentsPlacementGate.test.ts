@@ -33,6 +33,8 @@ import {
   applyComponentRepair,
   componentsNotPlacedNotice,
   resolveProjectCreationOutcome,
+  resolveGateMissingComponents,
+  placeComponentsByDecision,
   parseScenePlan,
   COMPONENTS_NOT_PLACED_CODE,
   type SceneScript,
@@ -150,6 +152,91 @@ test('2c: a silent video places into the visualPrompt, never into narration', ()
   assert.deepEqual(repaired.stillMissing, []);
   assert.match(repaired.script[0].visualPrompt, /matte amber jar/);
   assert.equal(repaired.script[0].narration, '', 'a silent video has no voiceover to place into');
+});
+
+// ─── 2c-bis. the planner named the scene, so the item goes there ────────────
+test('2c: a reply that names the scene but forgets the copy still places the item THERE', () => {
+  // The reply used to be thrown away unless it carried copy, which put the item back in
+  // front of the gate and refused a video whose placement the planner had decided.
+  const script = [scene(1, 'Establishing shot', 'Say hello.'), scene(2, 'The result', 'And here it is.')];
+  const repaired = applyComponentRepair(
+    script,
+    [ITEM],
+    { script: { placements: [{ component: ITEM, scene: 2 }] } },
+    { voice: 'female' },
+  );
+  assert.deepEqual(repaired.placed, [ITEM], 'the planner decided, so it is placed');
+  assert.deepEqual(repaired.stillMissing, [], 'the gate has nothing to refuse');
+  assert.equal(repaired.assignments[ITEM.toLowerCase()], 2, 'in the scene the planner named');
+  assert.match(repaired.script[1].narration, /hand-poured soy wax candle in a matte amber jar/i, 'in the client\'s own words — never invented copy');
+  assert.match(repaired.script[1].narration, /^And here it is\./, 'the scene\'s own copy is kept, not replaced');
+});
+
+// ─── 2c-ter. repair runs BEFORE the gate may refuse ─────────────────────────
+test('2c-ter: an item the planner never placed is still placed — the video is NOT refused', () => {
+  const script = [scene(1, 'Hook', 'Say hello.'), scene(2, 'Middle', 'Here it is.'), scene(3, 'Close', 'That is all.')];
+  const decided = placeComponentsByDecision(script, [ITEM], { voice: 'female' });
+  assert.deepEqual(decided.placed, [ITEM]);
+  assert.equal(decided.assignments[ITEM.toLowerCase()], 1, 'a subject chunk belongs in the hook');
+  assert.match(decided.script[0].narration, /Hand-poured soy wax candle in a matte amber jar\./, 'spoken, as finished copy');
+  assert.equal(decided.script[1].narration, 'Here it is.', 'no other scene is rewritten');
+  assert.deepEqual(decided.stillMissing, [], 'so the gate has nothing left to refuse');
+});
+
+test('2c-ter: a CTA goes in the final scene; a silent video gets it in the picture, not the voiceover', () => {
+  const script = [scene(1, 'Hook', 'Say hello.'), scene(2, 'Middle', 'Here it is.'), scene(3, 'Close', 'That is all.')];
+  const cta = 'Follow for more candle drops';
+  const voiced = placeComponentsByDecision(script, [cta], { voice: 'female' });
+  assert.equal(voiced.assignments[cta.toLowerCase()], 3, 'a CTA belongs in the final scene');
+  assert.match(voiced.script[2].narration, /Follow for more candle drops/);
+
+  const silent = placeComponentsByDecision(script, [ITEM], { voice: 'none' });
+  assert.equal(silent.script[0].narration, 'Say hello.', 'a silent video has no voiceover to change');
+  assert.match(silent.script[0].visualPrompt, /matte amber jar/, 'the item is carried by the picture');
+});
+
+test('2c-ter: the decision never invents copy and never places a style directive', () => {
+  const script = [scene(1, 'Hook', 'Say hello.')];
+  const decided = placeComponentsByDecision(script, ['make it look premium'], { voice: 'female' });
+  assert.deepEqual(decided.placed, [], 'a directive is direction, not a component');
+  assert.equal(decided.script[0].narration, 'Say hello.', 'nothing was written for her');
+});
+
+test('2c-ter: THE LADDER — repair, then the decision, and the gate no longer refuses a placeable item', () => {
+  // The pipeline's own order, on the pieces it calls: the planner is asked (2c), the
+  // deterministic backstop paints the still (which the voiced sanitiser strips again),
+  // and the gate would refuse here. That refusal is the defect; the decision is the fix.
+  const inventory = inventoryWith(ITEM);
+  const planned = parseScenePlan({}, 'Ember & Oak candles', 30, 'scene');
+  const repaired = applyComponentRepair(planned, inventory, { script: { placements: [] } }, { voice: 'female' });
+  assert.deepEqual(repaired.stillMissing, inventory, 'the planner placed nothing');
+  const painted = injectMissingComponents(repaired.script, inventory, {});
+  const stripped = stripBenefitTextFromVisualPrompts(painted.script, inventory);
+  const blocking = resolveGateMissingComponents({
+    missingComponents: verifyComponentsInScript(stripped.script, inventory, repaired.assignments).missing,
+    cleanIdea: 'Ember & Oak candles',
+    explicitComponents: inventory,
+  });
+  assert.deepEqual(blocking, inventory, 'without the decision the gate would refuse the video here');
+
+  const decided = placeComponentsByDecision(stripped.script, blocking, { voice: 'female' });
+  const assignments = { ...repaired.assignments, ...decided.assignments };
+  const finalMissing = verifyComponentsInScript(decided.script, inventory, assignments).missing;
+  assert.deepEqual(finalMissing, [], 'the item is in the plan that is persisted');
+  assert.deepEqual(resolveGateMissingComponents({
+    missingComponents: finalMissing,
+    cleanIdea: 'Ember & Oak candles',
+    explicitComponents: inventory,
+    repairedPlaced: decided.placed,
+  }), [], 'the gate has nothing to block on');
+
+  const outcome = resolveProjectCreationOutcome({
+    planningFailure: null,
+    componentsFailure: componentsNotPlacedNotice(finalMissing),
+    missingComponents: finalMissing,
+  });
+  assert.equal(outcome.startRender, true, 'the video is MADE instead of refused');
+  assert.equal(outcome.status, 'generating');
 });
 
 // ─── 2d. the gate, as the BACKSTOP ──────────────────────────────────────────
