@@ -561,6 +561,10 @@ export const getIntelTrends = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'niche query parameter is required' });
     }
 
+    // No flag to remember: the service caches the finished answer for exactly one hour
+    // and judges its age at request time, so the app's fetch on every open gives her a
+    // fresh check whenever the last one is over an hour old and the cached answer
+    // otherwise. Every Etsy call still goes through the shared 5 QPS / 5,000 QPD limiter.
     const params = {
       niche: niche as string,
       angle: typeof angle === 'string' ? angle : undefined,

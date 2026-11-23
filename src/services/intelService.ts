@@ -75,8 +75,19 @@ export const GOOGLE_SUGGEST_URL = 'https://suggestqueries.google.com/complete/se
 const GOOGLE_TIMEOUT_MS = 8_000;
 /** Owner rule: cache each source per niche for ~30-60 minutes so a refresh cannot hammer Google/Etsy. */
 const CACHE_TTL_MS = 45 * 60 * 1000;
+/**
+ * Owner direction (23 Nov): "every hour or when they open their app … if they don't
+ * open the app in the next hour, then it just falls back to when they open their app."
+ * So the whole answer is cached for exactly one hour and the age is judged at request
+ * time: open the app inside the hour and it is served instantly; open it after the
+ * hour and a fresh check runs. The app already asks on every open, so this one number
+ * gives her exactly that behaviour with no flag for a caller to remember.
+ */
+export const INTEL_ANSWER_TTL_MS = 60 * 60 * 1000;
 const MAX_TRENDING_THEMES = 7;
 const MAX_CONTENT_IDEAS = 6;
+/** Owner: at least five usable hooks every time, however few suggestions came back. */
+export const MIN_CONTENT_IDEAS = 5;
 const MAX_HOT_ITEMS = 6;
 const MAX_LOW_COMPETITION = 5;
 const MAX_SEASONAL = 3;
@@ -110,9 +121,24 @@ interface CacheEntry<T> {
 const suggestionsCache = new Map<string, CacheEntry<string[]>>();
 const etsySearchCache = new Map<string, CacheEntry<{ count: number; results: any[] }>>();
 
+// ─── Answer cache (the whole five-box answer, exactly one hour) ────────────
+interface AnswerCacheEntry {
+  response: IntelTrendsResponse;
+  expiresAt: number;
+}
+const answerCache = new Map<string, AnswerCacheEntry>();
+
+/** Same business, same answer: the key is everything she told us about the brand. */
+export function intelAnswerCacheKey(params: IntelTrendsParams): string {
+  return [params.niche, params.angle, params.targetCustomers, params.businessGoals]
+    .map((part) => (part || '').replace(/\s+/g, ' ').trim().toLowerCase())
+    .join('|');
+}
+
 export function clearIntelCaches(): void {
   suggestionsCache.clear();
   etsySearchCache.clear();
+  answerCache.clear();
 }
 
 // ─── Google search suggestions ─────────────────────────────────────────────
@@ -197,20 +223,77 @@ export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
 }
 
 // ─── Content hooks (phrased from a real suggestion, never invented) ─────────
-type HookTemplate = (phrase: string) => string;
+/**
+ * Owner direction (23 Nov): Content Ideas must always give her at least five usable
+ * hooks, every one about HER business — and each one a line she would actually say on
+ * camera. So every hook is short spoken English (under ~70 characters), names her
+ * niche at most once — and says nothing about the niche at all when the search phrase
+ * it quotes already contains it — and always keeps the real search phrase in quotes.
+ * The hook is only ever a frame around a phrase Google actually returned, so no claim
+ * is invented: a question asks, a "mistake"/"myth"/"nobody tells you" line names a
+ * pattern to talk about without asserting a fact, and the numbered list promises what
+ * to check, not what is true.
+ */
+type HookTemplate = (phrase: string, niche: string, phraseNamesNiche: boolean) => string;
 
 const HOOK_TEMPLATES: HookTemplate[] = [
-  (p) => `What buyers actually mean when they search "${p}"`,
-  (p) => `3 things to look for in "${p}"`,
-  (p) => `The "${p}" mistake that makes it look homemade`,
-  (p) => `Before you buy "${p}", watch this`,
-  (p) => `"${p}" — the version that sells and the one that sits`,
-  (p) => `"${p}": what I'd tell a friend who asked`,
+  // 1. Question — what her buyers are really typing, and why.
+  (p, n) => `Why ${n} buyers keep searching "${p}"`,
+  // 2. Numbered list — what to check before buying.
+  (p) => `3 things to check before you buy "${p}"`,
+  // 3. Mistake — the pattern worth talking about.
+  (p, n, named) => (named ? `The mistake most people make with "${p}"` : `The ${n} mistake to avoid with "${p}"`),
+  // 4. Myth — the belief worth correcting.
+  (p, n, named) => (named ? `The truth about "${p}"` : `The ${n} myth worth busting: "${p}"`),
+  // 5. "Nobody tells you" — the insider angle.
+  (p, n, named) => (named ? `What nobody tells you about "${p}"` : `What ${n} buyers get wrong: "${p}"`),
+  // 6. Worth it? — the buying decision she sells around.
+  (p, n, named) => (named ? `Is "${p}" worth it?` : `Is "${p}" worth it for ${n}?`),
 ];
 
-export function buildContentHook(phrase: string, index: number): string {
+export function buildContentHook(phrase: string, index: number, niche: string): string {
   const template = HOOK_TEMPLATES[index % HOOK_TEMPLATES.length];
-  return template(phrase);
+  const p = (phrase || '').replace(/\s+/g, ' ').trim();
+  const n = (niche || '').replace(/\s+/g, ' ').trim();
+  // The quoted phrase already says the niche → never say it a second time.
+  const phraseNamesNiche = n.length > 0 && p.toLowerCase().includes(n.toLowerCase());
+  return template(p, n, phraseNamesNiche).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * At least MIN_CONTENT_IDEAS hooks, up to MAX_CONTENT_IDEAS.
+ *
+ * The distinct hook patterns are cycled over the real suggestions, so two
+ * suggestions still yield five different hooks (question, list, mistake, myth,
+ * "nobody tells you") — never five rewordings of the same line, and never a hook
+ * that repeats her niche or that she could not read out loud.
+ */
+export function buildContentIdeas(suggestions: string[], params: IntelTrendsParams): IntelItem[] {
+  const niche = (params.niche || '').trim();
+
+  const seen = new Set<string>();
+  const phrases: string[] = [];
+  for (const raw of suggestions) {
+    const phrase = (raw || '').replace(/\s+/g, ' ').trim();
+    if (!phrase) continue;
+    const key = phrase.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    phrases.push(phrase);
+  }
+  if (phrases.length === 0) return [];
+
+  const target = Math.min(MAX_CONTENT_IDEAS, Math.max(MIN_CONTENT_IDEAS, phrases.length));
+  const ideas: IntelItem[] = [];
+  for (let i = 0; i < target; i++) {
+    const phrase = phrases[i % phrases.length];
+    ideas.push({
+      text: buildContentHook(phrase, i, niche),
+      detail: `From the real search suggestion "${phrase}"`,
+      source: 'google' as const,
+    });
+  }
+  return ideas;
 }
 
 // ─── Formatting helpers ────────────────────────────────────────────────────
@@ -310,6 +393,7 @@ export class IntelService {
   private async etsySearch(keywords: string, limit: number): Promise<{ count: number; results: any[] }> {
     const key = `${keywords.toLowerCase()}|${limit}`;
     const cached = etsySearchCache.get(key);
+    // Every call goes through etsyService, which owns the single 5 QPS / 5,000 QPD limiter.
     if (cached && cached.expires > Date.now()) return cached.value;
 
     const value = await this.etsy.searchActiveListings(keywords, limit);
@@ -382,10 +466,19 @@ export class IntelService {
   /**
    * Real market signal for the given business parameters.
    * Never throws: an unavailable source empties its own boxes and says so.
+   *
+   * The finished answer is cached for exactly one hour and its age is judged at
+   * request time — open the app inside the hour and the same answer comes back
+   * instantly, open it after the hour and a fresh check runs. A cached answer keeps
+   * the `generatedAt` of the check that produced it, so nothing pretends to be newer
+   * than it is.
    */
   async researchTrends(params: IntelTrendsParams): Promise<IntelTrendsResponse> {
     const now = this.now();
     const niche = (params.niche || '').trim();
+    const cacheKey = intelAnswerCacheKey(params);
+    const cachedAnswer = answerCache.get(cacheKey);
+    if (niche && cachedAnswer && cachedAnswer.expiresAt > now.getTime()) return cachedAnswer.response;
 
     if (!niche) {
       return {
@@ -414,12 +507,10 @@ export class IntelService {
       source: 'google' as const,
     }));
 
-    // contentIdeas — hook-shaped lines phrased from those same suggestions.
-    const contentIdeas: IntelItem[] = hits.slice(0, MAX_CONTENT_IDEAS).map((hit, i) => ({
-      text: buildContentHook(hit.suggestion, i),
-      detail: `From the real search suggestion "${hit.suggestion}"`,
-      source: 'google' as const,
-    }));
+    // contentIdeas — hook-shaped lines phrased from those same suggestions, with the
+    // hook patterns cycled so two suggestions still give at least five hooks, each
+    // naming her niche and speaking to her audience.
+    const contentIdeas: IntelItem[] = buildContentIdeas(hits.map((h) => h.suggestion), params);
 
     // seasonalOpportunities — the calendar crossed with the niche's real searches.
     const seasonalOpportunities: IntelItem[] = buildSeasonalWindows(now).map((window, i) => {
@@ -470,13 +561,15 @@ export class IntelService {
       generatedAt: now.toISOString(),
     };
 
-    return {
+    const response: IntelTrendsResponse = {
       data,
       fallbackMessage:
         data.sources.google === 'error' && data.sources.etsy !== 'ok'
           ? 'Live search suggestions and Etsy are both unavailable right now — nothing is being shown rather than something invented.'
           : undefined,
     };
+    answerCache.set(cacheKey, { response, expiresAt: now.getTime() + INTEL_ANSWER_TTL_MS });
+    return response;
   }
 }
 
