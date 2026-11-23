@@ -39,7 +39,7 @@ export const MONTHLY_DESIGN_LIMIT = 50;   // high_res_design
  * is comfortably past the longest a live render can be, so a `processing` row older
  * than this is a dead row (crash, restart, never started) and must stop counting.
  */
-export const FACELESS_IN_FLIGHT_WINDOW_MS = 30 * 60 * 1000;
+export const FACELESS_IN_FLIGHT_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * DOES THIS FACELESS ROW SPEND THE CLIENT'S QUOTA? (owner, Nov 23)

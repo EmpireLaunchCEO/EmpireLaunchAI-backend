@@ -65,7 +65,7 @@ const row = (payload: any, ageMs: number, status = 'approved'): Row => ({
 
 test('the in-flight window is past the pipeline\'s own 12-minute span budget', () => {
   assert.ok(FACELESS_IN_FLIGHT_WINDOW_MS > 12 * MIN, 'a live render must never look dead');
-  assert.equal(FACELESS_IN_FLIGHT_WINDOW_MS, 30 * MIN);
+  assert.equal(FACELESS_IN_FLIGHT_WINDOW_MS, 15 * MIN);
 });
 
 test('a failed render returns the quota (failed / refused / never-started rows cost nothing)', async () => {
