@@ -1,8 +1,49 @@
-import { reasoningEngine } from './reasoningEngine.js';
-import { marketScraperService } from './marketScraperService.js';
-import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
-import { etsyHarvesterService } from './etsyHarvesterService.js';
-import { r2Storage } from './r2StorageService.js';
+import axios from 'axios';
+import { etsyService } from './etsyService.js';
+import { ETSY_NOT_CONFIGURED_REASON } from './etsyCredentials.js';
+import { ETSY_DAILY_LIMIT, isEtsyDailyLimitReached } from './etsyRateLimits.js';
+
+/**
+ * INTEL — real, sourced market signal only.
+ *
+ * Owner direction (23 Nov): the five Home Base boxes must give REAL information in
+ * her niche. The old path asked a model to "search the web" (it has no web access,
+ * so it invented plausible-sounding trends) and scraped Pinterest/Etsy HTML (which
+ * emitted a login wall — "Pinterest trend — your not signed in" — as if it were data).
+ *
+ * This file therefore has exactly TWO sources, both real:
+ *   1. Google search suggestions (keyless autocomplete) — what people actually type.
+ *   2. Etsy API v3 via the existing client — real listings, real prices, real counts.
+ *
+ * Hard rules baked in here:
+ *   - No LLM anywhere in this path. A model may never be the source of a trend.
+ *   - Nothing is fabricated. If a source is unavailable the array is empty and
+ *     `sources` says why; a failure in one source never empties the other.
+ *   - No sign-in/login text may ever leave this service (there is no page to be
+ *     signed in to any more — the scraping path is gone).
+ */
+
+export interface IntelItem {
+  text: string;
+  detail?: string;
+  url?: string;
+  source: 'google' | 'etsy';
+}
+
+export interface IntelTrendsResult {
+  trendingThemes: IntelItem[];
+  seasonalOpportunities: IntelItem[];
+  hotSellingItems: IntelItem[];
+  lowCompetitionItems: IntelItem[];
+  contentIdeas: IntelItem[];
+  sources: {
+    google: 'ok' | 'error';
+    etsy: 'ok' | 'not_configured' | 'error';
+    /** A plain reason whenever Etsy is not 'ok'. Never a sign-in message. */
+    etsyReason?: string;
+  };
+  generatedAt: string; // ISO
+}
 
 export interface IntelTrendsParams {
   niche?: string;
@@ -11,292 +52,431 @@ export interface IntelTrendsParams {
   businessGoals?: string;
 }
 
-export interface IntelTrendsResult {
-  trendingThemes: string[];
-  seasonalOpportunities: string[];
-  hotSellingItems: string[];
-  lowCompetitionItems: string[];
-  contentIdeas: string[];
+export interface IntelTrendsResponse {
+  data: IntelTrendsResult;
+  fallbackMessage?: string;
 }
 
-// Strands older than this trigger a fresh harvest
-const STRAND_STALENESS_HOURS = 6;
+/** Injected in tests; the default really does hit the network. */
+export type IntelHttpGetJson = (url: string, headers?: Record<string, string>) => Promise<unknown>;
 
-function buildIntelPrompt(params: IntelTrendsParams, etsyContext?: string): string {
-  const context: string[] = [];
-  if (params.niche) context.push(`Business niche: ${params.niche}`);
-  if (params.angle) context.push(`Business angle/approach: ${params.angle}`);
-  if (params.targetCustomers) context.push(`Target customers: ${params.targetCustomers}`);
-  if (params.businessGoals) context.push(`Business goals: ${params.businessGoals}`);
-
-  const etsyBlock = etsyContext ? `\n\nRECENT ETSY MARKET DATA for ${params.niche || 'this niche'}:\n${etsyContext}\nUse this real Etsy data to ground your analysis.` : '';
-
-  return `You are a real-time market intelligence analyst. Search the web for CURRENT, up-to-date trends, data, and opportunities. Do NOT use stale training data — find what is actually trending RIGHT NOW on platforms like Etsy, TikTok, Instagram, Pinterest, Amazon, and Google Trends.
-${etsyBlock}
-${context.join('\n')}
-
-Based on your web research${etsyContext ? ' and the Etsy data above' : ''}, return a single valid JSON object (no markdown, no code fences, no surrounding text) with exactly these five keys. Each key must be an array of strings:
-
-{
-  "trendingThemes": ["exact trending theme 1", "exact trending theme 2", ...],
-  "seasonalOpportunities": ["upcoming seasonal event or holiday opportunity 1", ...],
-  "hotSellingItems": ["specific hot-selling product or content type 1", ...],
-  "lowCompetitionItems": ["specific product/content idea with low competition and good profit 1", ...],
-  "contentIdeas": ["specific content or design idea relevant to the niche 1", ...]
+export interface IntelEtsyClient {
+  isConfigured(): boolean;
+  searchActiveListings(keywords: string, limit: number): Promise<{ count: number; results: any[] }>;
 }
 
-RULES:
-- Every array must have at least 3 items. Aim for 5-7 items each.
-- Each item must be specific and actionable, not generic.
-- Focus on what is ACTUALLY selling/performing right now based on your web search${etsyContext ? ' and the real Etsy listing data provided' : ''}.
-- Include numbers, stats, or platform names where relevant.
-- Return ONLY the JSON object — no explanation, no markdown formatting.`;
+export interface IntelServiceDeps {
+  httpGetJson?: IntelHttpGetJson;
+  etsy?: IntelEtsyClient;
+  now?: () => Date;
 }
 
-function parseIntelResponse(raw: string): IntelTrendsResult | null {
-  let cleaned = raw.trim();
+export const GOOGLE_SUGGEST_URL = 'https://suggestqueries.google.com/complete/search';
+const GOOGLE_TIMEOUT_MS = 8_000;
+/** Owner rule: cache each source per niche for ~30-60 minutes so a refresh cannot hammer Google/Etsy. */
+const CACHE_TTL_MS = 45 * 60 * 1000;
+const MAX_TRENDING_THEMES = 7;
+const MAX_CONTENT_IDEAS = 6;
+const MAX_HOT_ITEMS = 6;
+const MAX_LOW_COMPETITION = 5;
+const MAX_SEASONAL = 3;
 
-  // Strip markdown code fences
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  }
+/** Anything matching this must never reach the client (owner: no sign-in text at all). */
+const SIGN_IN_TEXT = /\b(sign(?:ed)?[\s-]?in|signin|log(?:ged)?[\s-]?in|login)\b/i;
 
-  try {
-    const parsed = JSON.parse(cleaned);
-    return {
-      trendingThemes: Array.isArray(parsed.trendingThemes) ? parsed.trendingThemes : [],
-      seasonalOpportunities: Array.isArray(parsed.seasonalOpportunities) ? parsed.seasonalOpportunities : [],
-      hotSellingItems: Array.isArray(parsed.hotSellingItems) ? parsed.hotSellingItems : [],
-      lowCompetitionItems: Array.isArray(parsed.lowCompetitionItems) ? parsed.lowCompetitionItems : [],
-      contentIdeas: Array.isArray(parsed.contentIdeas) ? parsed.contentIdeas : [],
-    };
-  } catch {
-    console.warn('[IntelService] Failed to parse JSON response, attempting regex extraction');
-
-    // Fallback: regex extraction
-    const extract = (key: string): string[] => {
-      const regex = new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)\\]`, 'i');
-      const match = cleaned.match(regex);
-      if (!match || !match[1]) return [];
-      return match[1]
-        .split(',')
-        .map(s => s.replace(/^["'\s]+|["'\s]+$/g, '').trim())
-        .filter(Boolean);
-    };
-
-    const result: IntelTrendsResult = {
-      trendingThemes: extract('trendingThemes'),
-      seasonalOpportunities: extract('seasonalOpportunities'),
-      hotSellingItems: extract('hotSellingItems'),
-      lowCompetitionItems: extract('lowCompetitionItems'),
-      contentIdeas: extract('contentIdeas'),
-    };
-
-    const hasAnyData = Object.values(result).some(arr => arr.length > 0);
-    return hasAnyData ? result : null;
-  }
+function defaultHttpGetJson(url: string, headers?: Record<string, string>): Promise<unknown> {
+  return axios
+    .get(url, {
+      headers,
+      timeout: GOOGLE_TIMEOUT_MS,
+      validateStatus: (s) => s >= 200 && s < 300,
+    })
+    .then((r) => r.data);
 }
+
+const defaultEtsyClient: IntelEtsyClient = {
+  isConfigured: () => etsyService.isConfigured,
+  searchActiveListings: async (keywords: string, limit: number) => {
+    const res = await etsyService.findAllActiveListingsByKeywords(keywords, limit);
+    return { count: res.count, results: res.results };
+  },
+};
+
+// ─── Source caches (per query / per keyword, ~45 minutes) ──────────────────
+interface CacheEntry<T> {
+  value: T;
+  expires: number;
+}
+const suggestionsCache = new Map<string, CacheEntry<string[]>>();
+const etsySearchCache = new Map<string, CacheEntry<{ count: number; results: any[] }>>();
+
+export function clearIntelCaches(): void {
+  suggestionsCache.clear();
+  etsySearchCache.clear();
+}
+
+// ─── Google search suggestions ─────────────────────────────────────────────
 
 /**
- * Extract a human-readable Etsy context string from a set of DNA strands.
+ * The client's own words become the seed queries. Nothing here is invented: a seed
+ * is a real phrase derived from the client's niche/angle/audience, and every item
+ * we show is a suggestion Google actually returned for it.
  */
-function buildEtsyContextFromStrands(strands: DnaStrand[]): string {
-  const keywords = new Set<string>();
-  const titles: string[] = [];
-  const prices: string[] = [];
+export function buildSeedQueries(params: IntelTrendsParams, now: Date): string[] {
+  const niche = (params.niche || '').trim();
+  if (!niche) return [];
 
-  for (const strand of strands.slice(0, 15)) {
-    if (strand.manifest?.keyword) keywords.add(strand.manifest.keyword as string);
-    if (strand.manifest?.titlePattern) titles.push(strand.manifest.titlePattern as string);
-    if (strand.manifest?.priceRange) prices.push(strand.manifest.priceRange as string);
-    if (strand.metadata?.tags) {
-      for (const t of strand.metadata.tags as string[]) {
-        if (t.length > 2) keywords.add(t);
-      }
-    }
+  const year = now.getFullYear();
+  const seeds: string[] = [niche, `best ${niche}`, `${niche} gift`, `${niche} ideas`, `trending ${niche} ${year}`];
+
+  const angle = (params.angle || '').trim();
+  if (angle && angle.toLowerCase() !== niche.toLowerCase()) seeds.push(`${niche} ${angle}`);
+
+  const audience = (params.targetCustomers || '').trim();
+  if (audience && audience.toLowerCase() !== niche.toLowerCase()) seeds.push(`${niche} for ${audience}`);
+
+  // Dedupe (case-insensitive), cap so one uncached niche costs at most 6 calls.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of seeds) {
+    const key = s.toLowerCase().replace(/\s+/g, ' ');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s.replace(/\s+/g, ' ').trim());
   }
-
-  const lines: string[] = [];
-  if (keywords.size > 0) lines.push(`Trending keywords: ${[...keywords].slice(0, 20).join(', ')}`);
-  if (titles.length > 0) lines.push(`Top listing titles: ${titles.slice(0, 5).join(' | ')}`);
-  if (prices.length > 0) lines.push(`Common price points: ${prices.slice(0, 5).join(', ')}`);
-  return lines.join('\n');
+  return out.slice(0, 6);
 }
 
-/**
- * Check whether a set of DNA strands is stale (oldest strand > STALENESS hours).
- */
-function areStrandsStale(strands: DnaStrand[]): boolean {
-  if (strands.length === 0) return true;
-  const cutoff = Date.now() - STRAND_STALENESS_HOURS * 60 * 60 * 1000;
+/** Parses the `client=firefox` autocomplete payload: `[query, [suggestions], [], {...}]`. */
+export function parseGoogleSuggestions(payload: unknown): string[] {
+  if (!Array.isArray(payload)) return [];
+  const list = payload[1];
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((s): s is string => typeof s === 'string')
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter((s) => s.length > 1);
+}
 
-  // Consider strands stale if the majority were harvested before the cutoff
-  let staleCount = 0;
-  for (const s of strands) {
-    const harvestedAt = s.manifest?.harvestedAt as string;
-    if (harvestedAt) {
-      if (new Date(harvestedAt).getTime() < cutoff) staleCount++;
-    } else {
-      // Strands without a timestamp are considered stale
-      staleCount++;
+export interface SuggestionHit {
+  suggestion: string;
+  seed: string;
+}
+
+// ─── Seasonal windows (calendar facts only — never invented data) ───────────
+interface SeasonalWindow {
+  /** Calendar months (0-11) in which this window is worth planning for. */
+  months: number[];
+  name: string;
+  /** A plain calendar fact. No numbers about demand, ever. */
+  fact: string;
+}
+
+const SEASONAL_WINDOWS: SeasonalWindow[] = [
+  { months: [9, 10], name: 'Christmas gifting', fact: 'Christmas is 25 December and gift searches start climbing in October' },
+  { months: [10], name: 'Black Friday', fact: 'Black Friday is the fourth Friday of November, with deal searches building the week before' },
+  { months: [11], name: 'Last-minute gifting', fact: 'postal cut-offs for 25 December land mid-December, so last-minute searches peak in the second week' },
+  { months: [11, 0], name: 'New year reset', fact: 'planner, goal and reset searches peak between Christmas and mid-January' },
+  { months: [0], name: 'New Year goals', fact: 'goal-setting purchases concentrate in the first two weeks of January' },
+  { months: [1], name: "Valentine's Day", fact: "Valentine's Day is 14 February, and personalised gift searches build through the first two weeks" },
+  { months: [2, 3], name: 'Spring occasions', fact: 'UK Mothering Sunday falls in March and Easter moves between late March and April' },
+  { months: [4], name: "Mother's Day (US)", fact: "US Mother's Day is the second Sunday of May" },
+  { months: [4, 5, 6, 7], name: 'Wedding season', fact: 'wedding season runs May to September in the northern hemisphere' },
+  { months: [5], name: "Father's Day (US)", fact: "US Father's Day is the third Sunday of June" },
+  { months: [7, 8], name: 'Back to school', fact: 'back-to-school buying runs from August into early September' },
+];
+
+export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
+  const month = now.getMonth();
+  const upcoming = new Set([month, (month + 1) % 12, (month + 2) % 12]);
+  const picked = SEASONAL_WINDOWS.filter((w) => w.months.some((m) => upcoming.has(m)));
+  // Prefer windows active this month first, then the next two.
+  return picked
+    .sort((a, b) => Number(!a.months.includes(month)) - Number(!b.months.includes(month)))
+    .slice(0, MAX_SEASONAL);
+}
+
+// ─── Content hooks (phrased from a real suggestion, never invented) ─────────
+type HookTemplate = (phrase: string) => string;
+
+const HOOK_TEMPLATES: HookTemplate[] = [
+  (p) => `What buyers actually mean when they search "${p}"`,
+  (p) => `3 things to look for in "${p}"`,
+  (p) => `The "${p}" mistake that makes it look homemade`,
+  (p) => `Before you buy "${p}", watch this`,
+  (p) => `"${p}" — the version that sells and the one that sits`,
+  (p) => `"${p}": what I'd tell a friend who asked`,
+];
+
+export function buildContentHook(phrase: string, index: number): string {
+  const template = HOOK_TEMPLATES[index % HOOK_TEMPLATES.length];
+  return template(phrase);
+}
+
+// ─── Formatting helpers ────────────────────────────────────────────────────
+function formatEtsyPrice(price: any): string | undefined {
+  if (!price || typeof price.amount !== 'number') return undefined;
+  const divisor = typeof price.divisor === 'number' && price.divisor > 0 ? price.divisor : 100;
+  const currency = typeof price.currency_code === 'string' ? price.currency_code : 'USD';
+  const value = price.amount / divisor;
+  const symbol = currency === 'USD' ? '$' : currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '';
+  return `${symbol}${value.toFixed(2)}${symbol ? '' : ` ${currency}`}`;
+}
+
+function etsyListingUrl(listing: any): string | undefined {
+  if (typeof listing?.url === 'string' && listing.url.startsWith('http')) return listing.url;
+  if (typeof listing?.listing_id === 'number') return `https://www.etsy.com/listing/${listing.listing_id}`;
+  return undefined;
+}
+
+function etsyShopName(listing: any): string | undefined {
+  const name = listing?.shop?.shop_name ?? listing?.shop_name;
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : undefined;
+}
+
+/** Last gate: no sign-in text, no empty text, ever. */
+function cleanItems(items: IntelItem[]): IntelItem[] {
+  return items.filter((item) => {
+    const blob = `${item.text} ${item.detail ?? ''}`;
+    if (!item.text || !item.text.trim()) return false;
+    if (SIGN_IN_TEXT.test(blob)) {
+      console.warn('[IntelService] Dropped an item containing sign-in text');
+      return false;
     }
-  }
-  return staleCount > strands.length / 2;
+    return true;
+  });
 }
 
 export class IntelService {
+  private readonly httpGetJson: IntelHttpGetJson;
+  private readonly etsy: IntelEtsyClient;
+  private readonly now: () => Date;
+
+  constructor(deps: IntelServiceDeps = {}) {
+    this.httpGetJson = deps.httpGetJson ?? defaultHttpGetJson;
+    this.etsy = deps.etsy ?? defaultEtsyClient;
+    this.now = deps.now ?? (() => new Date());
+  }
+
+  /** One autocomplete call, cached per seed query. Throws when Google is unreachable. */
+  private async suggestionsFor(seed: string): Promise<string[]> {
+    const key = seed.toLowerCase();
+    const cached = suggestionsCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.value;
+
+    const url = `${GOOGLE_SUGGEST_URL}?client=firefox&q=${encodeURIComponent(seed)}`;
+    const payload = await this.httpGetJson(url, {
+      'User-Agent': 'Mozilla/5.0 (compatible; EmpireLaunchAI/1.0)',
+      Accept: 'application/json',
+    });
+    const suggestions = parseGoogleSuggestions(payload);
+
+    suggestionsCache.set(key, { value: suggestions, expires: Date.now() + CACHE_TTL_MS });
+    return suggestions;
+  }
+
+  /** All distinct suggestions across the seeds, with the seed that produced each. */
+  private async collectSuggestions(params: IntelTrendsParams): Promise<{ hits: SuggestionHit[]; ok: boolean }> {
+    const seeds = buildSeedQueries(params, this.now());
+    if (seeds.length === 0) return { hits: [], ok: false };
+
+    const seedKeys = new Set(seeds.map((s) => s.toLowerCase().replace(/\s+/g, ' ')));
+    const results = await Promise.all(
+      seeds.map(async (seed) => {
+        try {
+          return { seed, suggestions: await this.suggestionsFor(seed) };
+        } catch (err: any) {
+          console.warn(`[IntelService] Google suggestions failed for "${seed}": ${err?.message ?? err}`);
+          return { seed, suggestions: [] as string[], failed: true };
+        }
+      }),
+    );
+
+    const anyOk = results.some((r) => !('failed' in r && r.failed));
+    const seen = new Set<string>();
+    const hits: SuggestionHit[] = [];
+    for (const r of results) {
+      for (const suggestion of r.suggestions) {
+        const key = suggestion.toLowerCase().replace(/\s+/g, ' ');
+        if (seedKeys.has(key)) continue; // the seed itself is not a suggestion
+        if (seen.has(key)) continue;
+        seen.add(key);
+        hits.push({ suggestion, seed: r.seed });
+      }
+    }
+    return { hits, ok: anyOk };
+  }
+
+  private async etsySearch(keywords: string, limit: number): Promise<{ count: number; results: any[] }> {
+    const key = `${keywords.toLowerCase()}|${limit}`;
+    const cached = etsySearchCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.value;
+
+    const value = await this.etsy.searchActiveListings(keywords, limit);
+    etsySearchCache.set(key, { value, expires: Date.now() + CACHE_TTL_MS });
+    return value;
+  }
+
   /**
-   * Researches current market trends for the given business parameters.
-   *
-   * Flow:
-   * 1. Try real web scraping first (marketScraperService)
-   * 2. Fetch cached Etsy DNA strands from the vault
-   * 3. If strands are stale/missing, trigger on-demand Etsy harvest
-   * 4. Inject real Etsy data into the Gemini prompt for grounded analysis
+   * Real Etsy listings for the niche: title, real price, real shop name, real URL.
+   * Returns null when Etsy is configured but the call failed.
    */
-  async researchTrends(params: IntelTrendsParams): Promise<{ data: IntelTrendsResult | null; fallbackMessage?: string }> {
-    const niche = params.niche || 'general';
-    const nicheLower = niche.toLowerCase();
-
-    // 1. Try real web scraping first
+  private async fetchHotSellingItems(niche: string): Promise<IntelItem[] | null> {
     try {
-      const scraped = await marketScraperService.scrapeAll(niche);
-      const hasAnyData = Object.values(scraped).some(arr => arr.length > 0);
-      if (hasAnyData) {
-        return { data: scraped };
-      }
-    } catch (err: any) {
-      console.warn('[IntelService] Market scraping failed, falling back to AI:', err.message);
-    }
-
-    // 2. Fetch cached Etsy DNA strands for this niche
-    let etsyContext: string | undefined;
-    try {
-      const allEtsyStrands = await dnaVaultService.findBySource('etsy', undefined, 50);
-
-      // Filter strands relevant to this niche
-      const relevantStrands = allEtsyStrands.filter(s => {
-        const subcat = (s.subCategory || '').toLowerCase();
-        const tags: string[] = s.metadata?.tags || [];
-        const manifestNiche = s.manifest?.niche || '';
-        return subcat.includes(nicheLower) ||
-          tags.some(t => t.toLowerCase().includes(nicheLower)) ||
-          manifestNiche.toLowerCase().includes(nicheLower) ||
-          nicheLower === 'general';
-      });
-
-      // 3. If strands are stale or missing, trigger on-demand harvest
-      if (areStrandsStale(relevantStrands) && nicheLower !== 'general' && etsyHarvesterService.isConfigured) {
-        console.log(`[IntelService] Etsy strands stale/missing for "${niche}" — triggering on-demand harvest`);
-
-        const harvestResult = await etsyHarvesterService.runHarvest(
-          '00000000-0000-0000-0000-000000000000', // system user
-          niche,
-        );
-
-        if (harvestResult.rateLimited) {
-          console.warn(`[IntelService] Etsy harvest rate-limited — using whatever strands are available (${harvestResult.dailyCallsUsed}/${harvestResult.dailyCallsLimit} calls today)`);
-        } else if (harvestResult.success) {
-          console.log(`[IntelService] On-demand harvest complete: ${harvestResult.strandsStored} strands for "${niche}"`);
-        }
-
-        // Re-fetch strands to include the fresh harvest
-        const updatedStrands = await dnaVaultService.findBySource('etsy', undefined, 50);
-        const updatedRelevant = updatedStrands.filter(s => {
-          const subcat = (s.subCategory || '').toLowerCase();
-          const tags: string[] = s.metadata?.tags || [];
-          const manifestNiche = s.manifest?.niche || '';
-          return subcat.includes(nicheLower) ||
-            tags.some(t => t.toLowerCase().includes(nicheLower)) ||
-            manifestNiche.toLowerCase().includes(nicheLower) ||
-            nicheLower === 'general';
+      const { results } = await this.etsySearch(niche, 12);
+      const items: IntelItem[] = [];
+      for (const listing of results.slice(0, MAX_HOT_ITEMS)) {
+        const title = typeof listing?.title === 'string' ? listing.title.replace(/\s+/g, ' ').trim() : '';
+        if (!title) continue;
+        const price = formatEtsyPrice(listing?.price);
+        const shop = etsyShopName(listing);
+        const detailParts = [price, shop ? `by ${shop}` : undefined].filter(Boolean) as string[];
+        items.push({
+          text: title,
+          detail: detailParts.length > 0 ? detailParts.join(' · ') : undefined,
+          url: etsyListingUrl(listing),
+          source: 'etsy',
         });
-
-        if (updatedRelevant.length > 0) {
-          etsyContext = buildEtsyContextFromStrands(updatedRelevant);
-          console.log(`[IntelService] Injected ${updatedRelevant.length} Etsy DNA strands for "${niche}" (fresh harvest)`);
-        }
-      } else if (relevantStrands.length > 0) {
-        etsyContext = buildEtsyContextFromStrands(relevantStrands);
-        console.log(`[IntelService] Injected ${relevantStrands.length} cached Etsy DNA strands for "${niche}"`);
-      } else {
-        console.log(`[IntelService] No Etsy DNA strands for "${niche}" in PG — trying R2 fallback`);
-        etsyContext = await this.tryR2Fallback(niche);
-        if (etsyContext) {
-          console.log(`[IntelService] Loaded Etsy data from R2 cold storage for "${niche}"`);
-        }
       }
-    } catch (etsyErr: any) {
-      console.warn('[IntelService] Etsy DNA pipeline failed:', etsyErr.message);
-    }
-
-    // 4. Fallback to Gemini (with Etsy context if available)
-    const prompt = buildIntelPrompt(params, etsyContext);
-
-    try {
-      const raw = await reasoningEngine.reason(prompt, {
-        temperature: 0.3,
-        maxTokens: 2048,
-      });
-
-      const parsed = parseIntelResponse(raw);
-      if (parsed) {
-        return { data: parsed };
-      }
-
-      console.warn('[IntelService] Could not parse AI response into structured trends');
+      return items;
     } catch (err: any) {
-      console.error('[IntelService] reasoningEngine.reason() failed:', err.message);
+      console.warn(`[IntelService] Etsy listings failed for "${niche}": ${err?.message ?? err}`);
+      return null;
     }
+  }
+
+  /**
+   * Keywords from the real suggestions whose Etsy active-listing count is low:
+   * demand with less competition, and the real count is reported, never a guess.
+   */
+  private async fetchLowCompetitionItems(keywords: string[]): Promise<IntelItem[] | null> {
+    const candidates = keywords.slice(0, 5);
+    if (candidates.length === 0) return [];
+
+    const counted = await Promise.all(
+      candidates.map(async (keyword) => {
+        try {
+          const { count } = await this.etsySearch(keyword, 1);
+          return { keyword, count };
+        } catch (err: any) {
+          console.warn(`[IntelService] Etsy count failed for "${keyword}": ${err?.message ?? err}`);
+          return null;
+        }
+      }),
+    );
+
+    const usable = counted.filter((c): c is { keyword: string; count: number } => c !== null && c.count > 0);
+    if (usable.length === 0) return null; // configured, but nothing came back
+
+    return usable
+      .sort((a, b) => a.count - b.count)
+      .slice(0, MAX_LOW_COMPETITION)
+      .map(({ keyword, count }) => ({
+        text: keyword,
+        detail: `${count.toLocaleString('en-US')} active listings on Etsy`,
+        url: `https://www.etsy.com/search?q=${encodeURIComponent(keyword)}`,
+        source: 'etsy' as const,
+      }));
+  }
+
+  /**
+   * Real market signal for the given business parameters.
+   * Never throws: an unavailable source empties its own boxes and says so.
+   */
+  async researchTrends(params: IntelTrendsParams): Promise<IntelTrendsResponse> {
+    const now = this.now();
+    const niche = (params.niche || '').trim();
+
+    if (!niche) {
+      return {
+        data: {
+          trendingThemes: [],
+          seasonalOpportunities: [],
+          hotSellingItems: [],
+          lowCompetitionItems: [],
+          contentIdeas: [],
+          sources: { google: 'error', etsy: 'error' },
+          generatedAt: now.toISOString(),
+        },
+        fallbackMessage: 'No niche given, so there is nothing to source.',
+      };
+    }
+
+    const [{ hits, ok: googleOk }, etsyConfigured] = await Promise.all([
+      this.collectSuggestions(params),
+      Promise.resolve(this.etsy.isConfigured()),
+    ]);
+
+    // trendingThemes — the real suggestions themselves.
+    const trendingThemes: IntelItem[] = hits.slice(0, MAX_TRENDING_THEMES).map((hit) => ({
+      text: hit.suggestion,
+      detail: `Google search suggestion for "${hit.seed}"`,
+      source: 'google' as const,
+    }));
+
+    // contentIdeas — hook-shaped lines phrased from those same suggestions.
+    const contentIdeas: IntelItem[] = hits.slice(0, MAX_CONTENT_IDEAS).map((hit, i) => ({
+      text: buildContentHook(hit.suggestion, i),
+      detail: `From the real search suggestion "${hit.suggestion}"`,
+      source: 'google' as const,
+    }));
+
+    // seasonalOpportunities — the calendar crossed with the niche's real searches.
+    const seasonalOpportunities: IntelItem[] = buildSeasonalWindows(now).map((window, i) => {
+      const related = hits[i]?.suggestion;
+      return {
+        text: `${window.name} — ${window.fact}`,
+        detail: related ? `Niche search to build it around: "${related}"` : 'Calendar-based',
+        source: 'google' as const,
+      };
+    });
+
+    // hotSellingItems + lowCompetitionItems — real Etsy API data only.
+    let hotSellingItems: IntelItem[] = [];
+    let lowCompetitionItems: IntelItem[] = [];
+    let etsyStatus: IntelTrendsResult['sources']['etsy'];
+    let etsyReason: string | undefined;
+
+    if (!etsyConfigured) {
+      etsyStatus = 'not_configured';
+      etsyReason = ETSY_NOT_CONFIGURED_REASON;
+    } else if (isEtsyDailyLimitReached()) {
+      // The day's quota is spent: stop calling, say why, never queue work that
+      // cannot run until the UTC day rolls over.
+      etsyStatus = 'error';
+      etsyReason = `Etsy's ${ETSY_DAILY_LIMIT.toLocaleString('en-US')} requests-a-day limit is used up, so the Etsy boxes are empty until tomorrow (UTC).`;
+    } else {
+      const [hot, low] = await Promise.all([
+        this.fetchHotSellingItems(niche),
+        this.fetchLowCompetitionItems(hits.map((h) => h.suggestion)),
+      ]);
+      hotSellingItems = hot ?? [];
+      lowCompetitionItems = low ?? [];
+      etsyStatus = hot === null && low === null ? 'error' : 'ok';
+      if (etsyStatus === 'error') {
+        etsyReason = isEtsyDailyLimitReached()
+          ? `Etsy's ${ETSY_DAILY_LIMIT.toLocaleString('en-US')} requests-a-day limit is used up, so the Etsy boxes are empty until tomorrow (UTC).`
+          : 'Etsy did not answer, so its two boxes are empty rather than filled with guesses.';
+      }
+    }
+
+    const data: IntelTrendsResult = {
+      trendingThemes: cleanItems(trendingThemes),
+      seasonalOpportunities: cleanItems(seasonalOpportunities),
+      hotSellingItems: cleanItems(hotSellingItems),
+      lowCompetitionItems: cleanItems(lowCompetitionItems),
+      contentIdeas: cleanItems(contentIdeas),
+      sources: { google: googleOk ? 'ok' : 'error', etsy: etsyStatus, etsyReason },
+      generatedAt: now.toISOString(),
+    };
 
     return {
-      data: null,
-      fallbackMessage: 'Unable to research trends at this time. Please try again later.',
+      data,
+      fallbackMessage:
+        data.sources.google === 'error' && data.sources.etsy !== 'ok'
+          ? 'Live search suggestions and Etsy are both unavailable right now — nothing is being shown rather than something invented.'
+          : undefined,
     };
-  }
-
-  /**
-   * Try to load today's Etsy harvest from R2 cold storage when PG has no strands.
-   * Returns a human-readable context string, or undefined if nothing is found.
-   */
-  private async tryR2Fallback(niche: string): Promise<string | undefined> {
-    if (!r2Storage.isAvailable) return undefined;
-    const today = new Date().toISOString().slice(0, 10);
-    const key = `dna-harvests/${today}/${niche.replace(/\s+/g, '_')}.json`;
-
-    try {
-      const buffer = await r2Storage.downloadBuffer(key);
-      if (!buffer) {
-        // Try yesterday's as well — maybe harvest ran late
-        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-        const altKey = `dna-harvests/${yesterday}/${niche.replace(/\s+/g, '_')}.json`;
-        const altBuffer = await r2Storage.downloadBuffer(altKey);
-        if (!altBuffer) return undefined;
-        const data = JSON.parse(altBuffer.toString('utf-8'));
-        return this.buildFallbackContext(data);
-      }
-
-      const data = JSON.parse(buffer.toString('utf-8'));
-      return this.buildFallbackContext(data);
-    } catch (err: any) {
-      console.warn(`[IntelService] R2 fallback failed for "${niche}":`, err.message);
-      return undefined;
-    }
-  }
-
-  /** Build a simple context string from R2 harvest JSON. */
-  private buildFallbackContext(data: any): string {
-    const lines: string[] = [];
-    if (data.keywords?.length > 0) {
-      lines.push(`Trending keywords: ${data.keywords.slice(0, 20).join(', ')}`);
-    }
-    if (data.listingsFound) {
-      lines.push(`Listings analyzed: ${data.listingsFound}`);
-    }
-    if (data.harvestedAt) {
-      lines.push(`Harvested: ${data.harvestedAt}`);
-    }
-    return lines.length > 0 ? lines.join('\n') : `Etsy harvest data for ${data.niche || 'this niche'}.`;
   }
 }
 

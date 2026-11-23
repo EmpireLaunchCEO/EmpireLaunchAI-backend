@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { integrationService } from './integrationService.js';
 import { vaultService } from './vaultService.js';
+import { buildEtsyHeaders } from './etsyCredentials.js';
+import { runEtsyRequest } from './etsyRateLimits.js';
 
 /**
  * Universal Gateway Service
@@ -655,12 +657,13 @@ class UniversalGatewayService {
         accountHandle = profileRes.data.team_name || profileRes.data.name;
         accountId = profileRes.data.id;
       } else if (config.platform === 'etsy') {
-        const profileRes = await axios.get('https://api.etsy.com/v3/application/shops', {
-          headers: {
-            Authorization: `Bearer ${tokenData.access_token}`,
-            'x-api-key': config.clientId()
-          }
-        });
+        // ONE header builder and ONE limiter for every Etsy request (etsyCredentials.ts,
+        // etsyRateLimits.ts). Etsy v3 rejects a bare keystring with 403.
+        const profileRes = await runEtsyRequest(() =>
+          axios.get('https://api.etsy.com/v3/application/shops', {
+            headers: buildEtsyHeaders({ Authorization: `Bearer ${tokenData.access_token}` })
+          })
+        );
         const shop = profileRes.data.results?.[0];
         accountHandle = shop?.shop_name;
         accountId = shop?.shop_id?.toString();
