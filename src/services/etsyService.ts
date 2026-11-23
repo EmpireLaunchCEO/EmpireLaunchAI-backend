@@ -1,5 +1,7 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { buildEtsyHeaders, isEtsyConfigured, resolveEtsyCredentials } from './etsyCredentials.js';
+import { runEtsyRequest } from './etsyRateLimits.js';
 
 dotenv.config();
 
@@ -30,22 +32,26 @@ export interface TokenResponse {
  * Handles official OAuth flow and production endpoints for listing management.
  */
 export class EtsyService {
-  private readonly clientSecret = process.env.ETSY_CLIENT_SECRET || '';
   private readonly redirectUri = process.env.ETSY_REDIRECT_URI || '';
   private readonly baseUrl = 'https://openapi.etsy.com/v3';
 
   /**
-   * Read at call time, not at construction time: the keystring is an operator
-   * setting, and a value that appears after this module was first imported must
+   * Read at call time, not at construction time: the credentials are operator
+   * settings, and a value that appears after this module was first imported must
    * still be honoured (and a value that is absent must be reported as absent).
+   * Resolution order lives in etsyCredentials.ts — nowhere else.
    */
   private get clientId(): string {
-    return process.env.ETSY_CLIENT_ID || '';
+    return resolveEtsyCredentials().keystring;
   }
 
-  /** True when the owner's free Etsy keystring is present. */
+  private get clientSecret(): string {
+    return resolveEtsyCredentials().sharedSecret;
+  }
+
+  /** True when BOTH halves of the Etsy key are present. A bare keystring cannot work. */
   get isConfigured(): boolean {
-    return this.clientId.trim().length > 0;
+    return isEtsyConfigured();
   }
 
   /**
@@ -69,18 +75,20 @@ export class EtsyService {
    * Exchanges OAuth authorization code for access + refresh tokens.
    */
   async getAccessToken(code: string, codeVerifier: string): Promise<TokenResponse> {
-    const response = await axios.post('https://api.etsy.com/v3/public/oauth/token', {
-      grant_type: 'authorization_code',
-      client_id: this.clientId,
-      client_secret: this.clientSecret,
-      redirect_uri: this.redirectUri,
-      code,
-      code_verifier: codeVerifier,
-    }, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    });
+    const response = await runEtsyRequest(() =>
+      axios.post('https://api.etsy.com/v3/public/oauth/token', {
+        grant_type: 'authorization_code',
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        redirect_uri: this.redirectUri,
+        code,
+        code_verifier: codeVerifier,
+      }, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }),
+    );
     return response.data;
   }
 
@@ -88,12 +96,11 @@ export class EtsyService {
    * Fetches the authenticated user's shop information.
    */
   async getShop(accessToken: string) {
-    const response = await axios.get(`${this.baseUrl}/application/shops`, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'x-api-key': this.clientId,
-      },
-    });
+    const response = await runEtsyRequest(() =>
+      axios.get(`${this.baseUrl}/application/shops`, {
+        headers: buildEtsyHeaders({ Authorization: `Bearer ${accessToken}` }),
+      }),
+    );
     return response.data;
   }
 
@@ -101,15 +108,15 @@ export class EtsyService {
    * Searches Etsy listings by keyword.
    */
   async searchListings(keywords: string, limit: number = 10) {
-    const response = await axios.get(`${this.baseUrl}/application/listings/active`, {
-      params: {
-        keywords,
-        limit,
-      },
-      headers: {
-        'x-api-key': this.clientId,
-      },
-    });
+    const response = await runEtsyRequest(() =>
+      axios.get(`${this.baseUrl}/application/listings/active`, {
+        params: {
+          keywords,
+          limit,
+        },
+        headers: buildEtsyHeaders(),
+      }),
+    );
     return response.data;
   }
 
@@ -135,25 +142,24 @@ export class EtsyService {
    */
   async createListing(accessToken: string, shopId: string, data: any) {
     try {
-      const response = await axios.post(
-        `${this.baseUrl}/application/shops/${shopId}/listings`,
-        {
-          quantity: data.quantity || 1,
-          title: data.title,
-          description: data.description,
-          price: data.price,
-          who_made: data.who_made || 'i_did',
-          when_made: data.when_made || 'made_to_order',
-          taxonomy_id: data.taxonomy_id || 1, // General digital category
-          is_renewable: true,
-          type: 'download', // Primary focus: Digital Marketing
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'x-api-key': this.clientId,
+      const response = await runEtsyRequest(() =>
+        axios.post(
+          `${this.baseUrl}/application/shops/${shopId}/listings`,
+          {
+            quantity: data.quantity || 1,
+            title: data.title,
+            description: data.description,
+            price: data.price,
+            who_made: data.who_made || 'i_did',
+            when_made: data.when_made || 'made_to_order',
+            taxonomy_id: data.taxonomy_id || 1, // General digital category
+            is_renewable: true,
+            type: 'download', // Primary focus: Digital Marketing
           },
-        }
+          {
+            headers: buildEtsyHeaders({ Authorization: `Bearer ${accessToken}` }),
+          },
+        ),
       );
       return response.data;
     } catch (error: any) {
@@ -168,14 +174,13 @@ export class EtsyService {
    */
   async getRecentSales(accessToken: string, shopId: string) {
     try {
-      const response = await axios.get(
-        `${this.baseUrl}/application/shops/${shopId}/receipts`,
-        {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'x-api-key': this.clientId,
+      const response = await runEtsyRequest(() =>
+        axios.get(
+          `${this.baseUrl}/application/shops/${shopId}/receipts`,
+          {
+            headers: buildEtsyHeaders({ Authorization: `Bearer ${accessToken}` }),
           },
-        }
+        ),
       );
       return response.data.results;
     } catch (error: any) {
@@ -190,14 +195,13 @@ export class EtsyService {
    */
   async getGrowthStats(accessToken: string, shopId: string) {
     try {
-      const response = await axios.get(
-        `${this.baseUrl}/application/shops/${shopId}/stats`,
-        {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'x-api-key': this.clientId,
+      const response = await runEtsyRequest(() =>
+        axios.get(
+          `${this.baseUrl}/application/shops/${shopId}/stats`,
+          {
+            headers: buildEtsyHeaders({ Authorization: `Bearer ${accessToken}` }),
           },
-        }
+        ),
       );
       return response.data;
     } catch (error: any) {

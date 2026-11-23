@@ -25,6 +25,18 @@ import {
   buildContentHook,
   parseGoogleSuggestions,
 } from '../intelService.js';
+import { buildEtsyHeaders, isEtsyConfigured, resolveEtsyCredentials } from '../etsyCredentials.js';
+import {
+  ETSY_DAILY_LIMIT,
+  ETSY_MIN_INTERVAL_MS,
+  ETSY_QPS_LIMIT,
+  EtsyDailyLimitReachedError,
+  awaitEtsySlot,
+  isEtsyDailyLimitReached,
+  recordEtsyCall,
+  resetEtsyRateLimitState,
+  runEtsyRequest,
+} from '../etsyRateLimits.js';
 
 const NOW = new Date('2026-11-23T10:00:00.000Z');
 const SIGN_IN = /sign ?in|logged? ?in/i;
@@ -115,17 +127,26 @@ test('no produced string ever contains sign-in text', async () => {
   assert.equal(data.trendingThemes.length, 1);
 });
 
-test('ETSY_CLIENT_ID unset: etsy is not_configured, both Etsy arrays empty, no sign-in text', async () => {
+test('both Etsy names cleared: etsy is not_configured, both Etsy arrays empty, no sign-in text', async () => {
   clearIntelCaches();
-  const saved = process.env.ETSY_CLIENT_ID;
-  delete process.env.ETSY_CLIENT_ID;
+  // "Not configured" means BOTH halves of the key are absent. Clear every name the
+  // credential resolver reads, so a stray .env cannot make this pass by accident.
+  const names = ['ETSY_API_KEYSTRING', 'ETSY_CLIENT_ID', 'ETSY_CLIENT_SECRET', 'ETSY_API_SHARED_SECRET'];
+  const saved: Record<string, string | undefined> = {};
+  for (const n of names) {
+    saved[n] = process.env[n];
+    delete process.env[n];
+  }
   try {
+    assert.equal(isEtsyConfigured(), false, 'no credentials means not configured');
+
     const http = suggestionsStub({ 'digital planner': ['digital planner ipad', 'digital planner goodnotes'] });
     // No `etsy` dep: the service uses the real client, which must report itself unconfigured.
     const service = new IntelService({ httpGetJson: http, now: () => NOW });
     const { data } = await service.researchTrends({ niche: 'digital planner' });
 
     assert.equal(data.sources.etsy, 'not_configured');
+    assert.ok(data.sources.etsyReason && data.sources.etsyReason.length > 0, 'a plain reason is given');
     assert.deepEqual(data.hotSellingItems, []);
     assert.deepEqual(data.lowCompetitionItems, []);
     // Google still fills its own boxes — one source failing must not empty the other.
@@ -133,8 +154,140 @@ test('ETSY_CLIENT_ID unset: etsy is not_configured, both Etsy arrays empty, no s
     assert.ok(data.trendingThemes.length > 0);
     assert.deepEqual(allStrings(data).filter((s) => SIGN_IN.test(s)), []);
   } finally {
-    if (saved === undefined) delete process.env.ETSY_CLIENT_ID;
-    else process.env.ETSY_CLIENT_ID = saved;
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
+  }
+});
+
+test('the Etsy header is `keystring:secret` — the exact shape Etsy measured 200 on', () => {
+  const names = ['ETSY_API_KEYSTRING', 'ETSY_CLIENT_ID', 'ETSY_CLIENT_SECRET', 'ETSY_API_SHARED_SECRET'];
+  const saved: Record<string, string | undefined> = {};
+  for (const n of names) saved[n] = process.env[n];
+  try {
+    // The owner's live configuration: keystring in ETSY_API_KEYSTRING, her shared
+    // secret saved (oddly) in ETSY_CLIENT_ID. Measured: x-api-key: ks:secret -> 200.
+    process.env.ETSY_API_KEYSTRING = 'keystring123';
+    process.env.ETSY_CLIENT_ID = 'secret456';
+    delete process.env.ETSY_CLIENT_SECRET;
+    delete process.env.ETSY_API_SHARED_SECRET;
+
+    assert.deepEqual(resolveEtsyCredentials(), {
+      keystring: 'keystring123',
+      sharedSecret: 'secret456',
+      configured: true,
+    });
+    assert.deepEqual(buildEtsyHeaders(), { 'x-api-key': 'keystring123:secret456' });
+    // Extra headers survive; the api key cannot be overridden by a caller.
+    assert.deepEqual(buildEtsyHeaders({ Authorization: 'Bearer t' }), {
+      Authorization: 'Bearer t',
+      'x-api-key': 'keystring123:secret456',
+    });
+
+    // A named shared secret wins over the ETSY_CLIENT_ID fallback.
+    process.env.ETSY_CLIENT_SECRET = 'realsecret';
+    assert.equal(buildEtsyHeaders()['x-api-key'], 'keystring123:realsecret');
+
+    // A bare keystring can never work: Etsy answers 403 "Shared secret is required".
+    delete process.env.ETSY_CLIENT_ID;
+    delete process.env.ETSY_CLIENT_SECRET;
+    delete process.env.ETSY_API_SHARED_SECRET;
+    assert.equal(isEtsyConfigured(), false);
+    assert.throws(() => buildEtsyHeaders(), /ETSY_API_KEYSTRING/);
+  } finally {
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
+  }
+});
+
+test('the Etsy limiter spaces requests by 1000/ETSY_QPS_LIMIT, derived from the constant', async () => {
+  resetEtsyRateLimitState();
+  assert.equal(ETSY_QPS_LIMIT, 5);
+  assert.equal(ETSY_MIN_INTERVAL_MS, 1000 / ETSY_QPS_LIMIT);
+  assert.equal(ETSY_DAILY_LIMIT, 5000);
+
+  const started = Date.now();
+  await awaitEtsySlot();
+  await awaitEtsySlot();
+  const elapsed = Date.now() - started;
+  // Two slots must be at least one interval apart — measured, not assumed.
+  assert.ok(
+    elapsed >= ETSY_MIN_INTERVAL_MS - 5,
+    `two Etsy slots took ${elapsed}ms, expected at least ${ETSY_MIN_INTERVAL_MS}ms`,
+  );
+  resetEtsyRateLimitState();
+});
+
+test('a 429 parks every Etsy request for Retry-After, never a tight retry', async () => {
+  resetEtsyRateLimitState();
+  const err: any = new Error('Too Many Requests');
+  err.response = { status: 429, headers: { 'retry-after': '1' }, data: { error: 'rate limited' } };
+
+  await assert.rejects(
+    runEtsyRequest(async () => {
+      throw err;
+    }),
+    /Too Many Requests/,
+  );
+
+  // The next request must wait out the backoff rather than firing immediately.
+  const started = Date.now();
+  await awaitEtsySlot();
+  const waited = Date.now() - started;
+  assert.ok(waited >= 900, `expected a ~1s backoff from Retry-After, waited ${waited}ms`);
+  resetEtsyRateLimitState();
+});
+
+test('the daily guard stops the Etsy call at 5,000 and says why', async () => {
+  clearIntelCaches();
+  resetEtsyRateLimitState();
+
+  const names = ['ETSY_API_KEYSTRING', 'ETSY_CLIENT_ID', 'ETSY_CLIENT_SECRET', 'ETSY_API_SHARED_SECRET'];
+  const saved: Record<string, string | undefined> = {};
+  for (const n of names) {
+    saved[n] = process.env[n];
+    delete process.env[n];
+  }
+  try {
+    process.env.ETSY_API_KEYSTRING = 'keystring123';
+    process.env.ETSY_CLIENT_ID = 'secret456';
+
+    for (let i = 0; i < ETSY_DAILY_LIMIT; i += 1) recordEtsyCall();
+    assert.equal(isEtsyDailyLimitReached(), true);
+
+    // The limiter refuses the request outright: the guarded function never runs.
+    let ran = false;
+    await assert.rejects(
+      runEtsyRequest(async () => {
+        ran = true;
+        return 'x';
+      }),
+      (e: any) => e instanceof EtsyDailyLimitReachedError && e.code === 'ETSY_DAILY_LIMIT',
+    );
+    assert.equal(ran, false, 'no Etsy request is made once the day is spent');
+
+    // Intel reports it as an error with a plain reason, and calls Etsy zero times.
+    const http = suggestionsStub({ 'digital planner': ['digital planner ipad'] });
+    const etsy = fakeEtsy({ listings: [{ listing_id: 1, title: 'Digital Planner' }] });
+    const service = new IntelService({ httpGetJson: http, etsy, now: () => NOW });
+    const { data } = await service.researchTrends({ niche: 'digital planner' });
+
+    assert.equal(data.sources.etsy, 'error');
+    assert.match(data.sources.etsyReason ?? '', /limit/i);
+    assert.equal(etsy.calls, 0, 'the daily guard stops the Intel Etsy calls');
+    assert.deepEqual(data.hotSellingItems, []);
+    assert.deepEqual(data.lowCompetitionItems, []);
+    // Google is untouched by Etsy's quota.
+    assert.equal(data.sources.google, 'ok');
+  } finally {
+    resetEtsyRateLimitState();
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
   }
 });
 

@@ -1,6 +1,15 @@
 import axios from 'axios';
 import { dnaVaultService, DnaStrand } from './dnaVaultService.js';
 import { r2Storage } from './r2StorageService.js';
+import { ETSY_NOT_CONFIGURED_REASON, buildEtsyHeaders, isEtsyConfigured } from './etsyCredentials.js';
+import {
+  ETSY_DAILY_LIMIT,
+  getEtsyDailyUsage,
+  getEtsyRateLimitStatus,
+  isEtsyDailyLimitReached,
+  runEtsyRequest,
+  type EtsyRateLimitStatus,
+} from './etsyRateLimits.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,13 +44,8 @@ interface EtsySearchResponse {
   results: EtsyListingV3[];
 }
 
-// ─── Rate Limits ────────────────────────────────────────────────────────────
-
-const DAILY_API_LIMIT = 5000;   // Etsy's 5K calls/day quota
-const WARNING_THRESHOLD = 4000; // 80% — log warning
-const BLOCK_THRESHOLD = 4500;   // 90% — stop harvesting entirely
-
-type RateLimitStatus = 'ok' | 'warning' | 'blocked';
+// Rate limits live in ONE place: ./etsyRateLimits.ts (the owner's 5/s, 5,000/day).
+// There is deliberately no second copy of either number or of the limiter here.
 
 // ─── Etsy Categories (popular taxonomy nodes) ───────────────────────────────
 
@@ -65,91 +69,32 @@ const NICHE_CATEGORIES: Record<string, string> = {
   'accessory': 'accessories',
 };
 
-// ─── Per-Second Rate Limiter ────────────────────────────────────────────────
-
-class EtsyRateLimiter {
-  private lastCall: number = 0;
-  private minInterval: number = 200; // 5 QPS limit (5K QPD)
-
-  async wait(): Promise<void> {
-    const now = Date.now();
-    const waitTime = Math.max(0, this.minInterval - (now - this.lastCall));
-    if (waitTime > 0) {
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-    }
-    this.lastCall = Date.now();
-  }
-}
-
-const rateLimiter = new EtsyRateLimiter();
-
 // ─── Etsy Harvester Service ──────────────────────────────────────────────────
 
 export class EtsyHarvesterService {
-  private readonly apiKey: string;
   private readonly baseUrl = 'https://openapi.etsy.com/v3';
 
-  // Daily rate-limit tracking
-  private dailyCallCount: number = 0;
-  private dailyResetDay: number = 0; // UTC day-of-year
-
-  constructor() {
-    this.apiKey = process.env.ETSY_CLIENT_ID || '';
-  }
-
+  /** True only when BOTH halves of the Etsy key are present (see etsyCredentials.ts). */
   get isConfigured(): boolean {
-    return !!this.apiKey;
+    return isEtsyConfigured();
   }
 
-  // ─── Daily Rate-Limit Tracking ────────────────────────────────────────────
-
-  /** Reset the daily counter if we've crossed into a new UTC day. */
-  private resetDailyCounterIfNeeded(): void {
-    const now = new Date();
-    const todayKey = this.utcDayOfYear(now);
-    if (todayKey !== this.dailyResetDay) {
-      if (this.dailyCallCount > 0) {
-        console.log(`[EtsyRateLimit] New UTC day — resetting counter from ${this.dailyCallCount} calls`);
-      }
-      this.dailyCallCount = 0;
-      this.dailyResetDay = todayKey;
-    }
-  }
-
-  private utcDayOfYear(date: Date): number {
-    // Simple: year * 1000 + day-of-year for a unique daily key
-    const start = Date.UTC(date.getUTCFullYear(), 0, 0);
-    const diff = date.getTime() - start;
-    return Math.floor(diff / (1000 * 60 * 60 * 24));
-  }
-
-  /** Record a single API call against the daily quota. */
-  recordApiCall(): void {
-    this.resetDailyCounterIfNeeded();
-    this.dailyCallCount++;
-  }
+  // ─── Daily Rate-Limit Tracking (the ONE counter, in etsyRateLimits.ts) ────
 
   /** Get current daily usage info. */
   getDailyUsage(): { count: number; limit: number; percent: number } {
-    this.resetDailyCounterIfNeeded();
-    return {
-      count: this.dailyCallCount,
-      limit: DAILY_API_LIMIT,
-      percent: Math.round((this.dailyCallCount / DAILY_API_LIMIT) * 100),
-    };
+    const usage = getEtsyDailyUsage();
+    return { count: usage.count, limit: usage.limit, percent: usage.percent };
   }
 
   /** Check the rate-limit status: 'ok' | 'warning' | 'blocked'. */
-  getRateLimitStatus(): RateLimitStatus {
-    this.resetDailyCounterIfNeeded();
-    if (this.dailyCallCount >= BLOCK_THRESHOLD) return 'blocked';
-    if (this.dailyCallCount >= WARNING_THRESHOLD) return 'warning';
-    return 'ok';
+  getRateLimitStatus(): EtsyRateLimitStatus {
+    return getEtsyRateLimitStatus();
   }
 
-  /** True when harvesting should be blocked entirely (90%+ of quota). */
+  /** True when harvesting should be blocked entirely (the day's quota is spent). */
   get isRateLimited(): boolean {
-    return this.getRateLimitStatus() === 'blocked';
+    return isEtsyDailyLimitReached();
   }
 
   // ─── Harvesting Methods ───────────────────────────────────────────────────
@@ -174,20 +119,20 @@ export class EtsyHarvesterService {
       }
 
       try {
-        await rateLimiter.wait();
-        const response = await axios.get<EtsySearchResponse>(
-          `${this.baseUrl}/application/listings/active`,
-          {
-            params: {
-              keywords: term,
-              limit: 25,
-              sort_on: 'score',
+        const response = await runEtsyRequest(() =>
+          axios.get<EtsySearchResponse>(
+            `${this.baseUrl}/application/listings/active`,
+            {
+              params: {
+                keywords: term,
+                limit: 25,
+                sort_on: 'score',
+              },
+              headers: buildEtsyHeaders(),
+              timeout: 15000,
             },
-            headers: { 'x-api-key': this.apiKey },
-            timeout: 15000,
-          },
+          ),
         );
-        this.recordApiCall();
 
         for (const listing of response.data.results) {
           listings.push(listing);
@@ -231,20 +176,20 @@ export class EtsyHarvesterService {
       }
 
       try {
-        await rateLimiter.wait();
-        const response = await axios.get<EtsySearchResponse>(
-          `${this.baseUrl}/application/listings/active`,
-          {
-            params: {
-              keywords: term,
-              limit: 25,
-              sort_on: 'score',
+        const response = await runEtsyRequest(() =>
+          axios.get<EtsySearchResponse>(
+            `${this.baseUrl}/application/listings/active`,
+            {
+              params: {
+                keywords: term,
+                limit: 25,
+                sort_on: 'score',
+              },
+              headers: buildEtsyHeaders(),
+              timeout: 15000,
             },
-            headers: { 'x-api-key': this.apiKey },
-            timeout: 15000,
-          },
+          ),
         );
-        this.recordApiCall();
 
         for (const listing of response.data.results) {
           allListings.push(listing);
@@ -293,10 +238,10 @@ export class EtsyHarvesterService {
     if (!this.isConfigured) {
       return {
         success: false, strandsStored: 0, keywords: [], listingsFound: 0,
-        errors: ['ETSY_CLIENT_ID not configured'],
+        errors: [ETSY_NOT_CONFIGURED_REASON],
         rateLimited: false,
-        dailyCallsUsed: this.dailyCallCount,
-        dailyCallsLimit: DAILY_API_LIMIT,
+        dailyCallsUsed: getEtsyDailyUsage().count,
+        dailyCallsLimit: ETSY_DAILY_LIMIT,
       };
     }
 
@@ -304,18 +249,18 @@ export class EtsyHarvesterService {
     const rateStatus = this.getRateLimitStatus();
     if (rateStatus === 'blocked') {
       const usage = this.getDailyUsage();
-      console.warn(`[EtsyHarvester] BLOCKED — ${usage.count}/${DAILY_API_LIMIT} calls used today (${usage.percent}%)`);
+      console.warn(`[EtsyHarvester] BLOCKED — ${usage.count}/${usage.limit} calls used today (${usage.percent}%)`);
       return {
         success: false, strandsStored: 0, keywords: [], listingsFound: 0,
-        errors: ['Trend data temporarily limited — upgrading soon.'],
+        errors: [`Etsy's ${usage.limit.toLocaleString('en-US')} requests-a-day limit is used up — trend data resumes tomorrow (UTC).`],
         rateLimited: true,
         dailyCallsUsed: usage.count,
-        dailyCallsLimit: DAILY_API_LIMIT,
+        dailyCallsLimit: usage.limit,
       };
     }
     if (rateStatus === 'warning') {
       const usage = this.getDailyUsage();
-      console.warn(`[EtsyHarvester] WARNING — approaching daily limit: ${usage.count}/${DAILY_API_LIMIT} calls (${usage.percent}%)`);
+      console.warn(`[EtsyHarvester] WARNING — approaching daily limit: ${usage.count}/${usage.limit} calls (${usage.percent}%)`);
     }
 
     // ── 1. Harvest trending searches → niche_pattern strands ──────────────
@@ -448,7 +393,7 @@ export class EtsyHarvesterService {
       errors,
       rateLimited: rateStatus === 'warning',
       dailyCallsUsed: usage.count,
-      dailyCallsLimit: DAILY_API_LIMIT,
+      dailyCallsLimit: usage.limit,
     };
   }
 

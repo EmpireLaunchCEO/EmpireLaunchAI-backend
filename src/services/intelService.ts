@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { etsyService } from './etsyService.js';
+import { ETSY_NOT_CONFIGURED_REASON } from './etsyCredentials.js';
+import { ETSY_DAILY_LIMIT, isEtsyDailyLimitReached } from './etsyRateLimits.js';
 
 /**
  * INTEL — real, sourced market signal only.
@@ -34,7 +36,12 @@ export interface IntelTrendsResult {
   hotSellingItems: IntelItem[];
   lowCompetitionItems: IntelItem[];
   contentIdeas: IntelItem[];
-  sources: { google: 'ok' | 'error'; etsy: 'ok' | 'not_configured' | 'error' };
+  sources: {
+    google: 'ok' | 'error';
+    etsy: 'ok' | 'not_configured' | 'error';
+    /** A plain reason whenever Etsy is not 'ok'. Never a sign-in message. */
+    etsyReason?: string;
+  };
   generatedAt: string; // ISO
 }
 
@@ -428,9 +435,16 @@ export class IntelService {
     let hotSellingItems: IntelItem[] = [];
     let lowCompetitionItems: IntelItem[] = [];
     let etsyStatus: IntelTrendsResult['sources']['etsy'];
+    let etsyReason: string | undefined;
 
     if (!etsyConfigured) {
       etsyStatus = 'not_configured';
+      etsyReason = ETSY_NOT_CONFIGURED_REASON;
+    } else if (isEtsyDailyLimitReached()) {
+      // The day's quota is spent: stop calling, say why, never queue work that
+      // cannot run until the UTC day rolls over.
+      etsyStatus = 'error';
+      etsyReason = `Etsy's ${ETSY_DAILY_LIMIT.toLocaleString('en-US')} requests-a-day limit is used up, so the Etsy boxes are empty until tomorrow (UTC).`;
     } else {
       const [hot, low] = await Promise.all([
         this.fetchHotSellingItems(niche),
@@ -439,6 +453,11 @@ export class IntelService {
       hotSellingItems = hot ?? [];
       lowCompetitionItems = low ?? [];
       etsyStatus = hot === null && low === null ? 'error' : 'ok';
+      if (etsyStatus === 'error') {
+        etsyReason = isEtsyDailyLimitReached()
+          ? `Etsy's ${ETSY_DAILY_LIMIT.toLocaleString('en-US')} requests-a-day limit is used up, so the Etsy boxes are empty until tomorrow (UTC).`
+          : 'Etsy did not answer, so its two boxes are empty rather than filled with guesses.';
+      }
     }
 
     const data: IntelTrendsResult = {
@@ -447,7 +466,7 @@ export class IntelService {
       hotSellingItems: cleanItems(hotSellingItems),
       lowCompetitionItems: cleanItems(lowCompetitionItems),
       contentIdeas: cleanItems(contentIdeas),
-      sources: { google: googleOk ? 'ok' : 'error', etsy: etsyStatus },
+      sources: { google: googleOk ? 'ok' : 'error', etsy: etsyStatus, etsyReason },
       generatedAt: now.toISOString(),
     };
 
