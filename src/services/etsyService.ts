@@ -30,10 +30,23 @@ export interface TokenResponse {
  * Handles official OAuth flow and production endpoints for listing management.
  */
 export class EtsyService {
-  private readonly clientId = process.env.ETSY_CLIENT_ID || '';
   private readonly clientSecret = process.env.ETSY_CLIENT_SECRET || '';
   private readonly redirectUri = process.env.ETSY_REDIRECT_URI || '';
   private readonly baseUrl = 'https://openapi.etsy.com/v3';
+
+  /**
+   * Read at call time, not at construction time: the keystring is an operator
+   * setting, and a value that appears after this module was first imported must
+   * still be honoured (and a value that is absent must be reported as absent).
+   */
+  private get clientId(): string {
+    return process.env.ETSY_CLIENT_ID || '';
+  }
+
+  /** True when the owner's free Etsy keystring is present. */
+  get isConfigured(): boolean {
+    return this.clientId.trim().length > 0;
+  }
 
   /**
    * Generates the official Etsy OAuth 2.0 URL
@@ -98,6 +111,22 @@ export class EtsyService {
       },
     });
     return response.data;
+  }
+
+  /**
+   * Real active listings for a keyword, with the real result count.
+   * Etsy v3 answers `{ count, results: [...] }`; both halves are returned as-is
+   * so callers can report a real number instead of guessing at one.
+   */
+  async findAllActiveListingsByKeywords(
+    keywords: string,
+    limit: number = 12,
+  ): Promise<{ count: number; results: any[] }> {
+    const data = await this.searchListings(keywords, limit);
+    return {
+      count: typeof data?.count === 'number' ? data.count : 0,
+      results: Array.isArray(data?.results) ? data.results : [],
+    };
   }
 
   /**

@@ -569,23 +569,15 @@ export const getIntelTrends = async (req: Request, res: Response) => {
     };
 
     const result = await intelService.researchTrends(params);
+    const { data } = result;
 
-    if (result.data) {
-      res.json({
-        status: 'success',
-        ...result.data,
-      });
-    } else {
-      res.json({
-        status: 'unavailable',
-        message: result.fallbackMessage || 'Unable to research trends at this time.',
-        trendingThemes: [],
-        seasonalOpportunities: [],
-        hotSellingItems: [],
-        lowCompetitionItems: [],
-        contentIdeas: [],
-      });
-    }
+    // Real sources only: an unavailable source leaves its own boxes empty and says
+    // why in `sources`, so the UI can explain it in one line instead of inventing.
+    res.json({
+      status: data.sources.google === 'ok' || data.sources.etsy === 'ok' ? 'success' : 'unavailable',
+      message: result.fallbackMessage,
+      ...data,
+    });
   } catch (error: any) {
     console.error('Error fetching intel trends:', error);
     res.status(500).json({ error: error.message });
