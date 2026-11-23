@@ -33,6 +33,7 @@ import { randomUUID } from 'crypto';
 import { aiRouter } from '../aiRouter.js';
 import { renderingEngine } from '../renderingEngine.js';
 import { veoVideoService } from '../veoVideoService.js';
+import { usageService, WEEKLY_FACELESS_LIMIT } from '../usageService.js';
 import { sceneVideoPipelineService, CostPreflightFailedError } from '../sceneVideoPipelineService.js';
 import {
   runCostPreflight,
@@ -68,16 +69,43 @@ function spyOn(target: any, method: string, key: keyof typeof calls, result: any
   restore.push(() => { target[method] = original; });
 }
 
+// ─── the fixture's fresh allowance ──────────────────────────────────────────
+// `createProject` reads the REAL counter (`usageService.getDailyRemaining`) and
+// that counter answers 0 in two different worlds: the fixture user has spent
+// their week, and the database could not be reached ("Safe default on error").
+// The quota check runs BEFORE the photo check, so either one turns the photo
+// fixture into a `quota` refusal — a check nobody asked about masking the check
+// under test. So every fixture SEEDS A FRESH ALLOWANCE, the way a new client's
+// week starts, and the allowance is re-seeded for each test: no fixture can
+// inherit the previous one's spend or the machine's database state. The quota
+// refusal itself is still proven, with injected deps, further down.
+const FRESH_ALLOWANCE = WEEKLY_FACELESS_LIMIT;
+let quotaReads = 0;
+let quotaAllowance: number | 'unlimited' = FRESH_ALLOWANCE;
+
+/** A fresh week for the fixture user: full allowance, and the counter's reads are counted. */
+function seedFreshAllowance() {
+  quotaAllowance = FRESH_ALLOWANCE;
+  quotaReads = 0;
+}
+
 function resetCounts() {
   calls.planner = 0; calls.image = 0; calls.audio = 0; calls.veo = 0;
   __resetPaidFailures();
   __resetPaidCallAttempts();
+  seedFreshAllowance();
 }
 
 before(() => {
   spyOn(aiRouter, 'route', 'planner', { classification: 'ai_assistant', prompt: 'not a plan' });
   spyOn(renderingEngine, 'renderImage', 'image', { success: false, error: 'the image provider must not be called' });
   spyOn(veoVideoService, 'generateSceneVideo', 'veo', { success: false, error: 'the Veo provider must not be called' });
+  const originalQuota = usageService.getDailyRemaining;
+  const quotaSpy = async () => { quotaReads += 1; return quotaAllowance; };
+  (usageService as any).getDailyRemaining = quotaSpy;
+  restore.push(() => { delete (usageService as any).getDailyRemaining; });
+  assert.equal(typeof originalQuota, 'function', 'the counter this fixture seeds must exist on the real service');
+  seedFreshAllowance();
 });
 
 after(() => { for (const undo of restore) undo(); });
@@ -149,6 +177,10 @@ test('createProject: a photo that does not resolve fails at $0 — before the pl
     .then(() => null, (e) => e);
   assert.equal(err?.check, 'photo', `got ${err?.check}: ${err?.message}`);
   assert.match(err.message, /photo you uploaded does not resolve/);
+  // The allowance was FRESH and it was read and passed — so the refusal above is
+  // the photo check's, never a quota refusal standing in front of it.
+  assert.equal(quotaReads, 1, 'the pre-flight must read the fresh allowance exactly once');
+  assert.equal(quotaAllowance, FRESH_ALLOWANCE, 'the fixture must start with a full allowance');
   allZero('dead photo');
 });
 
