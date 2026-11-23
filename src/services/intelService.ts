@@ -271,28 +271,76 @@ export function suggestionIsAboutNiche(suggestion: string, niche: string): boole
  * niche lives on the `detail` line instead, and every template below reads naturally
  * at any niche length.
  */
-type HookTemplate = (phrase: string) => string;
+type HookPhraseShape = 'question' | 'statement';
+
+/**
+ * Owner direction (23 Nov, third pass): a suggestion that starts with a question word
+ * is a QUESTION — "how to build an ai tool", "what are the best ai tools" — and a
+ * buying frame laid over it reads wrong: `Is "how to build an ai tool" worth it?` is
+ * not a sentence she would say. So the shape of the phrase picks the frame.
+ */
+const QUESTION_OPENERS =
+  /^(?:how|what|why|where|when|which|who|whose|should|can|could|do|does|did|is|are|will|would)\b/i;
+
+export function hookPhraseShape(phrase: string): HookPhraseShape {
+  return QUESTION_OPENERS.test((phrase || '').trim()) ? 'question' : 'statement';
+}
+
+interface HookTemplate {
+  /** Stable identity, so one answer never repeats a frame while a fresh one fits. */
+  id: string;
+  /** The phrase shapes this frame may wrap. A buying frame never wraps a question. */
+  shapes: HookPhraseShape[];
+  build: (phrase: string) => string;
+}
+
+const ANY_SHAPE: HookPhraseShape[] = ['question', 'statement'];
+/** "before you buy X" and "is X worth it?" only make sense over a product, not a question. */
+const STATEMENT_ONLY: HookPhraseShape[] = ['statement'];
 
 const HOOK_TEMPLATES: HookTemplate[] = [
   // 1. Question — what her buyers are really typing, and why.
-  (p) => `Why people keep searching "${p}"`,
-  // 2. Numbered list — what to check before buying.
-  (p) => `3 things to check before you buy "${p}"`,
+  { id: 'why-searching', shapes: ANY_SHAPE, build: (p) => `Why people keep searching "${p}"` },
+  // 2. Numbered list — what to check before buying (a product, never a question).
+  { id: 'buy-checklist', shapes: STATEMENT_ONLY, build: (p) => `3 things to check before you buy "${p}"` },
   // 3. Mistake — the pattern worth talking about.
-  (p) => `The mistake most people make with "${p}"`,
+  { id: 'mistake', shapes: ANY_SHAPE, build: (p) => `The mistake most people make with "${p}"` },
   // 4. Myth — the belief worth correcting.
-  (p) => `The truth about "${p}"`,
+  { id: 'truth', shapes: ANY_SHAPE, build: (p) => `The truth about "${p}"` },
   // 5. "Nobody tells you" — the insider angle.
-  (p) => `What nobody tells you about "${p}"`,
-  // 6. Worth it? — the buying decision she sells around.
-  (p) => `Is "${p}" worth it?`,
+  { id: 'nobody-tells', shapes: ANY_SHAPE, build: (p) => `What nobody tells you about "${p}"` },
+  // 6. Worth it? — the buying decision she sells around (a product, never a question).
+  { id: 'worth-it', shapes: STATEMENT_ONLY, build: (p) => `Is "${p}" worth it?` },
+  // 7. Unexplained part — the question-friendly insider angle.
+  { id: 'nobody-explains', shapes: ANY_SHAPE, build: (p) => `The part of "${p}" nobody explains` },
 ];
 
-/** The niche is accepted for call-site compatibility but never enters the text. */
-export function buildContentHook(phrase: string, index: number, _niche?: string): string {
-  const template = HOOK_TEMPLATES[index % HOOK_TEMPLATES.length];
+/** The frames that may wrap a phrase of this shape, in cycle order (never below five). */
+export function hookTemplatesForShape(shape: HookPhraseShape): HookTemplate[] {
+  return HOOK_TEMPLATES.filter((t) => t.shapes.includes(shape));
+}
+
+/**
+ * The niche is accepted for call-site compatibility but never enters the text.
+ * `used` carries the frames already spent on this answer so no pattern repeats while
+ * an unused one still fits the phrase's shape.
+ */
+export function buildContentHook(phrase: string, index: number, _niche?: string, used?: Set<string>): string {
   const p = (phrase || '').replace(/\s+/g, ' ').trim();
-  return template(p).replace(/\s+/g, ' ').trim();
+  const templates = hookTemplatesForShape(hookPhraseShape(p));
+  const start = ((index % templates.length) + templates.length) % templates.length;
+  let chosen = templates[start];
+  if (used) {
+    for (let step = 0; step < templates.length; step++) {
+      const candidate = templates[(start + step) % templates.length];
+      if (!used.has(candidate.id)) {
+        chosen = candidate;
+        break;
+      }
+    }
+    used.add(chosen.id);
+  }
+  return chosen.build(p).replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -323,10 +371,12 @@ export function buildContentIdeas(suggestions: string[], params: IntelTrendsPara
 
   const target = Math.min(MAX_CONTENT_IDEAS, Math.max(MIN_CONTENT_IDEAS, phrases.length));
   const ideas: IntelItem[] = [];
+  // Frames already spent on this answer: five ideas, five different patterns.
+  const usedFrames = new Set<string>();
   for (let i = 0; i < target; i++) {
     const phrase = phrases[i % phrases.length];
     ideas.push({
-      text: buildContentHook(phrase, i),
+      text: buildContentHook(phrase, i, undefined, usedFrames),
       // Her niche moved here, where it reads naturally however long it is.
       detail: niche
         ? `From the real search suggestion "${phrase}" for ${niche}`
