@@ -396,11 +396,67 @@ test('helpers: seeds, hook phrasing and autocomplete parsing', () => {
   ]);
   assert.deepEqual(buildSeedQueries({}, NOW), []);
 
+  // Every hook names her niche and speaks to her audience (owner, 23 Nov).
   assert.equal(
-    buildContentHook('personalised gift for sister', 1),
-    '3 things to look for in "personalised gift for sister"',
+    buildContentHook('personalised gift for sister', 1, 'personalised gifts', 'gift shoppers'),
+    '3 things gift shoppers should check before buying "personalised gift for sister" in the personalised gifts niche',
   );
 
   assert.deepEqual(parseGoogleSuggestions(['q', ['a b', '  c d  ', 5], [], {}]), ['a b', 'c d']);
   assert.deepEqual(parseGoogleSuggestions({ error: 'nope' }), []);
+});
+
+test('two real suggestions still give at least five distinct niche hooks', async () => {
+  clearIntelCaches();
+  // Google answered with only two suggestions for this niche.
+  const http = suggestionsStub({
+    'digital planner': ['digital planner goodnotes', 'digital planner ipad'],
+  });
+  const service = new IntelService({ httpGetJson: http, etsy: fakeEtsy({ configured: false }), now: () => NOW });
+  const { data } = await service.researchTrends({
+    niche: 'digital planner',
+    targetCustomers: 'busy mums who plan on an iPad',
+  });
+
+  assert.ok(data.contentIdeas.length >= 5, `expected >= 5 ideas, got ${data.contentIdeas.length}`);
+  // Every hook is about HER business: it names her niche and speaks to her audience.
+  for (const idea of data.contentIdeas) {
+    assert.ok(idea.text.includes('digital planner'), `missing niche: ${idea.text}`);
+    assert.ok(idea.text.includes('busy mums who plan on an iPad'), `missing audience: ${idea.text}`);
+  }
+  // Distinct hooks, not five rewordings: the pattern cycle differs line by line.
+  assert.equal(new Set(data.contentIdeas.map((i) => i.text)).size, data.contentIdeas.length);
+  // Each still names the real suggestion it was framed from — nothing invented.
+  assert.ok(data.contentIdeas.every((i) => i.detail?.startsWith('From the real search suggestion')));
+});
+
+test('fresh=1 bypasses both 45-minute caches, and the Etsy call still goes through the client', async () => {
+  clearIntelCaches();
+  let googleCalls = 0;
+  const http: IntelHttpGetJson = async (url: string) => {
+    googleCalls += 1;
+    const q = decodeURIComponent(new URL(url).searchParams.get('q') || '');
+    return [q, q === 'digital planner' ? ['digital planner ipad'] : [], [], {}];
+  };
+  const etsy = fakeEtsy({
+    listings: [{ listing_id: 1, title: 'Digital Planner', price: { amount: 500, divisor: 100, currency_code: 'USD' } }],
+    counts: { 'digital planner ipad': 12 },
+  });
+  const service = new IntelService({ httpGetJson: http, etsy, now: () => NOW });
+
+  await service.researchTrends({ niche: 'digital planner' });
+  const afterCold = googleCalls;
+  const etsyAfterCold = etsy.calls;
+  assert.ok(afterCold > 0);
+  assert.ok(etsyAfterCold > 0);
+
+  // Cached: a second plain request makes no new calls at all.
+  await service.researchTrends({ niche: 'digital planner' });
+  assert.equal(googleCalls, afterCold);
+  assert.equal(etsy.calls, etsyAfterCold);
+
+  // fresh=1: both caches are skipped, so Google and Etsy are called again.
+  await service.researchTrends({ niche: 'digital planner', fresh: true });
+  assert.ok(googleCalls > afterCold, 'fresh=1 must re-ask Google');
+  assert.ok(etsy.calls > etsyAfterCold, 'fresh=1 must re-ask Etsy');
 });

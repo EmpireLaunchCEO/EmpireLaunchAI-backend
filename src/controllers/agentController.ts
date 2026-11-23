@@ -555,17 +555,23 @@ export const getStrategyTasks = async (req: Request, res: Response) => {
 
 export const getIntelTrends = async (req: Request, res: Response) => {
   try {
-    const { niche, angle, targetCustomers, businessGoals } = req.query;
+    const { niche, angle, targetCustomers, businessGoals, fresh } = req.query;
 
     if (!niche || typeof niche !== 'string') {
       return res.status(400).json({ error: 'niche query parameter is required' });
     }
+
+    // `fresh=1` makes the app refresh Intel each time it opens instead of serving a
+    // 45-minute-old answer. It only skips the service's in-memory caches; every Etsy
+    // call still goes through the shared 5 QPS / 5,000 QPD limiter.
+    const freshFlag = fresh === '1' || fresh === 'true';
 
     const params = {
       niche: niche as string,
       angle: typeof angle === 'string' ? angle : undefined,
       targetCustomers: typeof targetCustomers === 'string' ? targetCustomers : undefined,
       businessGoals: typeof businessGoals === 'string' ? businessGoals : undefined,
+      fresh: freshFlag,
     };
 
     const result = await intelService.researchTrends(params);

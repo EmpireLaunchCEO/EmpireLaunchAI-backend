@@ -50,6 +50,13 @@ export interface IntelTrendsParams {
   angle?: string;
   targetCustomers?: string;
   businessGoals?: string;
+  /**
+   * Owner direction (23 Nov): Intel refreshes each time she opens the app.
+   * `fresh` skips BOTH 45-minute source caches for this one request (the
+   * `fresh=1` query flag on /api/agent/intel/trends). It never skips the Etsy
+   * limiter — that lives in etsyService, below this cache.
+   */
+  fresh?: boolean;
 }
 
 export interface IntelTrendsResponse {
@@ -77,6 +84,8 @@ const GOOGLE_TIMEOUT_MS = 8_000;
 const CACHE_TTL_MS = 45 * 60 * 1000;
 const MAX_TRENDING_THEMES = 7;
 const MAX_CONTENT_IDEAS = 6;
+/** Owner: at least five usable hooks every time, however few suggestions came back. */
+export const MIN_CONTENT_IDEAS = 5;
 const MAX_HOT_ITEMS = 6;
 const MAX_LOW_COMPETITION = 5;
 const MAX_SEASONAL = 3;
@@ -197,20 +206,81 @@ export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
 }
 
 // ─── Content hooks (phrased from a real suggestion, never invented) ─────────
-type HookTemplate = (phrase: string) => string;
+/**
+ * Owner direction (23 Nov): Content Ideas must always give her at least five usable
+ * hooks, every one about HER business — naming her niche and speaking to her
+ * audience — never a generic marketing line. The hook is only ever a frame around a
+ * phrase Google actually returned, so no claim is invented: a question asks, a
+ * "mistake"/"myth"/"nobody tells you" line names a pattern to talk about without
+ * asserting a fact, and the numbered list promises what to check, not what is true.
+ */
+type HookTemplate = (phrase: string, niche: string, audience: string) => string;
 
 const HOOK_TEMPLATES: HookTemplate[] = [
-  (p) => `What buyers actually mean when they search "${p}"`,
-  (p) => `3 things to look for in "${p}"`,
-  (p) => `The "${p}" mistake that makes it look homemade`,
-  (p) => `Before you buy "${p}", watch this`,
-  (p) => `"${p}" — the version that sells and the one that sits`,
-  (p) => `"${p}": what I'd tell a friend who asked`,
+  // 1. Question — what the search actually means for her buyers.
+  (p, n, a) => `What "${p}" really means for ${a} buying ${n}`,
+  // 2. Numbered list — what to check before buying.
+  (p, n, a) => `3 things ${a} should check before buying "${p}" in the ${n} niche`,
+  // 3. Mistake — the pattern worth talking about.
+  (p, n, a) => `The ${n} mistake ${a} keep making with "${p}"`,
+  // 4. Myth — the belief worth correcting.
+  (p, n, a) => `The "${p}" myth ${a} are told about ${n}`,
+  // 5. "Nobody tells you" — the insider angle.
+  (p, n, a) => `Nobody tells ${a} this about "${p}" in ${n}`,
+  // 6. Before / after — the transformation she sells.
+  (p, n, a) => `Before "${p}" and after: what changes for ${a} in ${n}`,
 ];
 
-export function buildContentHook(phrase: string, index: number): string {
+/** Her audience in her own words; if she did not give one, her buyers in her niche. */
+export function resolveAudiencePhrase(params: IntelTrendsParams): string {
+  const audience = (params.targetCustomers || '').trim();
+  if (audience) return audience;
+  const niche = (params.niche || '').trim();
+  return niche ? `your ${niche} buyers` : 'your buyers';
+}
+
+export function buildContentHook(phrase: string, index: number, niche: string, audience?: string): string {
   const template = HOOK_TEMPLATES[index % HOOK_TEMPLATES.length];
-  return template(phrase);
+  const n = (niche || '').trim();
+  const a = (audience || '').trim() || resolveAudiencePhrase({ niche: n });
+  return template(phrase, n, a);
+}
+
+/**
+ * At least MIN_CONTENT_IDEAS hooks, up to MAX_CONTENT_IDEAS.
+ *
+ * The distinct hook patterns are cycled over the real suggestions, so two
+ * suggestions still yield five different hooks (question, list, mistake, myth,
+ * "nobody tells you") — never five rewordings of the same line, and never a hook
+ * that fails to name her niche.
+ */
+export function buildContentIdeas(suggestions: string[], params: IntelTrendsParams): IntelItem[] {
+  const niche = (params.niche || '').trim();
+  const audience = resolveAudiencePhrase(params);
+
+  const seen = new Set<string>();
+  const phrases: string[] = [];
+  for (const raw of suggestions) {
+    const phrase = (raw || '').replace(/\s+/g, ' ').trim();
+    if (!phrase) continue;
+    const key = phrase.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    phrases.push(phrase);
+  }
+  if (phrases.length === 0) return [];
+
+  const target = Math.min(MAX_CONTENT_IDEAS, Math.max(MIN_CONTENT_IDEAS, phrases.length));
+  const ideas: IntelItem[] = [];
+  for (let i = 0; i < target; i++) {
+    const phrase = phrases[i % phrases.length];
+    ideas.push({
+      text: buildContentHook(phrase, i, niche, audience),
+      detail: `From the real search suggestion "${phrase}"`,
+      source: 'google' as const,
+    });
+  }
+  return ideas;
 }
 
 // ─── Formatting helpers ────────────────────────────────────────────────────
@@ -259,10 +329,12 @@ export class IntelService {
   }
 
   /** One autocomplete call, cached per seed query. Throws when Google is unreachable. */
-  private async suggestionsFor(seed: string): Promise<string[]> {
+  private async suggestionsFor(seed: string, fresh = false): Promise<string[]> {
     const key = seed.toLowerCase();
     const cached = suggestionsCache.get(key);
-    if (cached && cached.expires > Date.now()) return cached.value;
+    // `fresh` (the fresh=1 flag) reads past the 45-minute cache for this request;
+    // the value it fetches still refreshes the cache for the next caller.
+    if (!fresh && cached && cached.expires > Date.now()) return cached.value;
 
     const url = `${GOOGLE_SUGGEST_URL}?client=firefox&q=${encodeURIComponent(seed)}`;
     const payload = await this.httpGetJson(url, {
@@ -284,7 +356,7 @@ export class IntelService {
     const results = await Promise.all(
       seeds.map(async (seed) => {
         try {
-          return { seed, suggestions: await this.suggestionsFor(seed) };
+          return { seed, suggestions: await this.suggestionsFor(seed, params.fresh === true) };
         } catch (err: any) {
           console.warn(`[IntelService] Google suggestions failed for "${seed}": ${err?.message ?? err}`);
           return { seed, suggestions: [] as string[], failed: true };
@@ -307,10 +379,16 @@ export class IntelService {
     return { hits, ok: anyOk };
   }
 
-  private async etsySearch(keywords: string, limit: number): Promise<{ count: number; results: any[] }> {
+  private async etsySearch(
+    keywords: string,
+    limit: number,
+    fresh = false,
+  ): Promise<{ count: number; results: any[] }> {
     const key = `${keywords.toLowerCase()}|${limit}`;
     const cached = etsySearchCache.get(key);
-    if (cached && cached.expires > Date.now()) return cached.value;
+    // Only the in-memory cache is skipped. The call still goes through
+    // etsyService, which owns the single 5 QPS / 5,000 QPD limiter.
+    if (!fresh && cached && cached.expires > Date.now()) return cached.value;
 
     const value = await this.etsy.searchActiveListings(keywords, limit);
     etsySearchCache.set(key, { value, expires: Date.now() + CACHE_TTL_MS });
@@ -321,9 +399,9 @@ export class IntelService {
    * Real Etsy listings for the niche: title, real price, real shop name, real URL.
    * Returns null when Etsy is configured but the call failed.
    */
-  private async fetchHotSellingItems(niche: string): Promise<IntelItem[] | null> {
+  private async fetchHotSellingItems(niche: string, fresh = false): Promise<IntelItem[] | null> {
     try {
-      const { results } = await this.etsySearch(niche, 12);
+      const { results } = await this.etsySearch(niche, 12, fresh);
       const items: IntelItem[] = [];
       for (const listing of results.slice(0, MAX_HOT_ITEMS)) {
         const title = typeof listing?.title === 'string' ? listing.title.replace(/\s+/g, ' ').trim() : '';
@@ -349,14 +427,14 @@ export class IntelService {
    * Keywords from the real suggestions whose Etsy active-listing count is low:
    * demand with less competition, and the real count is reported, never a guess.
    */
-  private async fetchLowCompetitionItems(keywords: string[]): Promise<IntelItem[] | null> {
+  private async fetchLowCompetitionItems(keywords: string[], fresh = false): Promise<IntelItem[] | null> {
     const candidates = keywords.slice(0, 5);
     if (candidates.length === 0) return [];
 
     const counted = await Promise.all(
       candidates.map(async (keyword) => {
         try {
-          const { count } = await this.etsySearch(keyword, 1);
+          const { count } = await this.etsySearch(keyword, 1, fresh);
           return { keyword, count };
         } catch (err: any) {
           console.warn(`[IntelService] Etsy count failed for "${keyword}": ${err?.message ?? err}`);
@@ -414,12 +492,10 @@ export class IntelService {
       source: 'google' as const,
     }));
 
-    // contentIdeas — hook-shaped lines phrased from those same suggestions.
-    const contentIdeas: IntelItem[] = hits.slice(0, MAX_CONTENT_IDEAS).map((hit, i) => ({
-      text: buildContentHook(hit.suggestion, i),
-      detail: `From the real search suggestion "${hit.suggestion}"`,
-      source: 'google' as const,
-    }));
+    // contentIdeas — hook-shaped lines phrased from those same suggestions, with the
+    // hook patterns cycled so two suggestions still give at least five hooks, each
+    // naming her niche and speaking to her audience.
+    const contentIdeas: IntelItem[] = buildContentIdeas(hits.map((h) => h.suggestion), params);
 
     // seasonalOpportunities — the calendar crossed with the niche's real searches.
     const seasonalOpportunities: IntelItem[] = buildSeasonalWindows(now).map((window, i) => {
@@ -447,8 +523,8 @@ export class IntelService {
       etsyReason = `Etsy's ${ETSY_DAILY_LIMIT.toLocaleString('en-US')} requests-a-day limit is used up, so the Etsy boxes are empty until tomorrow (UTC).`;
     } else {
       const [hot, low] = await Promise.all([
-        this.fetchHotSellingItems(niche),
-        this.fetchLowCompetitionItems(hits.map((h) => h.suggestion)),
+        this.fetchHotSellingItems(niche, params.fresh === true),
+        this.fetchLowCompetitionItems(hits.map((h) => h.suggestion), params.fresh === true),
       ]);
       hotSellingItems = hot ?? [];
       lowCompetitionItems = low ?? [];
