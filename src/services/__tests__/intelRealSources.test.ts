@@ -21,9 +21,12 @@ import {
   IntelEtsyClient,
   IntelHttpGetJson,
   INTEL_ANSWER_TTL_MS,
+  MIN_CONTENT_IDEAS,
+  IntelTrendsParams,
   clearIntelCaches,
   buildSeedQueries,
   buildContentHook,
+  buildContentIdeas,
   parseGoogleSuggestions,
   suggestionIsAboutNiche,
 } from '../intelService.js';
@@ -505,7 +508,11 @@ test('her real niche: no niche in the hook text, and off-niche suggestions are d
   // The live answer that exposed both defects, for niche "AI Powered Business Tool".
   const http = suggestionsStub({
     'AI Powered Business Tool': ['ai powered business analytics tools', 'most profitable ai companies'],
-    'best AI Powered Business Tool': ['best ai powered business intelligence tools', 'what are the best ai tools'],
+    'best AI Powered Business Tool': [
+      'best ai powered business intelligence tools',
+      'what are the best ai tools',
+      'who has the best battery operated tools',
+    ],
     'AI Powered Business Tool ideas': ['ai powered business tools for small business'],
   });
   const service = new IntelService({ httpGetJson: http, etsy: fakeEtsy({ configured: false }), now: () => NOW });
@@ -530,15 +537,23 @@ test('her real niche: no niche in the hook text, and off-niche suggestions are d
     assert.ok(idea.detail?.endsWith('for AI Powered Business Tool'), `niche missing from detail: ${idea.detail}`);
   }
   const texts = data.contentIdeas.map((i) => i.text);
+  // One shared word ("tool"/"tools") is not enough: these two are off her market.
+  assert.ok(
+    !texts.some((t) => /what are the best ai tools|battery operated tools/i.test(t)),
+    `single-token match leaked: ${texts.join(' | ')}`,
+  );
   // The two live defects, gone: no niche phrase inside the hook, off-niche dropped.
   for (const expected of [
     'Why people keep searching "ai powered business analytics tools"',
     '3 things to check before you buy "best ai powered business intelligence tools"',
-    'The truth about "what are the best ai tools"',
-    'What nobody tells you about "ai powered business tools for small business"',
-    'Is "ai powered business analytics tools" worth it?',
   ]) {
     assert.ok(texts.includes(expected), `missing: ${expected} in ${texts.join(' | ')}`);
+  }
+  // Every hook quotes a suggestion that survived the filter — nothing else.
+  const KEPT = ['ai powered business analytics tools', 'best ai powered business intelligence tools', 'ai powered business tools for small business'];
+  for (const idea of data.contentIdeas) {
+    const phrase = idea.detail!.replace('From the real search suggestion "', '').replace(/" for .*$/, '');
+    assert.ok(KEPT.includes(phrase), `hook quotes a dropped suggestion: ${phrase}`);
   }
   // Five hooks, not five rewordings of one line.
   assert.equal(new Set(texts).size, texts.length);
@@ -549,9 +564,9 @@ test('a question-shaped suggestion never takes a buying frame', async () => {
   // The live sentence that read wrong: `Is "how to build an ai tool" worth it?`
   const http = suggestionsStub({
     'AI Powered Business Tool': [
-      'how to build an ai tool',
-      'what are the best ai tools',
-      'why ai tools fail',
+      'what is ai powered business intelligence',
+      'why ai powered business tools fail',
+      'how much does an ai powered business tool cost',
       'ai powered business tool pricing',
     ],
   });
@@ -590,17 +605,51 @@ test('a question-shaped suggestion never takes a buying frame', async () => {
   }
 });
 
-test('the niche relevance test: one significant shared word keeps a suggestion', () => {
+test('the niche relevance test: one significant shared word is NOT enough', () => {
   // Her live niche: "ai" alone is not significant, so this is not her market.
   assert.equal(suggestionIsAboutNiche('most profitable ai companies', 'AI Powered Business Tool'), false);
   assert.equal(suggestionIsAboutNiche('best ai powered business intelligence tools', 'AI Powered Business Tool'), true);
-  // Singular and plural are the same word to a buyer.
-  assert.equal(suggestionIsAboutNiche('what are the best ai tools', 'AI Powered Business Tool'), true);
+  // One shared word ("tool"/"tools") is not enough — both were live and off-market.
+  assert.equal(suggestionIsAboutNiche('what are the best ai tools', 'AI Powered Business Tool'), false);
+  assert.equal(suggestionIsAboutNiche('who has the best battery operated tools', 'AI Powered Business Tool'), false);
+  assert.equal(suggestionIsAboutNiche('how to build ai tools', 'AI Powered Business Tool'), false);
+  // Two shared tokens, or a contiguous two-word phrase of the niche, is.
+  assert.equal(suggestionIsAboutNiche('ai powered business tools', 'AI Powered Business Tool'), true);
+  assert.equal(suggestionIsAboutNiche('ai powered tools for business', 'AI Powered Business Tool'), true);
   assert.equal(suggestionIsAboutNiche('digital planner goodnotes', 'digital planner'), true);
+  // A short niche keeps its real suggestions: contiguous phrase, or both its tokens.
+  assert.equal(suggestionIsAboutNiche('digital planner app', 'digital planner'), true);
+  assert.equal(suggestionIsAboutNiche('digital planner ideas', 'digital planner'), true);
+  assert.equal(suggestionIsAboutNiche('best digital planner', 'digital planner'), true);
   assert.equal(suggestionIsAboutNiche('wedding seating chart', 'digital planner'), false);
+  // A one-word niche can only ever share one token, so one is enough there.
+  assert.equal(suggestionIsAboutNiche('digital planner app', 'planner'), true);
   // Nothing to judge against → nothing is filtered.
   assert.equal(suggestionIsAboutNiche('anything at all', ''), true);
   assert.equal(suggestionIsAboutNiche('anything at all', 'AI'), true);
+});
+
+test('a stricter niche test still leaves her at least five real hooks', () => {
+  // Every one of these was live for her niche; only the three on-market ones survive.
+  const live = [
+    'ai powered business tools',
+    'ai powered business intelligence tools',
+    'ai powered business analytics tools',
+    'best ai powered business intelligence tools',
+    'what are the best ai tools',
+    'who has the best battery operated tools',
+    'how to build ai tools',
+  ];
+  const ideas = buildContentIdeas(live, { niche: 'AI Powered Business Tool' } as IntelTrendsParams);
+  assert.ok(ideas.length >= MIN_CONTENT_IDEAS, `expected at least ${MIN_CONTENT_IDEAS} hooks, got ${ideas.length}`);
+  for (const idea of ideas) {
+    assert.equal(/what are the best ai tools|battery operated tools|how to build ai tools/i.test(idea.text), false, idea.text);
+  }
+  const shortNiche = buildContentIdeas(
+    ['digital planner app', 'digital planner ideas', 'best digital planner'],
+    { niche: 'digital planner' } as IntelTrendsParams,
+  );
+  assert.ok(shortNiche.length >= MIN_CONTENT_IDEAS);
 });
 
 test('the finished answer is cached for exactly one hour, and its age is judged on open', async () => {
