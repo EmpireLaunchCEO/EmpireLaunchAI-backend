@@ -9,6 +9,7 @@ import {
   FACELESS_MOODS,
   FACELESS_DURATIONS,
   DEFAULT_FACELESS_DURATION,
+  parseVoiceChoice,
 } from '../services/voiceOptions.js';
 import { db, schema } from '../db/index.js';
 import { eq, sql, and, inArray } from 'drizzle-orm';
@@ -167,6 +168,13 @@ export const createApproval = async (req: Request, res: Response) => {
       }
       enrichedPayload.mood = mood;
       enrichedPayload.duration = duration;
+      // THE PICKED VOICE (owner, 23 Nov): the voice she chose in the picker, which
+      // must be the voice in the finished video. Absent / 'auto' = today's
+      // gender+tone behaviour (unchanged). An id we cannot speak is a 400 with the
+      // real list — never a silent swap for another voice.
+      const voiceChoice = parseVoiceChoice(req.body.voiceId !== undefined ? req.body.voiceId : (payload as any)?.voiceId);
+      if (!voiceChoice.ok) return res.status(400).json({ error: voiceChoice.error });
+      enrichedPayload.voiceId = voiceChoice.voice;
       // RENDER #5 PREP (owner script): optional VERBATIM narration-script override —
       // an array of lines (or a newline/`|`-delimited string). Her exact voiceover
       // copy is spoken verbatim (never rephrased by the transformation layer); F4's
@@ -274,6 +282,7 @@ export const createApproval = async (req: Request, res: Response) => {
           platforms: [],
           voice: enrichedPayload.voice,
           tone: enrichedPayload.tone,
+          voiceId: voiceChoice.voice,
           sourceImages: enrichedPayload.sourceImages,
           // Faceless renders scenes as gpt-image-2 stills animated with FFmpeg Ken Burns
           // (zoompan) — never Sora motion — per the owner-approved cost model.

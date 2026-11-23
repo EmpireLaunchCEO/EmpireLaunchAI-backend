@@ -4,6 +4,7 @@
  * a polling worker that checks for pending video creations.
  */
 
+import type { GptAudioVoice } from './voiceOptions.js';
 import { db, schema } from '../db/index.js';
 import { eq, and, lt } from 'drizzle-orm';
 import { mediaToolTimeoutMs, mediaToolFailure } from './mediaToolDeadline.js';
@@ -219,9 +220,12 @@ export function startVideoQueueWorker(): void {
         voice?: 'female' | 'male' | 'none';
         gender?: 'female' | 'male' | 'none';
         tone?: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto';
+        /** THE PICKED VOICE (owner, 23 Nov) — `voice` in this legacy shape is the
+         *  GENDER, so the voice id travels as `voiceId`. Absent = gender+tone. */
+        voiceId?: GptAudioVoice;
       } | undefined;
-      const voiceover = voiceoverRaw && (voiceoverRaw.voice || voiceoverRaw.gender || voiceoverRaw.tone)
-        ? { gender: (voiceoverRaw.voice || voiceoverRaw.gender) as 'female' | 'male' | 'none' | undefined, tone: voiceoverRaw.tone }
+      const voiceover = voiceoverRaw && (voiceoverRaw.voice || voiceoverRaw.gender || voiceoverRaw.tone || voiceoverRaw.voiceId)
+        ? { gender: (voiceoverRaw.voice || voiceoverRaw.gender) as 'female' | 'male' | 'none' | undefined, tone: voiceoverRaw.tone, voiceId: voiceoverRaw.voiceId }
         : undefined;
       const userId = job.userId;
 
@@ -297,7 +301,7 @@ export function startVideoQueueWorker(): void {
               const vr = await fetch('https://api.openai.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: 'gpt-audio', modalities: ['text','audio'], audio: { voice: resolveVoice(voiceover.gender, voiceover.tone), format: 'mp3' }, messages: [{ role: 'user', content: prompt }] }),
+                body: JSON.stringify({ model: 'gpt-audio', modalities: ['text','audio'], audio: { voice: resolveVoice(voiceover.gender, voiceover.tone, voiceover.voiceId), format: 'mp3' }, messages: [{ role: 'user', content: prompt }] }),
                 signal: AbortSignal.timeout(90000),
               });
               if (vr.ok) {

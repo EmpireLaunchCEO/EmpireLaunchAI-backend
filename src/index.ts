@@ -48,6 +48,7 @@ import etsyRoutes from './routes/etsyRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import billingRoutes from './routes/billingRoutes.js';
 import versionRoutes from './routes/versionRoutes.js';
+import voiceRoutes from './routes/voiceRoutes.js';
 import { resolveCommitSha } from './services/versionInfo.js';
 
 import { startVideoQueueWorker } from './services/videoQueueService.js';
@@ -202,6 +203,10 @@ app.use('/api/admin', adminRoutes);
 // Real billing truth (GET /api/billing/me, POST /api/billing/cancel) — also
 // mounted before the catch-all '/api' router.
 app.use('/api/billing', billingRoutes);
+// THE VOICE PICKER (owner, 23 Nov): the per-gender voice catalogue + a cached
+// ~4s sample of each voice in the chosen tone. Mounted BEFORE the catch-all
+// '/api' router, or its paths would be swallowed by the subscription router.
+app.use('/api/voices', voiceRoutes);
 app.use('/api', subscriptionRoutes);
 
 app.get('/health', (req, res) => {

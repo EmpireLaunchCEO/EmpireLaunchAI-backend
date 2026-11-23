@@ -15,7 +15,7 @@ import { mobileAuth } from '../middleware/mobileAuth.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { isSceneUnavailableError, sceneRefusalBody } from '../services/sceneAccess.js';
-import { VIDEO_MOODS, isValidMood } from '../services/voiceOptions.js';
+import { VIDEO_MOODS, isValidMood, parseVoiceChoice } from '../services/voiceOptions.js';
 import { validateOverlayPayload } from '../services/assemblyOverlays.js';
 import { loadLockedFacts, saveLockedFacts } from '../services/memoryService.js';
 import { usageService } from '../services/usageService.js';
@@ -1158,6 +1158,11 @@ router.post('/video-project', async (req: Request, res: Response) => {
     // skips GPT-Audio narration → silent final MP4 (never silently dropped).
     const voice = (req.body.voice === 'female' || req.body.voice === 'male' || req.body.voice === 'none') ? req.body.voice : undefined;
     const tone = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'].includes(req.body.tone) ? req.body.tone : undefined;
+    // THE PICKED VOICE (owner, 23 Nov): the voice chosen in the picker reaches the
+    // narration call. Absent / 'auto' = today's gender+tone behaviour (unchanged);
+    // an id we cannot speak is a 400 with the real list, never a silent swap.
+    const voiceChoice = parseVoiceChoice(req.body.voiceId);
+    if (!voiceChoice.ok) return res.status(400).json({ status: 'error', error: voiceChoice.error });
     // Owner-locked mood (now applies to Scene-Based, shared with Faceless/Twin set).
     // Accept lowercase/trimmed; 'auto'/empty -> undefined (no mood hint). Reject invalid.
     let mood: string | undefined;
@@ -1213,6 +1218,7 @@ router.post('/video-project', async (req: Request, res: Response) => {
       durationTarget,
       script,
       voice,
+      voiceId: voiceChoice.voice,
       tone,
       mood,
       sourceImages,
