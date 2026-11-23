@@ -25,6 +25,7 @@ import {
   buildSeedQueries,
   buildContentHook,
   parseGoogleSuggestions,
+  suggestionIsAboutNiche,
 } from '../intelService.js';
 import { buildEtsyHeaders, isEtsyConfigured, resolveEtsyCredentials } from '../etsyCredentials.js';
 import {
@@ -411,16 +412,33 @@ test('helpers: seeds, hook phrasing and autocomplete parsing', () => {
     buildContentHook('personalised gift for sister', 1, 'personalised gifts'),
     '3 things to check before you buy "personalised gift for sister"',
   );
-  // The phrase already says the niche → the niche is not said a second time.
+  // The niche never enters the hook text, whatever it is (owner, 23 Nov, 2nd pass).
   assert.equal(
     buildContentHook('digital planner app', 2, 'digital planner'),
     'The mistake most people make with "digital planner app"',
   );
-  // The phrase does not name the niche → the niche is named, once.
   assert.equal(
     buildContentHook('goodnotes template', 2, 'digital planner'),
-    'The digital planner mistake to avoid with "goodnotes template"',
+    'The mistake most people make with "goodnotes template"',
   );
+  assert.equal(
+    buildContentHook('ai powered business analytics tools', 2, 'AI Powered Business Tool'),
+    'The mistake most people make with "ai powered business analytics tools"',
+  );
+  // Every template reads the same at any niche length, because none of them names it.
+  const SHAPES = [
+    /^Why people keep searching ".+"$/,
+    /^3 things to check before you buy ".+"$/,
+    /^The mistake most people make with ".+"$/,
+    /^The truth about ".+"$/,
+    /^What nobody tells you about ".+"$/,
+    /^Is ".+" worth it\?$/,
+  ];
+  for (let i = 0; i < 12; i++) {
+    const text = buildContentHook('ai powered business analytics tools', i, 'AI Powered Business Tool');
+    assert.ok(SHAPES.some((re) => re.test(text)), `unexpected hook shape: ${text}`);
+    assert.ok(!/ai powered business tool/i.test(text), `niche leaked into the hook: ${text}`);
+  }
 
   assert.deepEqual(parseGoogleSuggestions(['q', ['a b', '  c d  ', 5], [], {}]), ['a b', 'c d']);
   assert.deepEqual(parseGoogleSuggestions({ error: 'nope' }), []);
@@ -468,13 +486,74 @@ test('the hooks read like something she would say on camera', async () => {
   const { data } = await service.researchTrends({ niche: 'digital planner' });
 
   const texts = data.contentIdeas.map((i) => i.text);
-  assert.ok(texts.includes('Why digital planner buyers keep searching "digital planner app"'), texts.join(' | '));
+  assert.ok(texts.includes('Why people keep searching "digital planner app"'), texts.join(' | '));
   assert.ok(texts.includes('3 things to check before you buy "digital planner app"'), texts.join(' | '));
   for (const text of texts) {
     assert.ok(text.includes('"digital planner app"'), `search phrase not in quotes: ${text}`);
     assert.ok(text.length <= 70, `too long to speak (${text.length}): ${text}`);
-    assert.ok(countNicheMentions(proseOutsideQuote(text, 'digital planner app'), 'digital planner') <= 1);
+    assert.equal(
+      countNicheMentions(proseOutsideQuote(text, 'digital planner app'), 'digital planner'),
+      0,
+      `niche in the hook text: ${text}`,
+    );
   }
+});
+
+test('her real niche: no niche in the hook text, and off-niche suggestions are dropped', async () => {
+  clearIntelCaches();
+  // The live answer that exposed both defects, for niche "AI Powered Business Tool".
+  const http = suggestionsStub({
+    'AI Powered Business Tool': ['ai powered business analytics tools', 'most profitable ai companies'],
+    'best AI Powered Business Tool': ['best ai powered business intelligence tools', 'what are the best ai tools'],
+    'AI Powered Business Tool ideas': ['ai powered business tools for small business'],
+  });
+  const service = new IntelService({ httpGetJson: http, etsy: fakeEtsy({ configured: false }), now: () => NOW });
+  const { data } = await service.researchTrends({ niche: 'AI Powered Business Tool' });
+
+  // A suggestion that shares no significant word with the niche reaches no box.
+  const strings = allStrings(data);
+  assert.ok(
+    !strings.some((v) => v.toLowerCase().includes('most profitable ai companies')),
+    'off-niche suggestion leaked into the boxes',
+  );
+  assert.ok(data.trendingThemes.every((i) => !i.text.toLowerCase().includes('profitable')));
+
+  // At least five hooks, each quoting a real suggestion and never naming the niche.
+  assert.ok(data.contentIdeas.length >= 5, `expected >= 5 hooks, got ${data.contentIdeas.length}`);
+  for (const idea of data.contentIdeas) {
+    const prose = idea.text.replace(/"[^"]*"/g, '');
+    assert.equal(countNicheMentions(prose, 'AI Powered Business Tool'), 0, `niche in the hook: ${idea.text}`);
+    assert.ok(idea.text.includes('"'), `no quoted search phrase: ${idea.text}`);
+    assert.ok(idea.text.length <= 80, `too long to speak (${idea.text.length}): ${idea.text}`);
+    // The niche moved to the detail line, where it reads naturally.
+    assert.ok(idea.detail?.endsWith('for AI Powered Business Tool'), `niche missing from detail: ${idea.detail}`);
+  }
+  const texts = data.contentIdeas.map((i) => i.text);
+  // The two live defects, gone: no niche phrase inside the hook, off-niche dropped.
+  for (const expected of [
+    'Why people keep searching "ai powered business analytics tools"',
+    '3 things to check before you buy "best ai powered business intelligence tools"',
+    'The mistake most people make with "what are the best ai tools"',
+    'The truth about "ai powered business tools for small business"',
+    'What nobody tells you about "ai powered business analytics tools"',
+  ]) {
+    assert.ok(texts.includes(expected), `missing: ${expected} in ${texts.join(' | ')}`);
+  }
+  // Five hooks, not five rewordings of one line.
+  assert.equal(new Set(texts).size, texts.length);
+});
+
+test('the niche relevance test: one significant shared word keeps a suggestion', () => {
+  // Her live niche: "ai" alone is not significant, so this is not her market.
+  assert.equal(suggestionIsAboutNiche('most profitable ai companies', 'AI Powered Business Tool'), false);
+  assert.equal(suggestionIsAboutNiche('best ai powered business intelligence tools', 'AI Powered Business Tool'), true);
+  // Singular and plural are the same word to a buyer.
+  assert.equal(suggestionIsAboutNiche('what are the best ai tools', 'AI Powered Business Tool'), true);
+  assert.equal(suggestionIsAboutNiche('digital planner goodnotes', 'digital planner'), true);
+  assert.equal(suggestionIsAboutNiche('wedding seating chart', 'digital planner'), false);
+  // Nothing to judge against → nothing is filtered.
+  assert.equal(suggestionIsAboutNiche('anything at all', ''), true);
+  assert.equal(suggestionIsAboutNiche('anything at all', 'AI'), true);
 });
 
 test('the finished answer is cached for exactly one hour, and its age is judged on open', async () => {
