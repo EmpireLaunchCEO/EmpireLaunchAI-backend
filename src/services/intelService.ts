@@ -237,6 +237,13 @@ export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
  * ("ai") are not significant on their own; a one-word niche keeps its single shared
  * token, because that is all it can ever offer; and a niche with no significant token
  * of its own filters nothing.
+ *
+ * Owner direction (23 Nov, fourth pass): two shared tokens are still not enough when
+ * every one of them is a generic product word. Live, her niche "AI Powered Business
+ * Tool" kept "what is the best battery powered tool brand" — it shares "powered" and
+ * "tool", and neither of those says anything about HER market. So the shared tokens
+ * must include at least one that is not generic. A niche built only from generic words
+ * has no such token to ask for, and there the shared count alone decides, as before.
  */
 const NICHE_STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'yours', 'our', 'you',
@@ -245,6 +252,16 @@ const NICHE_STOPWORDS = new Set([
   'when', 'who', 'best', 'top', 'most', 'more', 'new', 'good', 'great', 'cheap',
   'free', 'buy', 'get', 'use', 'using', 'about', 'into', 'over', 'per', 'via', 'vs',
   'versus', '2024', '2025', '2026', '2027',
+]);
+
+/**
+ * Words that describe a product rather than a market: two suggestions can share
+ * "powered" and "tool" and still be about entirely different businesses. Stored in the
+ * normalized form `normalizeWord` produces, so the plural is covered by its singular.
+ */
+const GENERIC_PRODUCT_WORDS = new Set([
+  'powered', 'tool', 'app', 'software', 'product', 'brand', 'online', 'review',
+  'guide', 'idea', 'tip', 'buy', 'price', 'cheap', 'best',
 ]);
 
 /** "tools" and "tool" are the same word to a buyer; "business" is not "busines". */
@@ -288,6 +305,12 @@ export function suggestionIsAboutNiche(suggestion: string, niche: string): boole
   // One significant token is not enough: "what are the best ai tools" shares only
   // "tool" with "AI Powered Business Tool" and is not her market. Two are.
   const shared = new Set(significantTokens(suggestion).filter((t) => nicheTokens.has(t)));
+  // …and two are not enough when both are generic: "what is the best battery powered
+  // tool brand" shares "powered" + "tool" and is still somebody else's market. At least
+  // one shared token must say something specific, unless the niche itself has none.
+  const nicheHasSpecificWord = nicheTokenList.some((t) => !GENERIC_PRODUCT_WORDS.has(t));
+  const sharesSpecificWord = [...shared].some((t) => !GENERIC_PRODUCT_WORDS.has(t));
+  if (nicheHasSpecificWord && !sharesSpecificWord) return false;
   if (nicheTokenList.length === 1) return shared.size >= 1; // a one-word niche can only offer one
   return shared.size >= 2;
 }

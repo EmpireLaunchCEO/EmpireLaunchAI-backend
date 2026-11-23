@@ -629,6 +629,21 @@ test('the niche relevance test: one significant shared word is NOT enough', () =
   assert.equal(suggestionIsAboutNiche('anything at all', 'AI'), true);
 });
 
+test('two shared words are not enough when both are generic product words', () => {
+  // Live for her niche: shares "powered" + "tool", and is somebody else's market.
+  assert.equal(suggestionIsAboutNiche('what is the best battery powered tool brand', 'AI Powered Business Tool'), false);
+  assert.equal(suggestionIsAboutNiche('battery powered tools', 'AI Powered Business Tool'), false);
+  // One specific shared word still carries the pair.
+  assert.equal(suggestionIsAboutNiche('ai powered business tools', 'AI Powered Business Tool'), true);
+  // The two niches the rule must never narrow.
+  assert.equal(suggestionIsAboutNiche('custom dog portrait', 'custom pet portraits'), true);
+  assert.equal(suggestionIsAboutNiche('digital planner app', 'digital planner'), true);
+  // A niche made only of generic words has no specific word to ask for, so the
+  // shared-count rule stands alone there.
+  assert.equal(suggestionIsAboutNiche('best online tool reviews', 'online tool'), true);
+  assert.equal(suggestionIsAboutNiche('wedding seating chart', 'online tool'), false);
+});
+
 test('a stricter niche test still leaves her at least five real hooks', () => {
   // Every one of these was live for her niche; only the three on-market ones survive.
   const live = [
