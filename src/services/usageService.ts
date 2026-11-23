@@ -18,14 +18,16 @@ function isValidUuid(value: string): boolean {
 }
 
 /**
- * Locked quota model (owner Sep 24 rebalance): Scene/Customize = 2/wk (8/mo),
- * Faceless = 12/wk (48/mo), Neural Twin = 5/wk (20/mo), High-Res Design = 50/mo.
+ * Locked quota model (owner Sep 24 rebalance; Faceless raised by the owner's
+ * Nov 19 product decision to 60 videos/month, stated as 15/week): Scene/Customize
+ * = 2/wk (8/mo), Faceless = 15/wk (60/mo), Neural Twin = 5/wk (20/mo),
+ * High-Res Design = 50/mo.
  * Single source of truth — the enforcement paths (getDailyRemaining/enforceLimit)
  * AND the reporting endpoint (cinemaController.getUsage) read these, so Studio
  * chips can never drift from what the backend actually enforces.
  */
 export const WEEKLY_SCENE_LIMIT = 2;      // customize_video (Scene-Based) — 8/mo
-export const WEEKLY_FACELESS_LIMIT = 12;  // faceless — 48/mo
+export const WEEKLY_FACELESS_LIMIT = 15;  // faceless — 60/mo (owner: 60 videos/month)
 export const WEEKLY_TWIN_LIMIT = 5;       // neural_twin — 20/mo
 export const MONTHLY_DESIGN_LIMIT = 50;   // high_res_design
 export class UsageService {
@@ -66,7 +68,7 @@ export class UsageService {
    */
   async getDailyRemaining(userId: string, type: 'neural_twin' | 'enhanced_video' | 'faceless' | 'high_res_design' | 'customize_video' | 'edits'): Promise<number | 'unlimited'> {
     // Weekly video-production quotas (168-hour rolling window), final owner config:
-    // Scene-Based (customize_video) = 2/wk (owner Sep 24 rebalance), Faceless = 12/wk, Neural Twin (neural_twin) = 5/wk.
+    // Scene-Based (customize_video) = 2/wk (owner Sep 24 rebalance), Faceless = 15/wk (owner: 60/mo), Neural Twin (neural_twin) = 5/wk.
     const weeklySceneLimit = WEEKLY_SCENE_LIMIT;      // customize_video
     const weeklyFacelessLimit = WEEKLY_FACELESS_LIMIT;
     const weeklyTwinLimit = WEEKLY_TWIN_LIMIT;        // neural_twin
@@ -122,7 +124,7 @@ export class UsageService {
       } catch {
         periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       }
-      // Final per-type weekly limits: customize_video=2, faceless=12, neural_twin=5 (owner Sep 24 rebalance).
+      // Final per-type weekly limits: customize_video=2, faceless=15, neural_twin=5 (owner Sep 24 rebalance; Faceless 15/wk = 60/mo per the owner).
       if (type === 'customize_video') limit = weeklySceneLimit;
       else if (type === 'faceless') limit = weeklyFacelessLimit;
       else limit = weeklyTwinLimit; // neural_twin
@@ -153,7 +155,7 @@ export class UsageService {
       if (type === 'faceless') {
         // Faceless videos are submitted as `approvals` rows with type 'faceless'
         // (no `creations` row is written for them). Count faceless submissions
-        // within the period so the 7/week quota reflects real submissions.
+        // within the period so the 15/week (60/mo) quota reflects real submissions.
         const [result] = await db.select({ count: count() })
           .from(approvals)
           .where(and(
