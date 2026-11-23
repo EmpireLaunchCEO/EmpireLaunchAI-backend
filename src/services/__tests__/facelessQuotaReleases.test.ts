@@ -101,8 +101,11 @@ test('an in-flight launch still blocks a second one', async () => {
   } finally { restore(); }
 
   // The whole allowance rendering at once → the next launch is refused, not admitted.
+  // Every row must sit STRICTLY inside the window: a row at exactly 15 minutes is
+  // outside it by the time the assertion runs (the boundary is `<=`, and a few
+  // milliseconds always pass), which made this test fail for the wrong reason.
   const full = installDb(Array.from({ length: WEEKLY_FACELESS_LIMIT }, (_v, i) =>
-    row({ status: 'processing', projectId: `live-${i}` }, (i + 1) * MIN)));
+    row({ status: 'processing', projectId: `live-${i}` }, (i + 0.5) * MIN)));
   try {
     assert.equal(await usageService.getDailyRemaining(USER_ID, 'faceless'), 0);
     await assert.rejects(() => usageService.enforceLimit(USER_ID, 'faceless'), /Usage limit reached/);
