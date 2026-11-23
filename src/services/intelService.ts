@@ -227,10 +227,16 @@ export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
  * Owner direction (23 Nov, second pass): a suggestion that shares no word with her
  * niche is not about her business and must not reach a box. Live, her niche
  * "AI Powered Business Tool" came back with "most profitable ai companies", which
- * framed a hook she would never say. So a suggestion is kept only when it shares at
- * least one SIGNIFICANT token with the niche: a word of 3+ characters that is not a
- * stopword, compared singular/plural. Two-letter tokens ("ai") are not significant on
- * their own, and a niche with no significant token of its own filters nothing.
+ * framed a hook she would never say.
+ *
+ * Owner direction (23 Nov, third pass): one shared word is too loose. Live, "tool" alone
+ * let "what are the best ai tools" and "who has the best battery operated tools" through
+ * for her niche. So a suggestion is kept only when it shares a CONTIGUOUS TWO-WORD
+ * phrase of the niche ("digital planner"), or at least TWO significant tokens — a word
+ * of 3+ characters that is not a stopword, compared singular/plural. Two-letter tokens
+ * ("ai") are not significant on their own; a one-word niche keeps its single shared
+ * token, because that is all it can ever offer; and a niche with no significant token
+ * of its own filters nothing.
  */
 const NICHE_STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'yours', 'our', 'you',
@@ -241,19 +247,49 @@ const NICHE_STOPWORDS = new Set([
   'versus', '2024', '2025', '2026', '2027',
 ]);
 
-function significantTokens(text: string): string[] {
+/** "tools" and "tool" are the same word to a buyer; "business" is not "busines". */
+function normalizeWord(word: string): string {
+  if (word.length > 3 && word.endsWith('s') && !/(?:ss|us)$/.test(word)) return word.slice(0, -1);
+  return word;
+}
+
+function words(text: string): string[] {
   return (text || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 3 && !NICHE_STOPWORDS.has(t))
-    // "tools" and "tool" are the same word to a buyer.
-    .map((t) => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t));
+    .filter((t) => t.length > 0)
+    .map(normalizeWord);
+}
+
+function significantTokens(text: string): string[] {
+  return words(text).filter((t) => t.length >= 3 && !NICHE_STOPWORDS.has(t));
+}
+
+/** The niche's own two-word phrases, e.g. "ai powered", "business tool". */
+function nichePhrases(niche: string): Set<string> {
+  const w = words(niche);
+  const phrases = new Set<string>();
+  for (let i = 0; i + 1 < w.length; i++) phrases.add(`${w[i]} ${w[i + 1]}`);
+  return phrases;
 }
 
 export function suggestionIsAboutNiche(suggestion: string, niche: string): boolean {
-  const nicheTokens = new Set(significantTokens(niche));
+  const nicheTokenList = significantTokens(niche);
+  const nicheTokens = new Set(nicheTokenList);
   if (nicheTokens.size === 0) return true; // nothing to judge against → filter nothing
-  return significantTokens(suggestion).some((t) => nicheTokens.has(t));
+
+  // A contiguous two-word phrase of the niche is unambiguous ("digital planner").
+  const phrases = nichePhrases(niche);
+  const w = words(suggestion);
+  for (let i = 0; i + 1 < w.length; i++) {
+    if (phrases.has(`${w[i]} ${w[i + 1]}`)) return true;
+  }
+
+  // One significant token is not enough: "what are the best ai tools" shares only
+  // "tool" with "AI Powered Business Tool" and is not her market. Two are.
+  const shared = new Set(significantTokens(suggestion).filter((t) => nicheTokens.has(t)));
+  if (nicheTokenList.length === 1) return shared.size >= 1; // a one-word niche can only offer one
+  return shared.size >= 2;
 }
 
 // ─── Content hooks (phrased from a real suggestion, never invented) ─────────
