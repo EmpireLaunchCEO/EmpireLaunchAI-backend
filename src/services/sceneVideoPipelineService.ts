@@ -1250,174 +1250,6 @@ function targetSceneCount(durationTarget: number): number {
   return clamp(Math.round(durationTarget / SECONDS_PER_SCENE), MIN_SCENES, MAX_SCENES);
 }
 
-/**
- * Build a coherent N-scene story arc (hook → development → payoff/CTA) around ONE
- * continuous subject (`idea`), each scene ~durationTarget/N seconds. Used both as the
- * fallback when GPT returns no script and as the per-scene pad when it under-delivers.
- * Durations are distributed so the exact sum equals durationTarget.
- */
-function compactCreativeSubject(idea: string, maxChars = 160): string {
-  let subject = String(idea || '').replace(/\s+/g, ' ').trim();
-  // CONTENT HYGIENE (owner Sep 28): the idea can arrive as a consultant/assistant
-  // relay (greeting questions, UI framing). Never let that leak into narration as
-  // the subject. Cut everything from the first consultant-framing marker onward;
-  // if nothing real is left, use a neutral finished-copy subject.
-  const cut = subject.search(/(?:what niche should we dominate|describe the vibe|backgrounds, motion graphics, overlays|what visuals are you imagining|let(?:\u2019|')s design your video|one quick detail|tap the wand to generate|what(?:\u2019|')s the platform name|what color palette should)/i);
-  if (cut !== -1) subject = subject.slice(0, cut).trim();
-  const firstSentence = subject.split(/(?<=[.!?])\s+/)[0]?.trim() || subject;
-  if (!firstSentence || CONSULTANT_META_PATTERN.test(firstSentence)) return 'this upgrade';
-  // CREATIVE TRANSFORMATION (owner Sep 28): the typed brief is RAW MATERIAL, not
-  // finished copy. If the brief is INTERNAL-sounding (recruiting testers, "5
-  // compelling reasons", "CTA", "I want a video that…", "the making of", meta
-  // talk about the video itself), rewrite it to a FINISHED client-facing subject
-  // derived from the product the brief actually describes — NEVER recite the raw
-  // internal fragment ("…need 5 client beta testers." voiced verbatim was the
-  // owner's live-test defect). Clean briefs pass through untouched.
-  const essence = extractCreativeEssence(subject);
-  // CREATIVE TRANSFORMATION (owner Oct 8 - FAILED 5th re-test): the arc subject
-  // must honor the DEGENERATE-ECHO fallback too - the owner's typed brief came
-  // back internal:false BUT degenerateFallback:true (raw brief echoed into the
-  // subject), and the old internal-only check let the RAW first sentence become
-  // scene 1's subject ("Introducing EmpireLaunch AI, the platform for all you
-  // need.") which was then spoken/painted verbatim. A degenerate echo is as
-  // much an internal fragment as an explicit recruiting note - swap to the
-  // compact finished subject in BOTH cases.
-  if (essence.internal || essence.degenerateFallback) {
-    const finished = essence.subject;
-    if (finished.length <= maxChars) return finished;
-    return `${finished.slice(0, maxChars - 1).trimEnd()}…`;
-  }
-  if (firstSentence.length <= maxChars) return firstSentence;
-  return `${firstSentence.slice(0, maxChars - 1).trimEnd()}…`;
-}
-
-/** META FRAMING (owner Nov 2). A client may open a brief with the REQUEST itself —
- *  "A 30-second product video for Ember & Oak, a small hand-poured soy candle
- *  business." The old arc took that head as the SUBJECT and spoke it back:
- *  "Say hello to A 30-second product video for Ember & Oak,." Strip the framing so
- *  the subject is the thing being advertised, never the request for a video. */
-const BRIEF_META_FRAME_RE = /^\s*(?:(?:please|hey|hi|ok|okay|so|can you|could you|would you|i'?d like|i would like|i want|i need|we want|we need|make|create|generate|produce|build|give me|show me)\b[\s,:-]*)*(?:(?:me|us)\s+)?(?:(?:a|an|the)\s+)?(?:(?:\d+(?:\.\d+)?)\s*(?:-|\s)?\s*(?:second|seconds|sec|secs|s|minute|minutes|min)\s*(?:-|\s)?\s*)?(?:(?:product|promo|promotional|marketing|brand|short|vertical|cinematic|social|tiktok|instagram)\s+)*(?:video|promo|promotional video|reel|ad|advert|advertisement|commercial|short|clip|teaser|tiktok)\s+(?:for|about|of|on|featuring|showcasing|that shows)\s+/i;
-
-/** Strip a leading "make me a 30-second product video for …" request framing. */
-export function stripBriefMetaFraming(text: string): string {
-  let t = String(text || '').replace(/\s+/g, ' ').trim();
-  for (let i = 0; i < 2; i++) {
-    const framed = t.replace(BRIEF_META_FRAME_RE, '');
-    // The article belongs to the request framing ("make me A 30-second video for
-    // Ember & Oak"). Stripping it when NO framing matched mangles a real subject:
-    // "a clean brief subject" became "clean brief subject", and the arc then said
-    // "Say hello to clean brief subject." Only strip it when framing was removed.
-    const next = (framed === t ? t : framed.replace(/^(?:a|an|the)\s+/i, '')).trim();
-    if (!next || next === t) break;
-    t = next;
-  }
-  return t;
-}
-
-/** The honest output of a template that has nothing to work with. Never spoken —
- *  the render is refused long before audio — but it must not pretend to be a plan. */
-const ARC_UNPLANNABLE_NARRATION = 'This brief could not be turned into a plan, so there is no video yet.';
-
-/** Claim-free arc beats. They assert NOTHING about the product, so they can never
- *  invent a feature, a benefit or a family scene the brief never mentioned. */
-const ARC_FILLERS = [
-  'The essentials come together fast, and the process is simpler than it looks.',
-  'And this is where it clicks — the transformation you came for.',
-  "That's the payoff — real results, right in front of you.",
-  'Ready to make the move? You can get started today.',
-];
-
-/** The advertised thing, with the request framing removed. '' means "no subject",
- *  which the arc treats as an honest refusal rather than a made-up one. */
-function arcSubject(idea: string): string {
-  const stripped = stripBriefMetaFraming(idea);
-  const compact = compactCreativeSubject(stripped);
-  let cleaned = String(compact || '').replace(/[\s,;:.!?—–-]+$/g, '').trim();
-  // 'this upgrade' is compactCreativeSubject's neutral placeholder — it names no
-  // product at all, so it is NOT a subject (a template that says "Say hello to this
-  // upgrade" claims to be about a product it never names).
-  if (!cleaned || /^this upgrade$/i.test(cleaned)) return '';
-  // "Ember & Oak, a small hand-poured soy candle business." → "Ember & Oak".
-  const head = cleaned.split(',')[0].trim();
-  if (head.length >= 3) cleaned = head;
-  // An echoed REQUEST is not a subject (the exact Ember & Oak defect).
-  if (BRIEF_META_FRAME_RE.test(cleaned) || isInternalBriefEcho(cleaned)) return '';
-  return cleaned;
-}
-
-/** The client's OWN finished sentences, in order — the only copy the template is
- *  allowed to speak that it did not have to invent. */
-function arcBriefSentences(idea: string): string[] {
-  return String(stripBriefMetaFraming(idea) || '')
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.replace(/\s+/g, ' ').trim())
-    .filter(s => s.length >= 12)
-    .filter(s => !isInternalBriefEcho(s))
-    .filter(s => !isPlanSpeakNarration(s))
-    .filter(s => !CONSULTANT_META_PATTERN.test(s));
-}
-
-function buildArcScenes(idea: string, count: number, durationTarget: number): SceneScript[] {
-  const subject = arcSubject(idea);
-  // The request framing is gone, so the prompt names the product, not the brief.
-  const subjectForPrompt = subject || 'the product described in the brief';
-  const own = arcBriefSentences(idea)
-    .filter(s => !subject || !s.toLowerCase().startsWith(subject.toLowerCase()));
-  const base = Math.floor(durationTarget / count);
-  const rem = durationTarget - base * count;
-
-  // Narration is built ONLY from (a) the named subject, (b) the client's own
-  // sentences, (c) claim-free beats. Nothing here can echo the request or invent
-  // a detail, which is what the old template did in production on 2026-11-02.
-  const beats: string[] = [];
-  if (subject) beats.push(`Say hello to ${subject}.`);
-  else if (own.length) beats.push(own.shift() as string);
-  else beats.push(ARC_UNPLANNABLE_NARRATION);
-  while (beats.length < count - 1 && own.length) beats.push(own.shift() as string);
-  // NOTHING TO SAY: with no subject and no usable sentence, EVERY beat is the
-  // refusal. A template that has nothing to work with must not fall back to
-  // confident generic lines — that is how a wrong video ships looking planned.
-  const nothingToSay = !subject && own.length === 0;
-  let fill = 0;
-  while (beats.length < count) {
-    beats.push(nothingToSay ? ARC_UNPLANNABLE_NARRATION : ARC_FILLERS[fill++ % ARC_FILLERS.length]);
-  }
-
-  return Array.from({ length: count }, (_, i) => {
-    const f = count <= 1 ? 0.5 : i / (count - 1); // 0..1 story progress
-    const duration = base + (i < rem ? 1 : 0);
-    let narration = beats[i] ?? ARC_UNPLANNABLE_NARRATION;
-    // HARD ANTI-ECHO GUARD: whatever the brief said, the raw request must never be
-    // spoken back and plan-speak must never reach GPT-Audio.
-    if (BRIEF_META_FRAME_RE.test(narration) || isInternalBriefEcho(narration) || isPlanSpeakNarration(narration)) {
-      narration = nothingToSay ? ARC_UNPLANNABLE_NARRATION : ARC_FILLERS[i % ARC_FILLERS.length];
-    }
-    let visualPrompt: string;
-    if (f < 0.25) {
-      visualPrompt = `Cinematic establishing shot: hook intro of ${subjectForPrompt}, the subject shown clearly for the first time`;
-    } else if (f < 0.5) {
-      visualPrompt = `Cinematic medium shot: setting up the fundamentals of ${subjectForPrompt}, subject continues from the opening, early stage`;
-    } else if (f < 0.75) {
-      visualPrompt = `Cinematic wide shot: ${subjectForPrompt} delivering its key benefit, the transformation in progress, same continuous subject`;
-    } else if (f < 1) {
-      visualPrompt = `Cinematic close-up: the payoff result of ${subjectForPrompt}, same continuous subject, breakthrough moment`;
-    } else {
-      visualPrompt = `Cinematic closing shot: ${subjectForPrompt} final call-to-action, same continuous subject, confident ending`;
-    }
-    return {
-      sceneNumber: i + 1,
-      duration,
-      // Arc scenes are the NO-PLAN fallback — default to 'still' (gpt-image-2 +
-      // Ken Burns, ~free) so a malformed/missing Hybrid director plan degrades to
-      // ZERO Sora calls instead of N. Motion (the ONE important block) only comes
-      // from the hybrid plan path or an explicit GPT visualType in parseScenes.
-      visualType: 'still' as const,
-      narration: capNarrationForScene(narration, duration),
-      visualPrompt,
-    };
-  });
-}
-
 /** CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY. Plan-speak
  *  and prompt echoes must never reach GPT-Audio or the final video. This pure
  *  checker flags the arc-template labels and planner-echo phrases the owner saw
@@ -1432,20 +1264,6 @@ export function isPlanSpeakNarration(narration: string | null | undefined): bool
   if (/we(?:'|’|‘)ll (?:walk|talk) (?:you )?through|\bin this video\b|\bvisual prompt\b|\bnarration[\u2014\u2013:]/i.test(t)) return true;
   if (CONSULTANT_META_PATTERN.test(t)) return true;
   return /what niche should we dominate|describe the vibe|backgrounds, motion graphics|say hello to this upgrade|tap the wand to generate/i.test(t);
-}
-/** Deterministic finished-copy fallback battery — rotated by sceneId hash so
- *  consecutive scenes never repeat. Pure, zero paid calls. */
-export function finalCopyFallbackLine(seed: string, beat: number): string {
-  const LINES = [
-    "You're going to want to see this one.",
-    "It's simpler than you think — and it works.",
-    "Here's the part that makes it all click.",
-    "That's the result — real, fast, right in front of you.",
-    "Ready to make the move? You can get started today.",
-  ];
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
-  return LINES[Math.abs((h + beat) % LINES.length)];
 }
 /**
  * Map `fn` over `items` with at most `limit` promises in-flight at once. Preserves
@@ -1471,68 +1289,70 @@ function parseNarrationRole(s: any): 'avatar-dialogue' | 'narrator' | undefined 
   return undefined;
 }
 
+/** Scenes that CANNOT be rendered as planned (owner, 23 Nov — "never basic"):
+ *  a voiced scene with nothing to say, or any scene with nothing to show. This is
+ *  a REFUSAL, never a fill: the pipeline used to pad exactly these slots from the
+ *  deterministic template arc, which is how a line nobody planned reached a
+ *  delivered video. Pure; used by the planning gate and by the $0 fixture. */
+export function planScenesMissingCopy(
+  script: SceneScript[],
+  opts: { requireNarration: boolean },
+): { missingNarration: number[]; missingVisual: number[] } {
+  const missingNarration: number[] = [];
+  const missingVisual: number[] = [];
+  for (const s of script) {
+    if (opts.requireNarration && !String(s.narration ?? '').trim()) missingNarration.push(s.sceneNumber);
+    if (!String(s.visualPrompt ?? '').trim()) missingVisual.push(s.sceneNumber);
+  }
+  return { missingNarration, missingVisual };
+}
+
 function parseScenes(raw: any, idea: string, durationTarget = 30): SceneScript[] {
   const count = targetSceneCount(durationTarget);
   const candidates = Array.isArray(raw) ? raw : (Array.isArray(raw?.scenes) ? raw.scenes : []);
-  const arc = buildArcScenes(idea, count, durationTarget);
   const base = Math.floor(durationTarget / count);
   const rem = durationTarget - base * count;
-  if (candidates.length) {
-    // Evenly distribute durationTarget across exactly `count` short scenes so every
-    // clip is ~5-6s and renderable (a single Sora shot cannot produce ~100s). Use
-    // GPT's visual/narration per scene when available; pad to `count` with the arc
-    // if GPT under-delivers. IMPORTANT: do NOT clamp the candidate index to the last
-    // element — clamping made every beyond-range slot a CLONE of the final scene
-    // (typically the CTA), which is why longer videos repeated the same visuals.
-    // Instead, read the candidate at `i` (undefined past the end) and fall back to
-    // the corresponding progressive arc beat so every scene stays distinct.
-    //
-    // FALLBACK COST GUARD (D): this fallback runs when the hybrid director plan is
-    // malformed/missing. It must NOT default every scene to motion — that fired ONE
-    // Sora call per scene (5 calls ≈ $2+, owner's cost risk). Honor an EXPLICIT
-    // GPT visualType, but cap motion scenes to AT MOST ONE (the most important
-    // block); every other scene becomes a 'still' (gpt-image-2 + Ken Burns, ~free).
-    // So a malformed plan degrades to ≤1 Sora call, never N.
-    const wantMotion = candidates
-      .map((c: any) => c?.visualType || c?.type || c?.sceneType)
-      .map((t: any) => String(t || '').toLowerCase());
-    let motionUsed = false;
-    return Array.from({ length: count }, (_, i) => {
-      const s = candidates[i];
-      const a = arc[i];
-      const askedMotion = wantMotion[i] === 'motion' || wantMotion[i] === 'sora';
-      const keepMotion = askedMotion && !motionUsed;
-      if (keepMotion) motionUsed = true;
-      return {
-        sceneNumber: i + 1,
-        duration: base + (i < rem ? 1 : 0),
-        visualType: keepMotion ? 'motion' : 'still',
-        ...(keepMotion ? { soraBlock: 0 } : {}),
-        narration: (() => {
-          const chosen = sceneCopyOrFallback(s?.narration, a.narration, a.duration, true);
-          // Plan-speak echo guard (owner Sep 28): if GPT's line is plan-speak /
-          // prompt echo, swap to the finished-copy arc line for the SAME beat.
-          if (isPlanSpeakNarration(chosen)) return capNarrationForScene(a.narration, a.duration);
-          // CREATIVE TRANSFORMATION (owner Sep 28): near-verbatim INTERNAL-BRIEF
-          // echoes (recruiting testers, "5 compelling reasons", "CTA" labels, "the
-          // making of", meta talk) are NEVER client copy — swap to the finished
-          // arc line, which is built from the TRANSFORMED subject (never the raw
-          // typed fragment). Deliberate user LINE_CHANGE edits bypass this guard
-          // upstream via allowPlanSpeak and stay voiced verbatim.
-          if (isInternalBriefEcho(chosen)) return capNarrationForScene(a.narration, a.duration);
-          // OWNER-OCT-8 GUARD: chat-tone / instruction residue lines ("Yes Make
-          // sure it's cohesive...", "Use a energetic mood across every scene and
-          // the narration.", "I love the energy, but I'm here to chat...") are
-          // NEVER narrated — swap to the finished arc line for the same beat.
-          if (isChatResidueText(chosen)) return capNarrationForScene(a.narration, a.duration);
-          return capNarrationForScene(chosen, a.duration);
-        })(),
-        ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
-        visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, a.visualPrompt, a.duration, false),
-      };
-    });
-  }
-  return arc;
+  // NO PLAN → NO INVENTED COPY (owner, 23 Nov — "never basic"). This function used
+  // to build a deterministic template arc — a "Say hello to <subject>." hook plus
+  // four claim-free filler beats and a stock "cinematic establishing shot" — and
+  // pad every scene the planner under-delivered with it, so a video could ship
+  // speaking a line nobody planned. The template is GONE: a scene carries the
+  // planner's own copy or it carries nothing, and `planScenesMissingCopy` refuses
+  // the video at the gate. The scene COUNT is kept so the plan shape stays stable
+  // for QC and for the downstream sizing passes.
+  //
+  // IMPORTANT: do NOT clamp the candidate index to the last element — clamping made
+  // every beyond-range slot a CLONE of the final scene (typically the CTA), which is
+  // why longer videos repeated the same visuals.
+  //
+  // FALLBACK COST GUARD (D): honor an EXPLICIT visualType, but cap motion scenes to
+  // AT MOST ONE (the most important block); every other scene becomes a 'still'
+  // (gpt-image-2 + Ken Burns, ~free). So a malformed plan degrades to ≤1 Sora call.
+  const wantMotion = candidates
+    .map((c: any) => c?.visualType || c?.type || c?.sceneType)
+    .map((t: any) => String(t || '').toLowerCase());
+  let motionUsed = false;
+  return Array.from({ length: count }, (_, i) => {
+    const s = candidates[i];
+    const askedMotion = wantMotion[i] === 'motion' || wantMotion[i] === 'sora';
+    const keepMotion = askedMotion && !motionUsed;
+    if (keepMotion) motionUsed = true;
+    const duration = base + (i < rem ? 1 : 0);
+    const spoken = sceneCopyOrFallback(s?.narration, duration, true);
+    // Plan-speak / internal-brief echo / chat residue is NOT copy: the line is
+    // BLANKED (never replaced by a stock line) and the gate refuses the plan.
+    // Deliberate user LINE_CHANGE edits bypass this upstream via allowPlanSpeak.
+    const narration = isPlanSpeakNarration(spoken) || isInternalBriefEcho(spoken) || isChatResidueText(spoken) ? '' : spoken;
+    return {
+      sceneNumber: i + 1,
+      duration,
+      visualType: keepMotion ? 'motion' : 'still',
+      ...(keepMotion ? { soraBlock: 0 } : {}),
+      narration,
+      ...(parseNarrationRole(s) !== undefined ? { narrationRole: parseNarrationRole(s) } : {}),
+      visualPrompt: sceneCopyOrFallback(s?.visualPrompt || s?.visual_prompt, duration, false),
+    };
+  });
 }
 /**
  * Pull the soraContent block prompts out of a raw planner payload: tolerates the
@@ -2334,18 +2154,17 @@ function normalizeVideoIdea(rawIdea: string): string {
 
 const CONSULTANT_META_PATTERN = /let(?:\u2019|')s\s+design\s+your\s+video|what\s+visuals\s+are\s+you\s+imagining|i(?:\u2019|')ll\s+refine\s+the\s+script|one\s+quick\s+detail|default\s+suggestion|tap\s+the\s+wand\s+to\s+generate|what(?:\u2019|')s\s+the\s+platform\s+name|what\s+color\s+palette\s+should/i;
 
-function sceneCopyOrFallback(value: unknown, fallback: string, duration: number, narration: boolean): string {
+function sceneCopyOrFallback(value: unknown, duration: number, narration: boolean): string {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
-  // Empty or pure consultant/ui framing → the story-arc fallback (never narrate
-  // internal planning dialogue). Everything else is REAL scene copy and MUST
-  // survive into the delivered plan (owner: every relayed component must appear
-  // in the video). A six-second scene can only carry a short complete line, so
-  // OVER-LENGTH text is TRUNCATED at the word cap — NOT replaced by the generic
-  // arc fallback. The old discard-on-length behavior silently dropped GPT's
-  // component-bearing narration/prompts (the owner's live test stored pure
-  // generic arc copy while metadata.componentsMissing listed every relayed
-  // component: red, lavender, TikTok, 50% off, Comment, ...).
-  if (!text || CONSULTANT_META_PATTERN.test(text)) return fallback;
+  // NO FALLBACK COPY (owner, 23 Nov — "never basic"). This used to return the
+  // deterministic template arc's line for the same beat whenever the planner's
+  // value was empty or pure consultant/UI framing, which is how invented copy
+  // reached a finished video. It now returns '' — a gap is a REFUSAL at the gate,
+  // never a substitution. Everything the planner DID write is REAL scene copy and
+  // MUST survive into the delivered plan (owner: every relayed component must
+  // appear in the video). A six-second scene can only carry a short complete line,
+  // so OVER-LENGTH text is TRUNCATED at the word cap — never discarded.
+  if (!text || CONSULTANT_META_PATTERN.test(text)) return '';
   // NARRATION LENGTH CAP (task 316d1a2f): a ~6s scene slot carries at most
   // ~15 words / ~120 chars — word-boundary truncation, never mid-word.
   if (narration) return capNarrationForScene(text, duration);
@@ -2993,6 +2812,21 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   }
   return { script: next, injected, stillMissing: verifyComponentsInScript(next, inventory, assignments).missing, skippedResidue };
 }
+/** Is this selling point a HOOK — the line that must OPEN the video? The owner's
+ *  brand lines, plus the client's own question-shaped hook ("Are you tired of
+ *  being a penny pincher?"), which the old test missed entirely: it only matched
+ *  "empirelaunch ai / go-to / introducing", so a question hook was injected into a
+ *  MIDDLE scene (owner, 23 Nov — "never basic"). A hook lands in scene 1. */
+export function isHookSentence(text: string): boolean {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (/empirelaunch ai|go-to content creation platform|your go-to|introducing/i.test(t)) return true;
+  // Question-shaped: "Are you tired of being a penny pincher?" — a hook by form.
+  if (/\?["'\u201d\u2019)\]]*$/.test(t)) return true;
+  // A question whose mark was capped off: interrogative opener + a subject.
+  return /^(?:are|is|was|do|does|did|can|could|would|will|should|why|how|what|when|where|who|have|has|ever)\b/i.test(t)
+    && /\b(?:you|your|we|i|it|they|anyone|anybody|everyone)\b/i.test(t);
+}
 /** F4 LAUNCH-GATE (task 40c58f6a): narration-only verification of the SPOKEN
  *  mandate. The Oct 10 acceptance render carried ALL 7 owner selling points in the
  *  components arrays but ZERO of them in scene narrations (generic hook copy only)
@@ -3029,7 +2863,7 @@ export function injectSellingPointsIntoNarration(
   const last = count - 1;
   // Round-robin cursor for middle (benefit) scenes — distribute, never stack.
   let midCursor = Math.max(1, Math.floor(count / 2));
-  const isHookish = (c: string) => /empirelaunch ai|go-to content creation platform|your go-to|introducing/i.test(c);
+  const isHookish = (c: string) => isHookSentence(c);
     const isCtaPrice = (c: string) => /go to empirelaunchai|introductory price|\$\s?\d|sign up|link in bio|subscribe|follow|visit|shop now|order now|buy now|learn more|join us/i.test(c);
   // ONE SENTENCE PER SCENE (owner Nov 18 — "the broken narration"). The target used
   // to be the same index for EVERY hook-ish or CTA item in a pass (only the middle
@@ -3181,8 +3015,10 @@ export function stripBenefitTextFromVisualPrompts(script: SceneScript[], bannedP
       .replace(/,\s*$/g, '')
       .trim();
     if (v !== before) strippedScenes.push(s.sceneNumber);
-    if (!v) v = 'Cinematic establishing shot of the subject, soft natural light, depth of field.';
-    s.visualPrompt = /[.!?]$/.test(v) ? v : `${v}.`;
+    // An emptied prompt STAYS empty (owner, 23 Nov — "never basic"): the sanitiser
+    // only removes banned claim text, it never substitutes a stock establishing
+    // shot. A scene with nothing to show is refused by the planning gate.
+    s.visualPrompt = v ? (/[.!?]$/.test(v) ? v : `${v}.`) : '';
   }
   return { script: next, strippedScenes };
 }
@@ -3518,12 +3354,11 @@ export function applyLinkInBioBan(script: SceneScript[], opts?: { allowLinkInBio
     if (containsLinkInBio(v)) { const c = stripLinkInBioPhrases(v); vChanged = c !== v; v = c; }
     if (nChanged) strippedNarrationScenes.push(s.sceneNumber);
     if (vChanged) strippedVisualScenes.push(s.sceneNumber);
-    if (!String(n || '').trim()) {
-      n = 'Ready to make the move? You can get started today.';
-      if (!strippedNarrationScenes.includes(s.sceneNumber)) strippedNarrationScenes.push(s.sceneNumber);
-    }
-    const visualFallback = 'Cinematic establishing shot of the subject, soft natural light, depth of field.';
-    return { ...s, narration: n.trim(), visualPrompt: (v.trim() || visualFallback) };
+    // A line emptied by the ban STAYS empty (owner, 23 Nov — "never basic"). The ban
+    // removes phrasing; it never invents a replacement CTA line, and it never
+    // substitutes a stock visual for a prompt it emptied. The planning gate refuses
+    // a plan whose scene ends up with nothing to say or show.
+    return { ...s, narration: n.trim(), visualPrompt: v.trim() };
   });
   return { script: next, strippedNarrationScenes, strippedVisualScenes };
 }
@@ -3535,15 +3370,18 @@ export function applyLinkInBioBan(script: SceneScript[], opts?: { allowLinkInBio
 export function preTtsSanitize(text: string, opts?: { allowPlanSpeak?: boolean; allowLinkInBio?: boolean; sceneId?: string }): { text: string; replaced: boolean; reason?: 'plan-speak' | 'link-in-bio' } {
   let t = String(text || '');
   if (!opts?.allowPlanSpeak && (isPlanSpeakNarration(t) || isInternalBriefEcho(t))) {
-    const beat = (t.toLowerCase().includes('bio') || t.toLowerCase().includes('ready')) ? 4 : (t.length % 4);
-    return { text: finalCopyFallbackLine(String(opts?.sceneId || t), beat), replaced: true, reason: 'plan-speak' as const };
+    // NO SUBSTITUTE LINE (owner, 23 Nov — "never basic"). This used to return one of
+    // five stock "finished copy" lines, which is exactly how a line nobody planned
+    // reached the voice. A plan-speak line has no honest replacement, so it is
+    // BLANKED, and the planning gate refuses such a plan before anything is bought.
+    return { text: '', replaced: true, reason: 'plan-speak' as const };
   }
   if (!opts?.allowLinkInBio && containsLinkInBio(t)) {
     const clean = stripLinkInBioPhrases(t);
-    // A dangling fragment (<=2 content words left after the phrase was cut) reads
-    // as a glitch — swap it for the safe finished-copy CTA instead of voicing it.
+    // A dangling fragment (<=2 content words left) is not worth voicing and is NOT
+    // replaced with a stock CTA — nothing is invented here either.
     const wordsLeft = clean.split(' ').filter(w => /[A-Za-z0-9]/.test(w)).length;
-    return { text: clean && wordsLeft > 2 ? clean : 'Ready to make the move? You can get started today.', replaced: true, reason: 'link-in-bio' as const };
+    return { text: clean && wordsLeft > 2 ? clean : '', replaced: true, reason: 'link-in-bio' as const };
   }
   return { text: t, replaced: false };
 }
@@ -4239,7 +4077,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
           sceneCount,
           // THE PLANNER IS A PAID CALL: every attempt goes through the one gate, so a
           // second attempt can never be bought after the first one failed.
-          call: (attempt, instruction) => paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + instruction, mode: 'generate' })),
+          call: (attempt, instruction) => paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + instruction, mode: 'generate', purpose: 'planner' })),
           trace: (message) => trace(`${message} project=${projectId}`),
         });
         plannerAttempts = planning.attempts;
@@ -4270,7 +4108,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const needsReplan = firstQc.missingComponents.length > 0 || !firstQc.arcFlags.hook || !firstQc.arcFlags.about || !firstQc.arcFlags.cta || avatarRoleViolations.length > 0;
         if (needsReplan) {
           trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)} avatarRoles=[${avatarRoleViolations.join(',')}]`);
-          const replan = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate' }));
+          const replan = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate', purpose: 'planner' }));
           // A FAILED REPLAN MUST NOT DESTROY A USABLE FIRST PLAN (production evidence
           // 2026-10-11: the replan answered with a router decision, `generated=false`,
           // and the good first plan was overwritten with undefined → template arc).
@@ -4456,7 +4294,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (qc.missingComponents.length > 0) {
       const attempted = qc.missingComponents.slice();
       try {
-        const repairReply = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate' }));
+        const repairReply = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate', purpose: 'planner' }));
         const repaired = applyComponentRepair(planned, attempted, repairReply, { voice: input.voice });
         if (repaired.placed.length) planned.splice(0, planned.length, ...repaired.script);
         componentAssignments = { ...componentAssignments, ...repaired.assignments };
@@ -4721,6 +4559,28 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // assignments were merged above; the sanitiser may since have cleaned the copy
     // out of the narration, and counting that as missing refused a render the repair
     // had already saved). See resolveGateMissingComponents.
+    // NO UNPLANNED COPY, NO VIDEO (owner, 23 Nov — "never basic"). Every sanitiser
+    // above (F4, the component splice, the link-in-bio ban, the benefit strip) can
+    // only REMOVE copy now — nothing replaces it with a template line. So a plan
+    // that ends up with a voiced scene that has nothing to say, or any scene with
+    // nothing to show, is not a plan: it is REFUSED here, at $0, instead of being
+    // padded with filler and delivered. Runs on the plan that is actually
+    // persisted, after every sanitiser, so nothing can slip past it.
+    if (plannerOutcome.source === 'planner') {
+      const copyGaps = planScenesMissingCopy(planned, { requireNarration: (input.voice ?? '') !== 'none' });
+      if (copyGaps.missingNarration.length || copyGaps.missingVisual.length) {
+        const parts: string[] = [];
+        if (copyGaps.missingNarration.length) parts.push(`scenes ${copyGaps.missingNarration.join(', ')} came back with nothing to say`);
+        if (copyGaps.missingVisual.length) parts.push(`scenes ${copyGaps.missingVisual.join(', ')} came back with nothing to show`);
+        plannerOutcome = {
+          ...plannerOutcome,
+          planned: false,
+          reason: 'planner-incomplete-plan',
+          detail: `${parts.join('; ')} — nothing was filled in to cover the gap`,
+        };
+        trace(`planner_copy_gaps project=${projectId} narration=[${copyGaps.missingNarration.join(',')}] visual=[${copyGaps.missingVisual.join(',')}] — refusing to invent copy for an unplanned scene`);
+      }
+    }
     const gateMissing = resolveGateMissingComponents({
       missingComponents: qc.missingComponents,
       cleanIdea,

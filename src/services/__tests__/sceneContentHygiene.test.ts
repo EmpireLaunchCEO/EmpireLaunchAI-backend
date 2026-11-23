@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPlanSpeakNarration,
-  finalCopyFallbackLine,
   parseScenePlan,
+  planScenesMissingCopy,
 } from '../sceneVideoPipelineService.js';
 import { isCustomerFacingOverlayText } from '../renderingEngine.js';
 
@@ -42,17 +42,7 @@ test('isPlanSpeakNarration: leaves real finished-copy narration untouched', () =
   assert.equal(isPlanSpeakNarration(null), false);
 });
 
-test('finalCopyFallbackLine: deterministic, varied across seeds', () => {
-  const a = finalCopyFallbackLine('scene-A', 0);
-  assert.equal(typeof a, 'string');
-  assert.ok(a.length > 10);
-  // Same seed+beat → same line; different seed can differ.
-  assert.equal(finalCopyFallbackLine('scene-A', 0), a);
-  const b = finalCopyFallbackLine('scene-B', 0);
-  assert.equal(typeof b, 'string');
-});
-
-test('parseScenes: plan-speak GPT candidate narration is swapped to the finished arc line', () => {
+test('parseScenes: a plan-speak candidate is BLANKED, never replaced by a template line', () => {
   const raw = {
     scenes: Array.from({ length: 5 }, (_, i) => ({
       sceneNumber: i + 1,
@@ -63,12 +53,10 @@ test('parseScenes: plan-speak GPT candidate narration is swapped to the finished
     })),
   };
   const plan = parseScenePlan(raw as any, 'a clean brief subject', 30, 'scene');
-  // The arc names the subject and stops there. The old second sentence
-  // ("It's about to make things a lot easier.") was an invented claim the
-  // 2026-11-02 template fix deliberately removed, so it must NOT come back.
-  assert.equal(plan[0].narration, "Say hello to a clean brief subject.");
-  assert.equal(/lot easier/i.test(plan[0].narration), false);
-  assert.equal(isPlanSpeakNarration(plan[0].narration), false);
+  // Owner Nov 23: nothing is substituted for copy that cannot be spoken. The line
+  // is dropped and the gap is reported so the video is refused, not padded.
+  assert.equal(plan[0].narration, '');
+  assert.equal(planScenesMissingCopy(plan, { requireNarration: true }).missingNarration.join(','), '1');
 });
 
 test('parseScenes: finished GPT copy survives (never replaced by the generic arc line)', () => {

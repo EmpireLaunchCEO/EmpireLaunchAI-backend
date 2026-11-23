@@ -28,7 +28,6 @@ import {
   stripBenefitTextFromVisualPrompts,
   deliveredVideoDuration,
   dissolveCompensatedSceneSum,
-  finalCopyFallbackLine,
   normalizeSceneDurationOverrides,
   applySceneDurationOverrides,
   remapNarrationToWindows,
@@ -182,16 +181,16 @@ test('LINK-IN-BIO BAN: pre-TTS sanitizer fires on residue, honors both allow fla
   assert.equal(ownerLine.text, OWNER_SCRIPT[7]);
 });
 
-test('default CTA copy (arc fallback + finished-copy battery) is link-in-bio free', () => {
-  for (let beat = 0; beat < 12; beat++) {
-    for (const seed of ['a', 'scene-xyz', '5f306a6e-622a-42d3-be52-e0bfdcf92211']) {
-      assert.ok(!containsLinkInBio(finalCopyFallbackLine(seed, beat)), `fallback line has link-in-bio: ${finalCopyFallbackLine(seed, beat)}`);
-    }
-  }
-  // the safe CTA used when a stripped line empties out is clean + speaks verbatim
+test('no stock line is ever substituted for banned copy (owner Nov 23)', () => {
+  // A line that is nothing but a link-in-bio phrase empties out; the sanitizer
+  // invents NOTHING in its place, and the planning gate refuses such a plan.
   const emptied = preTtsSanitize('Just the link in bio', { sceneId: 's9' });
   assert.equal(emptied.replaced, true);
-  assert.equal(emptied.text, 'Ready to make the move? You can get started today.');
+  assert.equal(emptied.text, '');
+  // Same for a plan-speak line: blanked, never swapped for a finished-copy battery.
+  const planSpeak = preTtsSanitize('Step 1 of 3: opening', { sceneId: 's10' });
+  assert.equal(planSpeak.replaced, true);
+  assert.equal(planSpeak.text, '');
 });
 test('RENDER #8 scene-duration overrides: unequal still layout keeps the exact dissolve-compensated target', () => {
   const scenes = [
