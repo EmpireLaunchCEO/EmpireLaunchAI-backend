@@ -47,6 +47,8 @@ import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import billingRoutes from './routes/billingRoutes.js';
+import versionRoutes from './routes/versionRoutes.js';
+import { resolveCommitSha } from './services/versionInfo.js';
 
 import { startVideoQueueWorker } from './services/videoQueueService.js';
 import { sceneVideoPipelineService } from './services/sceneVideoPipelineService.js';
@@ -146,6 +148,12 @@ app.use(morgan('dev'));
 app.use(STRIPE_WEBHOOK_PATH, stripeWebhookRoutes);
 
 app.use(express.json());
+
+// Build identity (GET /version) — mounted before the rate limiter and before
+// every route that could ever sit behind auth, so the running commit is always
+// readable. It answers 200 with `"unknown"` when RAILWAY_GIT_COMMIT_SHA is unset.
+app.use(versionRoutes);
+
 app.use(globalRateLimiter);
 
 // Serve static assets
@@ -197,7 +205,12 @@ app.use('/api/billing', billingRoutes);
 app.use('/api', subscriptionRoutes);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', scale: 'ready', version: 'v3.1.2_debug_reg_v3' });
+  res.json({
+    status: 'ok',
+    scale: 'ready',
+    version: 'v3.1.2_debug_reg_v3',
+    commit: resolveCommitSha(),
+  });
 });
 
 app.get('/debug-build', (req, res) => {
