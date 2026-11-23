@@ -39,6 +39,14 @@ import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isCha
 import { PlanningFailedError, applyTemplateFill, classifyPlannerOutcome, describeNonPlanResponse, planPayloadFromDecision, plannerFailureNotice, runPlanningAttempts, suppliedScriptPlannerOutcome, usableSceneCount, type PlannerOutcome } from './plannerOutcome.js';
 import { normalizeAssemblyOverlays, applyAssemblyOverlays, resolveSceneVideoStarts, probeClipSeconds } from './assemblyOverlays.js';
 import { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolTimeoutError, mediaToolFailure } from './mediaToolDeadline.js';
+// COST PRE-FLIGHT (owner, 23 Nov): every free check that can refuse a video runs
+// BEFORE the planner's first paid call, so a brief that could never be rendered
+// fails with its own reason at $0. The paid-call gate is the ONE choke point every
+// planner / image / audio / Veo call goes through, so "no further paid call after
+// the first paid failure" holds even with scenes in flight in parallel.
+import { COST_PREFLIGHT_FAILED_CODE, runCostPreflight, type CostPreflightResult } from './costPreflight.js';
+import { clearPaidFailure, notePaidFailure, paidCall, paidCallAllowed, paidFailureFor, PaidCallBlockedError } from './paidCallGate.js';
+import { usageService } from './usageService.js';
 export interface ConversationTurn { role: 'user' | 'assistant'; content: string }
 export interface SceneScript { sceneNumber: number; duration: number; visualType: 'motion'|'still'; narration: string; visualPrompt: string; /** 0-based index of the paired soraContent block for this motion scene (single ONE-call block (owner Sep 14; multi-block tolerated for legacy); undefined for still scenes. */ soraBlock?: number; /** AVATAR-VOICE RULE v3 (owner Sep 9): 'avatar-dialogue' = ONLY voice is the talking avatar's own first-person dialogue (lips moving on camera); 'narrator' = voiceover narration allowed (static avatar or no avatar). Never both in one scene; a video may mix across scenes. */ narrationRole?: 'avatar-dialogue' | 'narrator'; }
 /** SORA SPAN (owner directive, live re-test; 16s cap + important-seconds Sep 14): ONE
@@ -3994,6 +4002,25 @@ export class ComponentsNotPlacedError extends Error {
   }
 }
 
+/** Thrown by createProject when the FREE pre-flight refused the request, AFTER the
+ *  failed row is written. Nothing was bought: no planner call, no image, no audio,
+ *  no Veo — and no receipt is written on the Faceless route, so the client's weekly
+ *  quota is untouched. Mirrors PlanningFailedError so the route answers 422 with
+ *  the pre-flight's own words. */
+export class CostPreflightFailedError extends Error {
+  readonly code = COST_PREFLIGHT_FAILED_CODE;
+  readonly projectId: string;
+  readonly clientMessage: string;
+  readonly check: string | undefined;
+  constructor(projectId: string, preflight: CostPreflightResult) {
+    super(preflight.reason || 'This video could not be made on this machine.');
+    this.name = 'CostPreflightFailedError';
+    this.projectId = projectId;
+    this.check = preflight.check;
+    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} Nothing was generated and nothing was charged to your weekly quota.`;
+  }
+}
+
 /** The ONE decision that says whether a row starts a render. Pure, so the fixture can
  *  assert the gate without a database: a planning failure outranks a components
  *  failure, and either one writes the row as failed and starts NO render. */
@@ -4070,6 +4097,29 @@ export class SceneVideoPipelineService {
     }
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
+    // COST PRE-FLIGHT (owner, 23 Nov) — NOTHING IS BOUGHT UNTIL THE VIDEO IS PROVABLY
+    // PRODUCIBLE. Every check is free, and all of them run BEFORE the planner's first
+    // paid call, so a request that could never come out as a video fails here with its
+    // own reason instead of after a planner call, a still or a Veo window was bought.
+    // What needs a PLAN to decide (component placement) still runs after the planner,
+    // but it is no longer the first thing that can refuse.
+    clearPaidFailure(projectId); // a new run starts with a clean spend ledger
+    const preflight = await runCostPreflight({
+      projectId,
+      mode,
+      durationTarget: input.durationTarget,
+      voice: input.voice,
+      tone: input.tone,
+      sourceImages: input.sourceImages,
+      // The SAME counter enforcement reads — read only, never a write.
+      quotaRemaining: () => usageService.getDailyRemaining(input.userId, mode === 'faceless' ? 'faceless' : 'customize_video'),
+    });
+    if (!preflight.ok) {
+      trace(`cost_preflight_failed project=${projectId} check=${preflight.check} reason=${preflight.reason} spent=0`);
+      await this.recordPreflightFailure(projectId, input, mode, preflight);
+      throw new CostPreflightFailedError(projectId, preflight);
+    }
+    trace(`cost_preflight_ok project=${projectId} mode=${mode} spent=0`);
     // The consultant UI may send its transcript as `idea`; isolate the actual
     // creative brief before it reaches the planner or fallback arc.
     const cleanIdea = normalizeVideoIdea(input.idea);
@@ -4187,7 +4237,9 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         // the contract restated (decision-only: no image, no narration, no motion).
         const planning = await runPlanningAttempts({
           sceneCount,
-          call: (attempt, instruction) => aiRouter.route({ userId: input.userId, request: request + instruction, mode: 'generate' }),
+          // THE PLANNER IS A PAID CALL: every attempt goes through the one gate, so a
+          // second attempt can never be bought after the first one failed.
+          call: (attempt, instruction) => paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + instruction, mode: 'generate' })),
           trace: (message) => trace(`${message} project=${projectId}`),
         });
         plannerAttempts = planning.attempts;
@@ -4218,7 +4270,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const needsReplan = firstQc.missingComponents.length > 0 || !firstQc.arcFlags.hook || !firstQc.arcFlags.about || !firstQc.arcFlags.cta || avatarRoleViolations.length > 0;
         if (needsReplan) {
           trace(`gpt52_replan_start project=${projectId} missing=[${firstQc.missingComponents.join(' | ')}] arc=${JSON.stringify(firstQc.arcFlags)} avatarRoles=[${avatarRoleViolations.join(',')}]`);
-          const replan = await aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate' });
+          const replan = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: request + buildReplanFeedback(firstQc.missingComponents, firstQc.arcFlags, { avatarRoleViolations, narrationAbstract: firstNarrationAbstract }), mode: 'generate' }));
           // A FAILED REPLAN MUST NOT DESTROY A USABLE FIRST PLAN (production evidence
           // 2026-10-11: the replan answered with a router decision, `generated=false`,
           // and the good first plan was overwritten with undefined → template arc).
@@ -4232,7 +4284,12 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
           }
         }
       } catch (error: any) {
-        plannerDetail = `planner call failed: ${error?.message || error}`;
+        // A FAILED PLANNER ENDS THE SPENDING FOR THIS VIDEO (item 2). Recorded here so
+        // the replan / component-repair calls below can never be bought.
+        notePaidFailure(projectId, 'planner', error?.message || String(error));
+        plannerDetail = error instanceof PaidCallBlockedError
+          ? `planner call skipped — ${error.reason}`
+          : `planner call failed: ${error?.message || error}`;
         trace(`gpt52_script_failed project=${projectId} error=${error.message}`);
       }
       plannerOutcome = classifyPlannerOutcome({
@@ -4243,6 +4300,11 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         replanDiscarded,
       });
       trace(`gpt52_script_end project=${projectId} generated=${!!generatedScript} source=${plannerOutcome.source} reason=${plannerOutcome.reason ?? 'none'} plannerScenes=${plannerOutcome.plannerScenes}/${targetSceneCount(duration)}${plannerOutcome.detail ? ` detail=${plannerOutcome.detail}` : ''}`);
+      // NO PLAN → NO MORE SPENDING. The project fails at the gate below, so the paid
+      // component-repair call and the whole media stage must not be bought.
+      if (!plannerOutcome.planned) {
+        notePaidFailure(projectId, 'planner', String(plannerOutcome.detail || plannerOutcome.reason || 'the planning step did not return a usable shot list'));
+      }
     }
 const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, duration, mode);
     // TEMPLATE-FILL AUDIT (owner Nov 2): parseScenes pads a short plan with the
@@ -4394,7 +4456,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     if (qc.missingComponents.length > 0) {
       const attempted = qc.missingComponents.slice();
       try {
-        const repairReply = await aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate' });
+        const repairReply = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate' }));
         const repaired = applyComponentRepair(planned, attempted, repairReply, { voice: input.voice });
         if (repaired.placed.length) planned.splice(0, planned.length, ...repaired.script);
         componentAssignments = { ...componentAssignments, ...repaired.assignments };
@@ -4731,9 +4793,39 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     return projectId;
   }
 
+  /** Write the failed row for a $0 pre-flight refusal, with the reason on it.
+   *  Best-effort by design: a database problem must never turn a $0 refusal into an
+   *  error that carries no reason, so it is traced and the typed error is thrown
+   *  anyway. No scene row, no receipt, no quota. */
+  private async recordPreflightFailure(projectId: string, input: VideoProjectInput, mode: 'faceless'|'scene', preflight: CostPreflightResult): Promise<void> {
+    try {
+      await db.insert(schema.videoProjects).values({
+        id: projectId,
+        userId: input.userId,
+        title: (input.title || input.idea || '').slice(0, 80),
+        status: 'failed',
+        totalDuration: 0,
+        sceneCount: 0,
+        script: [],
+        metadata: {
+          mode,
+          failureCode: COST_PREFLIGHT_FAILED_CODE,
+          error: preflight.reason,
+          costPreflight: { check: preflight.check, reason: preflight.reason, spentUsd: 0, paidCalls: 0 },
+        },
+      });
+    } catch (err: any) {
+      trace(`cost_preflight_row_failed project=${projectId} error=${err?.message || err}`);
+    }
+  }
+
   async processProject(projectId:string,userId:string,skipGeneration=false):Promise<void> {
     const scenes=await db.select().from(schema.videoScenes).where(eq(schema.videoScenes.projectId,projectId)).orderBy(asc(schema.videoScenes.sceneNumber));
     trace(`worker_start project=${projectId} scenes=${scenes.length}`);
+    // A NEW RUN STARTS WITH A CLEAN SPEND LEDGER: the gate stops spending within ONE
+    // run, so a client's retry (or a single-scene regeneration) is a new attempt, not
+    // a continuation of the run that failed.
+    clearPaidFailure(projectId);
     // Pull the project's voiceover selection (persisted by createProject) so scene
     // narration is voiced with the user's gender/tone instead of a hardcoded alloy.
     const [projectRow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
@@ -4831,6 +4923,12 @@ if (!skipGeneration) {
             }
             continue;
           }
+          // SCENE MODE: A LOST WINDOW ABANDONS THE RENDER, so it is recorded — no
+          // still, narration or further Veo window is bought for this video. Faceless
+          // deliberately fails SOFT above (owner, Nov 10) and does NOT record: its
+          // remaining stills and narration are the video FINISHING, not spend after a
+          // failure. (Item 3 of the cost brief would change that; it is not in force.)
+          notePaidFailure(projectId, 'veo', String(spanError?.message || spanError));
           const ids = lostWindows
             .map(l => sceneByNumber.get(l.sceneNumber)?.id)
             .filter((id: any): id is string => Boolean(id));
@@ -4857,6 +4955,21 @@ if (!skipGeneration) {
       // is unchanged.
       const outcomes = await mapLimit(scenes, SCENE_CONCURRENCY, async (scene: any) => {
         if (failedSpanSceneIds.has(scene.id)) return { status: 'fulfilled' as const }; // window take failed → already marked failed
+        // NO FURTHER PAID CALL AFTER THE FIRST PAID FAILURE (item 2). A scene that has
+        // not started yet is failed with the recorded reason instead of being bought;
+        // `paidCall` inside processScene is the backstop for the scenes already in
+        // flight in this wave.
+        if (!paidCallAllowed(projectId)) {
+          const failure = paidFailureFor(projectId);
+          const why = `Not generated — ${failure?.reason || 'an earlier step in this video failed'}`;
+          trace(`scene_blocked_after_paid_failure project=${projectId} scene=${scene.sceneNumber} reason=${failure?.reason || 'earlier failure'}`);
+          await db.update(schema.videoScenes).set({
+            status: 'failed',
+            metadata: mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), { error: why }),
+            updatedAt: new Date(),
+          }).where(eq(schema.videoScenes.id, scene.id));
+          return { status: 'fulfilled' as const };
+        }
         try {
           const takePath = takeRegistry.get(scene.sceneNumber);
           // Only the placement target(s) get the uploaded photo — never every scene.
@@ -5456,7 +5569,7 @@ if (!skipGeneration) {
             localPath = motionStill;
             trace(`scene_motion_still_reused id=${scene.id} number=${scene.sceneNumber} still=${motionStill}`);
           } else {
-            const result = await renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true });
+            const result = await paidCall({ projectId: scene.projectId, kind: 'image' }, () => renderingEngine.renderImage(subjectPrompt, userId, sourceImage && !isVideoUrl(sourceImage) ? sourceImage : undefined, { size: '1024x1792', noText: true }));
             sourceImageOutcome = result.sourceImage;
             if(!result.success||!result.imageUrl)throw new Error(result.error||'GPT Image 2 failed');
             localPath = await ensureLocalFile(result.imageUrl, `still image scene ${scene.sceneNumber}`);
@@ -5528,7 +5641,7 @@ else {
               await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
             }
             sceneVeoOperation = (scene.metadata as any)?.veoJob?.operation ?? sceneVeoOperation;
-            const veoResult = await veoVideoService.generateSceneVideo({
+            const veoResult = await paidCall({ projectId: scene.projectId, kind: 'veo' }, () => veoVideoService.generateSceneVideo({
               prompt: `${subjectPrompt} — One continuous single take of this scene's content: no cuts, no scene changes, one fluid motion sequence, same subject throughout.`,
               sceneKey: `scene${scene.sceneNumber}`,
               existingOperationName: sceneVeoOperation, // exactly-once: never re-POST a known op
@@ -5538,7 +5651,7 @@ else {
               },
               durationSeconds: legacyBilledSeconds,
               imagePath: legacyStillPath,
-            });
+            }));
             if (veoResult.operationName) sceneVeoOperation = veoResult.operationName;
             if (veoResult.success && veoResult.videoPath) {
               const sliceDir = path.join(process.cwd(), 'temp', 'scene-projects', String(scene.projectId || ''));
@@ -5558,7 +5671,7 @@ else {
           localPath = veoLocalPath;
         }
       }
-      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await this.generateAudio(scene.narration,userId,scene.id,voice,tone,voiceOpts); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
+      let audioUrl:string|undefined; let audioLocalPath:string|undefined; if(shouldGenerateSceneNarration(scene.narration, voice)) { try { const audio = await paidCall({ projectId: scene.projectId, kind: 'audio' }, () => this.generateAudio(scene.narration,userId,scene.id,voice,tone,voiceOpts)); audioUrl = audio.url; audioLocalPath = audio.localPath; } catch(audioErr:any) { notePaidFailure(scene.projectId, 'audio', audioErr.message); trace(`scene_audio_failed id=${scene.id} error=${audioErr.message}`); } }
       let assetUrl = localPath;
       if (r2Storage.isAvailable) {
         // HARDENING: never let a URL reach fs.copyFileSync (the owner's live ENOENT).
@@ -5572,7 +5685,7 @@ else {
       }
       const motionProvider = (scene.metadata as any)?.soraJob || sceneSoraVideoId ? 'sora-2' : VEO_PROVIDER_TAG;
       await db.update(schema.videoScenes).set({status:'completed',assetUrl,assetType:mime,audioUrl,metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {provider:scene.visualType==='still'?(isDirectImageUrl(scene.visualPrompt)?'direct-image':'gpt-image-2'):motionProvider,localPath,audioLocalPath,narration:scene.narration,audioProvider:audioUrl?'gpt-audio':undefined,...(sourceImageOutcome?{sourceImageUsed:sourceImageOutcome.used,sourceImageReference:sourceImageOutcome.reference,...(sourceImageOutcome.reason?{sourceImageSkippedReason:sourceImageOutcome.reason}:{})}:{}),...(sceneSoraVideoId?{soraJob:{id:sceneSoraVideoId,status:'completed',createdAt:new Date().toISOString()}}:{}),...(sceneVeoOperation?{veoJob:{operation:sceneVeoOperation,status:'completed',createdAt:new Date().toISOString()}}:{}),...(facelessMotionFallback?{motionFallback:{usedStill:true,reason:String((scene.metadata as any)?.motionFallbackReason||'the Veo motion window did not return a clip')}}:{})}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id)); trace(`scene_complete id=${scene.id}`);
-    } catch(error:any){trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
+    } catch(error:any){notePaidFailure(scene.projectId, error instanceof PaidCallBlockedError ? error.kind : 'scene', error.message); trace(`scene_failed id=${scene.id} error=${error.message}`); await db.update(schema.videoScenes).set({status:'failed',metadata:mergeCompletionMetadata(await liveSceneMetadata(scene.id, {}), {error:error.message}),updatedAt:new Date()}).where(eq(schema.videoScenes.id,scene.id));}
   }
   /**
    * Regenerate ONE scene's narration audio via GPT-Audio (or TTS fallback) in the
@@ -5745,7 +5858,7 @@ else {
         trace(`veo_window_retry_${attempt - 1} project=${projectId} ${sceneKey} attempt=${attempt}/${VEO_WINDOW_MAX_ATTEMPTS} backoff=${backoffMs}ms`);
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
-      const result = await veoVideoService.generateSceneVideo({
+      const result = await paidCall({ projectId, kind: 'veo' }, () => veoVideoService.generateSceneVideo({
         prompt: windowPrompt,
         sceneKey,
         existingOperationName: persistedOp, // exactly-once: never a second paid POST
@@ -5757,7 +5870,7 @@ else {
         imagePath: stillPath,
         // JOIN STEERING: end this clip on the NEXT scene's designed still.
         ...(lastFramePath ? { lastFramePath } : {}),
-      });
+      }));
       if (result.operationName) persistedOp = result.operationName;
       if (result.success && result.videoPath) {
         const dir = path.join(process.cwd(), 'temp', 'scene-projects', projectId);
@@ -5806,12 +5919,12 @@ else {
       // as the userId, so a motion still was never uploaded to R2 and the frame a
       // Veo clip began from was unreachable after the run. Same call as the still
       // path, which has always passed it.
-      const result = await renderingEngine.renderImage(
+      const result = await paidCall({ projectId, kind: 'image' }, () => renderingEngine.renderImage(
         buildSceneImagePrompt(visualPrompt, usableSource, sourceImageTreatmentForScene(scene)),
         userId,
         usableSource,
         { size: '1024x1792', noText: true },
-      );
+      ));
       sourceImageOutcome = result.sourceImage;
       if (!result.success || !result.imageUrl) throw new Error(result.error || 'GPT Image 2 failed for the motion still');
       stillPath = await ensureLocalFile(result.imageUrl, `motion still scene ${scene.sceneNumber}`);
