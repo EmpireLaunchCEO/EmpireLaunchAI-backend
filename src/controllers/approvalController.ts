@@ -318,7 +318,7 @@ export const createApproval = async (req: Request, res: Response) => {
         console.error('[Approval] Faceless render init failed:', renderErr?.message);
         return res.status(422).json({
           status: 'error',
-          error: renderErr?.clientMessage || renderErr?.message || 'Your video could not be started — nothing was generated and nothing was charged to your weekly quota. Please try again.',
+          error: renderErr?.clientMessage || renderErr?.message || 'Your video could not be started, so no video was made. Please try again.',
           code: renderErr?.code || 'RENDER_INIT_FAILED',
         });
       }

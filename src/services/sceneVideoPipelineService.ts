@@ -2775,6 +2775,76 @@ export function verifyComponentsInScript(
     });
   return { missing };
 }
+/**
+ * WHERE A COMPONENT GOES — ONE rule, read by the injection backstop and by the
+ * placement decision below, so the two can never disagree about the scene a CTA,
+ * a colour, a platform or a subject belongs in. Pure.
+ */
+export function componentPlacementRole(c: string): 'cta' | 'mid' | 'hook' {
+  const t = normalizeComponent(c).toLowerCase();
+  if (CTA_PATTERNS.some(re => re.test(c)) || /follow|comment|subscribe|link in bio|shop now|order now|buy now|\bcta\b|call to action|check out|\bdm\b|sign up|join us|visit|tap|click|share|save this|learn more|get yours|act now|\bbeta\b/i.test(t)) return 'cta';
+  if (COLOR_WORDS.includes(t)) return 'mid';
+  if (PLATFORM_PATTERNS.some(p => p.name.toLowerCase() === t)) return 'mid';
+  if (/%\s*off|\$\s?\d/i.test(c)) return 'mid';
+  return 'hook';
+}
+
+/** The scene index a role names: CTA → the final scene, colour / platform / offer →
+ *  the middle (never the final scene, which the CTA owns), everything else → the
+ *  hook. Pure; a one-scene plan collapses to that scene. */
+export function componentTargetIndex(role: 'cta' | 'mid' | 'hook', sceneCount: number): number {
+  if (sceneCount <= 0) return 0;
+  const last = sceneCount - 1;
+  const mid = Math.floor(sceneCount / 2);
+  if (role === 'cta') return last;
+  if (role === 'mid') return mid === last ? Math.max(0, mid - 1) : mid;
+  return 0;
+}
+
+/**
+ * ── 2c-ter: THE PLACEMENT DECISION (owner, 23 Nov — "repair before refusal") ──────
+ *  "if it failed due to needing a change ... shouldn't the AI be smart enough to
+ *  know what it needs so the video doesn't fail?"
+ *
+ *  The text-only repair pass asks the planner where a missing component goes. When
+ *  that reply still does not place it, the video is NOT refused for it: the pipeline
+ *  makes the placement decision itself, by the SAME role rule the injection backstop
+ *  uses (CTA → the final scene, colour / platform / offer → the middle, everything
+ *  else → the hook), and puts THE CLIENT'S OWN WORDING there — spoken narration for
+ *  a voiced video, the image instruction for a silent one. Nothing is invented: the
+ *  words are the client's, and the caller records the scene it chose so the decision
+ *  is stated, not hidden.
+ *
+ *  Items that can never be placed (chat residue, style directives) are skipped here
+ *  exactly as they are skipped everywhere else. Pure — no model, no media, no spend.
+ */
+export function placeComponentsByDecision(
+  script: SceneScript[],
+  items: string[],
+  opts: { voice?: 'female' | 'male' | 'none' } = {},
+): { script: SceneScript[]; placed: string[]; assignments: ComponentAssignments; stillMissing: string[] } {
+  const next = (script ?? []).map(s => ({ ...s }));
+  const assignments: ComponentAssignments = {};
+  const placed: string[] = [];
+  const wanted = (items ?? []).map(normalizeComponent).filter(Boolean);
+  if (!next.length) return { script: next, placed, assignments, stillMissing: wanted };
+  const silent = opts.voice === 'none';
+  for (const item of wanted) {
+    if (isChatResidueText(item) || isDirectiveInstruction(item)) continue;
+    const scene = next[componentTargetIndex(componentPlacementRole(item), next.length)];
+    if (!scene) continue;
+    if (silent) {
+      scene.visualPrompt = `${scene.visualPrompt || ''}${scene.visualPrompt ? ' — ' : ''}${item}`.trim();
+    } else {
+      const sentence = `${item.charAt(0).toUpperCase()}${item.slice(1)}${/[.!?]$/.test(item) ? '' : '.'}`;
+      scene.narration = `${scene.narration || ''}${scene.narration ? ' ' : ''}${sentence}`.trim();
+    }
+    assignments[item.toLowerCase()] = Number(scene.sceneNumber);
+    placed.push(item);
+  }
+  return { script: next, placed, assignments, stillMissing: verifyComponentsInScript(next, wanted, assignments).missing };
+}
+
 /** Deterministic COMPONENT INJECTION backstop (owner: EVERY relayed component must
  *  appear in the video — never rely on GPT/replan compliance alone, and never let
  *  a wholesale parse-layer replacement strip it again). After parse + (at most one)
@@ -2798,15 +2868,6 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
   // refused (verifyComponentsInScript already excludes residue from `missing`,
   // so the per-item guard below never fires for them) — seed the audit from the
   // inventory itself so production logs PROVE residue was dropped, never painted.
-  const last = next.length - 1;
-  const mid = Math.floor(next.length / 2);
-  const isCtaish = (c: string) => {
-    const t = normalizeComponent(c).toLowerCase();
-    return CTA_PATTERNS.some(re => re.test(c)) || /follow|comment|subscribe|link in bio|shop now|order now|buy now|\bcta\b|call to action|check out|\bdm\b|sign up|join us|visit|tap|click|share|save this|learn more|get yours|act now|\bbeta\b/i.test(t);
-  };
-  const isColorish = (c: string) => COLOR_WORDS.includes(normalizeComponent(c).toLowerCase());
-  const isPlatformish = (c: string) => PLATFORM_PATTERNS.some(p => p.name.toLowerCase() === normalizeComponent(c).toLowerCase());
-  const isOfferish = (c: string) => /%\s*off|\$\s?\d/i.test(c);
   for (const c of missing) {
     // OWNER-OCT-8 GUARD: NEVER inject chat-tone / instruction residue into a
     // visualPrompt ("Yes Make sure it's cohesive...", "Use a energetic mood across
@@ -2815,10 +2876,7 @@ export function injectMissingComponents(script: SceneScript[], inventory: string
     // appended the raw chunks verbatim. Residue items are skipped (reported as
     // dropped, never painted); clean inventory items still inject.
     if (isChatResidueText(c) || isDirectiveInstruction(c)) { if (!skippedResidue.includes(c)) skippedResidue.push(c); continue; }
-    let target: number;
-    if (isCtaish(c)) target = last;
-    else if (isColorish(c) || isPlatformish(c) || isOfferish(c)) target = mid === last ? Math.max(0, mid - 1) : mid;
-    else target = 0;
+    const target = componentTargetIndex(componentPlacementRole(c), next.length);
     const s = next[target];
     s.visualPrompt = `${s.visualPrompt || ''}${s.visualPrompt ? ' — ' : ''}${c}`.trim();
     injected.push(c);
@@ -3716,12 +3774,17 @@ export function applyComponentRepair(
     if (!scene) continue;
     const narration = String((p as any).narration ?? '').replace(/\s+/g, ' ').trim();
     const visual = String((p as any).visualPrompt ?? '').replace(/\s+/g, ' ').trim();
+    // THE PLANNER NAMED THE SCENE, SO THE ITEM GOES THERE (owner, 23 Nov — repair
+    // before refusal). A reply that named an existing scene but carried no copy used
+    // to be discarded, which put the item straight back in front of the gate and
+    // refused a video whose placement the planner had already decided. When the reply
+    // gives no copy, the CLIENT'S OWN WORDING is placed in the scene it named —
+    // never invented copy.
     if (silent) {
-      if (!visual) continue;
-      scene.visualPrompt = visual;
+      scene.visualPrompt = visual || `${scene.visualPrompt || ''}${scene.visualPrompt ? ' — ' : ''}${item}`.trim();
     } else {
-      if (!narration) continue;
-      scene.narration = narration;
+      const sentence = `${item.charAt(0).toUpperCase()}${item.slice(1)}${/[.!?]$/.test(item) ? '' : '.'}`;
+      scene.narration = narration || `${scene.narration || ''}${scene.narration ? ' ' : ''}${sentence}`.trim();
     }
     assignments[key] = Number(scene.sceneNumber);
     placed.push(item);
@@ -3755,7 +3818,7 @@ export function componentsNotPlacedNotice(missing: string[]): ComponentsFailure 
     code: COMPONENTS_NOT_PLACED_CODE,
     message:
       `We didn't make this video. These parts of your brief could not be placed into a scene: ${quoted}. ` +
-      'Nothing was rendered, so nothing was charged. Your brief is saved \u2014 tell us in chat where those ' +
+      'Nothing was rendered. Your brief is saved \u2014 tell us in chat where those ' +
       'belong (which scene, or what they should look like) and we will try again.',
     detail: `components could not be placed after the planner checklist + one repair pass: ${items.join(' | ')}`,
     missing: items,
@@ -3868,7 +3931,7 @@ export class CostPreflightFailedError extends Error {
     this.name = 'CostPreflightFailedError';
     this.projectId = projectId;
     this.check = preflight.check;
-    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} Nothing was generated and nothing was charged to your weekly quota.`;
+    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} No video was made.`;
   }
 }
 
@@ -3971,6 +4034,16 @@ export class SceneVideoPipelineService {
       throw new CostPreflightFailedError(projectId, preflight);
     }
     trace(`cost_preflight_ok project=${projectId} mode=${mode} spent=0`);
+    // A REPAIRED PHOTO IS THE PHOTO THE RENDER USES (owner, 23 Nov — repair before
+    // refusal). The pre-flight re-signs a stale upload link and probes the fresh one;
+    // if that pass merely passed the check, the render would still fetch the expired
+    // URL and drop her photo. So the fresh URL replaces the stored one here, before
+    // anything downstream reads it, and the repair is recorded so the client is told.
+    const photoRepairs = preflight.photoRepairs ?? [];
+    if (preflight.sourceImages?.length) {
+      input.sourceImages = preflight.sourceImages;
+      trace(`photo_url_refreshed project=${projectId} count=${photoRepairs.length}`);
+    }
     // The consultant UI may send its transcript as `idea`; isolate the actual
     // creative brief before it reaches the planner or fallback arc.
     const cleanIdea = normalizeVideoIdea(input.idea);
@@ -4303,22 +4376,36 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // replaces the old behaviour of gluing the raw item onto a visualPrompt (which
     // painted claim text into the still and was stripped straight back out again for
     // any voiced video, so the item never landed anywhere).
-    let componentRepair: { attempted: string[]; placed: string[]; stillMissing: string[] } = { attempted: [], placed: [], stillMissing: [] };
-    if (qc.missingComponents.length > 0) {
-      const attempted = qc.missingComponents.slice();
+    let componentRepair: { attempted: string[]; placed: string[]; stillMissing: string[]; placedByDecision: Array<{ component: string; scene: number }> } =
+      { attempted: [], placed: [], stillMissing: [], placedByDecision: [] };
+    // The pass is a STEP, not a one-shot: it runs here for the items the planner's own
+    // assignment map left out, and again below for anything the sanitisers removed
+    // afterwards — because the gate may never be the first thing to see a missing item
+    // (owner, 23 Nov: repair before refusal). Bounded: an item already attempted is
+    // never asked about twice.
+    const runComponentRepairPass = async (items: string[]): Promise<void> => {
+      const attempted = items.map(normalizeComponent).filter(Boolean);
+      if (!attempted.length) return;
+      for (const c of attempted) {
+        if (!componentRepair.attempted.some(a => a.toLowerCase() === c.toLowerCase())) componentRepair.attempted.push(c);
+      }
       try {
         const repairReply = await paidCall({ projectId, kind: 'planner' }, () => aiRouter.route({ userId: input.userId, request: buildComponentRepairRequest({ items: attempted, script: planned, voice: input.voice }), mode: 'generate', purpose: 'planner' }));
         const repaired = applyComponentRepair(planned, attempted, repairReply, { voice: input.voice });
         if (repaired.placed.length) planned.splice(0, planned.length, ...repaired.script);
         componentAssignments = { ...componentAssignments, ...repaired.assignments };
         qc = runPlanQC(planned, inventory, componentAssignments);
-        componentRepair = { attempted, placed: repaired.placed, stillMissing: qc.missingComponents.slice() };
+        for (const c of repaired.placed) {
+          if (!componentRepair.placed.some(p => p.toLowerCase() === c.toLowerCase())) componentRepair.placed.push(c);
+        }
+        componentRepair.stillMissing = qc.missingComponents.slice();
         trace(`component_repair project=${projectId} attempted=${attempted.length} placed=${repaired.placed.length} stillMissing=[${qc.missingComponents.join(' | ')}]`);
       } catch (repairErr: any) {
-        componentRepair = { attempted, placed: [], stillMissing: qc.missingComponents.slice() };
+        componentRepair.stillMissing = qc.missingComponents.slice();
         trace(`component_repair_failed project=${projectId} error=${repairErr?.message}`);
       }
-    }
+    };
+    if (qc.missingComponents.length > 0) await runComponentRepairPass(qc.missingComponents.slice());
     // COMPONENT INJECTION BACKSTOP (owner: every relayed component MUST actually flow
     // into the delivered plan — GPT (and even the one auto-correct replan) is not
     // guaranteed to comply, and the old parse layer could strip long component-bearing
@@ -4555,6 +4642,49 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // Re-run QC against the FINAL sanitized plan so the persisted audit reflects
     // what is actually stored (narration carries the benefits; visuals carry none).
     qc = runPlanQC(planned, inventory, componentAssignments);
+    // ── REPAIR RUNS BEFORE THE GATE MAY REFUSE (owner, 23 Nov) ──────────────────────
+    // "if it failed due to needing a change ... shouldn't the AI be smart enough to
+    // know what it needs so the video doesn't fail?" The ladder is repair → say what
+    // was repaired → only then refuse, so the gate below is the LAST thing that looks
+    // at a missing item, never the first:
+    //   1. an item that only went missing AFTER the first repair pass (a sanitiser
+    //      removed the copy) never saw the text-only pass — it gets it here;
+    //   2. an item the planner still will not place is placed by the pipeline's own
+    //      decision, in the CLIENT'S OWN WORDING, into the scene the role rule names,
+    //      and the scene is recorded — the video is not refused for something that can
+    //      be placed, and the client is told what was placed and where.
+    // Only what survives both is genuinely unplaceable, and only that still refuses.
+    const blockingGateItems = () => resolveGateMissingComponents({
+      missingComponents: qc.missingComponents,
+      cleanIdea,
+      conversation: input.conversation,
+      explicitComponents: input.components,
+      repairedPlaced: componentRepair.placed,
+    });
+    const neverRepaired = blockingGateItems().filter(c => !componentRepair.attempted.some(a => a.toLowerCase() === normalizeComponent(c).toLowerCase()));
+    if (neverRepaired.length) {
+      trace(`component_repair_late project=${projectId} items=[${neverRepaired.join(' | ')}]`);
+      await runComponentRepairPass(neverRepaired);
+    }
+    const stillBlocking = blockingGateItems();
+    if (stillBlocking.length) {
+      // A link-in-bio phrase the client did not ask for is BANNED from the video by
+      // product rule — it is never "placed", so it is never spoken by the decision.
+      const placeable = stillBlocking.filter(c => linkInBioAllowed || !containsLinkInBio(c));
+      const banned = stillBlocking.filter(c => !placeable.includes(c));
+      if (banned.length) trace(`component_decision_banned project=${projectId} items=[${banned.join(' | ')}]`);
+      const decided = placeable.length ? placeComponentsByDecision(planned, placeable, { voice: input.voice }) : null;
+      if (decided && decided.placed.length) {
+        planned.splice(0, planned.length, ...decided.script);
+        componentAssignments = { ...componentAssignments, ...decided.assignments };
+        for (const c of decided.placed) {
+          if (!componentRepair.placed.some(p => p.toLowerCase() === c.toLowerCase())) componentRepair.placed.push(c);
+          componentRepair.placedByDecision.push({ component: c, scene: Number(decided.assignments[c.toLowerCase()]) });
+        }
+        qc = runPlanQC(planned, inventory, componentAssignments);
+        trace(`component_placed_by_decision project=${projectId} placed=[${componentRepair.placedByDecision.map(p => `${p.component} -> scene ${p.scene}`).join(' | ')}] stillMissing=[${qc.missingComponents.join(' | ')}]`);
+      }
+    }
     // 2d — THE GATE (owner Nov 5, defect 2): the BACKSTOP for what the checklist, the
     // assignment check and the one repair pass could not place. It fires before ANY
     // paid media call, so the client gets a plain-language failure instead of $2.46 of
@@ -4618,7 +4748,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       componentsFailure,
       missingComponents: qc.missingComponents,
     });
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',voiceId:isCatalogueVoice(input.voiceId)?input.voiceId:'',mood:input.mood||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',voiceId:isCatalogueVoice(input.voiceId)?input.voiceId:'',mood:input.mood||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(photoRepairs.length?{repairs:{photoUrlRefreshed:{count:photoRepairs.length,clientMessage:'The link to your uploaded photo had expired, so I refreshed it and used your photo.',detail:photoRepairs.map(r=>`${r.from} -> ${r.to}`).join(' | ')}}}:{}),...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
