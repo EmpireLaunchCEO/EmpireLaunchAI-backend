@@ -30,6 +30,43 @@ export const WEEKLY_SCENE_LIMIT = 2;      // customize_video (Scene-Based) — 8
 export const WEEKLY_FACELESS_LIMIT = 15;  // faceless — 60/mo (owner: 60 videos/month)
 export const WEEKLY_TWIN_LIMIT = 5;       // neural_twin — 20/mo
 export const MONTHLY_DESIGN_LIMIT = 50;   // high_res_design
+
+/**
+ * HOW LONG AN UNFINISHED FACELESS LAUNCH KEEPS HOLDING QUOTA (owner, Nov 23).
+ * A faceless launch writes its `approvals` row BEFORE the paid work starts, so the
+ * row's `payload.status` is the only thing that says whether the video was ever
+ * delivered. The pipeline's own span budget for one video is 12 minutes; 30 minutes
+ * is comfortably past the longest a live render can be, so a `processing` row older
+ * than this is a dead row (crash, restart, never started) and must stop counting.
+ */
+export const FACELESS_IN_FLIGHT_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * DOES THIS FACELESS ROW SPEND THE CLIENT'S QUOTA? (owner, Nov 23)
+ * "IF a video fails for a client, their video count doesn't get reduced, especially
+ * if it doesn't run." So a row counts ONLY when it produced a video
+ * (`payload.status === 'completed'`) or is genuinely in flight (`'processing'` and
+ * created inside FACELESS_IN_FLIGHT_WINDOW_MS — it still holds its slot so a second
+ * launch cannot slip past while the first is rendering). Failed, refused and dead
+ * rows consume nothing. Rows written before `payload.status` existed have no status
+ * and therefore count for nothing: the delivered video carries its own completed row.
+ */
+export function countsAgainstFacelessQuota(
+  payload: unknown,
+  createdAt: Date | string | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  let row: any = payload;
+  if (typeof row === 'string') {
+    try { row = JSON.parse(row); } catch { return false; }
+  }
+  const status = row && typeof row === 'object' ? (row as any).status : undefined;
+  if (status === 'completed') return true;
+  if (status !== 'processing') return false;
+  const created = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt ?? NaN).getTime();
+  if (!Number.isFinite(created)) return false;
+  return now.getTime() - created <= FACELESS_IN_FLIGHT_WINDOW_MS;
+}
 export class UsageService {
   /**
    * Tracks a new usage event.
@@ -154,16 +191,23 @@ export class UsageService {
 
       if (type === 'faceless') {
         // Faceless videos are submitted as `approvals` rows with type 'faceless'
-        // (no `creations` row is written for them). Count faceless submissions
-        // within the period so the 15/week (60/mo) quota reflects real submissions.
-        const [result] = await db.select({ count: count() })
+        // (no `creations` row is written for them) — but A ROW IS NOT A VIDEO.
+        // Counting every row spent the 15/week (60/mo) allowance on renders that
+        // failed, were refused, or never started at all (owner, Nov 23: "IF a video
+        // fails for a client, their video count doesn't get reduced, especially if it
+        // doesn't run"). Each row in the period is classified by the ONE shared rule:
+        // a delivered video counts, a genuinely in-flight launch counts, and
+        // everything else is released. At most 60 rows per client per month, so the
+        // classification runs in-process on rows already scoped to the caller.
+        const rows = await db.select({ payload: approvals.payload, createdAt: approvals.createdAt })
           .from(approvals)
           .where(and(
             eq(approvals.userId, userId),
             eq(approvals.type, 'faceless'),
             gte(approvals.createdAt, periodStart)
           ));
-        return Math.max(0, limit - Number(result?.count ?? 0));
+        const used = rows.filter((r: any) => countsAgainstFacelessQuota(r.payload, r.createdAt, now)).length;
+        return Math.max(0, limit - used);
       }
 
       const logs = await db.select()

@@ -4705,7 +4705,29 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       }};
     }));
     trace(`project_created id=${projectId} scenes=${planned.length} spans=${spanPlans.length}`);
-    if (creation.startRender) void this.processProject(projectId, input.userId).catch(e=>trace(`worker_unhandled project=${projectId} error=${e?.message}`));
+    if (creation.startRender) void this.processProject(projectId, input.userId).catch(async (e:any)=>{
+      trace(`worker_unhandled project=${projectId} error=${e?.message}`);
+      // A RENDER THAT DIES MUST NOT KEEP THE CLIENT'S QUOTA (owner, Nov 23: "IF a
+      // video fails for a client, their video count doesn't get reduced, especially
+      // if it doesn't run"). The worker settles its own receipt on every failure it
+      // can see (scene failures, a store failure, an assembly error), but a throw
+      // that escapes processProject — a crash before generation, a restart, a
+      // dependency failing on the way in — used to leave the submission receipt at
+      // payload.status='processing' forever, and the row kept spending a slot. It is
+      // settled here as a terminal failure with the reason, so the count releases
+      // immediately instead of waiting for the in-flight window to expire.
+      const reason = e?.clientMessage || e?.message || 'The render stopped before it could finish';
+      try {
+        await db.update(schema.videoProjects).set({
+          status: 'failed',
+          metadata: mergeCompletionMetadata(await liveProjectMetadata(projectId, {}), { error: reason }),
+          updatedAt: new Date(),
+        }).where(eq(schema.videoProjects.id, projectId));
+      } catch (projErr:any) {
+        trace(`worker_unhandled_project_mark_failed project=${projectId} error=${projErr?.message}`);
+      }
+      await this.settleSubmissionReceipt(projectId, input.userId, { status: 'failed', error: reason });
+    });
     return projectId;
   }
 
