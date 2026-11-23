@@ -222,60 +222,98 @@ export function buildSeasonalWindows(now: Date): SeasonalWindow[] {
     .slice(0, MAX_SEASONAL);
 }
 
+// ─── Niche relevance (a suggestion about something else is not her market) ──
+/**
+ * Owner direction (23 Nov, second pass): a suggestion that shares no word with her
+ * niche is not about her business and must not reach a box. Live, her niche
+ * "AI Powered Business Tool" came back with "most profitable ai companies", which
+ * framed a hook she would never say. So a suggestion is kept only when it shares at
+ * least one SIGNIFICANT token with the niche: a word of 3+ characters that is not a
+ * stopword, compared singular/plural. Two-letter tokens ("ai") are not significant on
+ * their own, and a niche with no significant token of its own filters nothing.
+ */
+const NICHE_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'yours', 'our', 'you',
+  'they', 'them', 'are', 'was', 'were', 'has', 'have', 'had', 'can', 'will', 'not',
+  'but', 'his', 'her', 'its', 'all', 'any', 'one', 'two', 'out', 'how', 'why', 'what',
+  'when', 'who', 'best', 'top', 'most', 'more', 'new', 'good', 'great', 'cheap',
+  'free', 'buy', 'get', 'use', 'using', 'about', 'into', 'over', 'per', 'via', 'vs',
+  'versus', '2024', '2025', '2026', '2027',
+]);
+
+function significantTokens(text: string): string[] {
+  return (text || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !NICHE_STOPWORDS.has(t))
+    // "tools" and "tool" are the same word to a buyer.
+    .map((t) => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t));
+}
+
+export function suggestionIsAboutNiche(suggestion: string, niche: string): boolean {
+  const nicheTokens = new Set(significantTokens(niche));
+  if (nicheTokens.size === 0) return true; // nothing to judge against → filter nothing
+  return significantTokens(suggestion).some((t) => nicheTokens.has(t));
+}
+
 // ─── Content hooks (phrased from a real suggestion, never invented) ─────────
 /**
  * Owner direction (23 Nov): Content Ideas must always give her at least five usable
  * hooks, every one about HER business — and each one a line she would actually say on
- * camera. So every hook is short spoken English (under ~70 characters), names her
- * niche at most once — and says nothing about the niche at all when the search phrase
- * it quotes already contains it — and always keeps the real search phrase in quotes.
- * The hook is only ever a frame around a phrase Google actually returned, so no claim
- * is invented: a question asks, a "mistake"/"myth"/"nobody tells you" line names a
- * pattern to talk about without asserting a fact, and the numbered list promises what
- * to check, not what is true.
+ * camera. The hook is only ever a frame around a phrase Google actually returned, so
+ * no claim is invented: a question asks, a "mistake"/"myth"/"nobody tells you" line
+ * names a pattern to talk about without asserting a fact, and the numbered list
+ * promises what to check, not what is true.
+ *
+ * Owner direction (23 Nov, second pass): the hook TEXT never says the niche. A long
+ * niche turned "The AI Powered Business Tool mistake to avoid with …" into a sentence
+ * nobody would say, and the quoted real search already carries the niche — so the
+ * niche lives on the `detail` line instead, and every template below reads naturally
+ * at any niche length.
  */
-type HookTemplate = (phrase: string, niche: string, phraseNamesNiche: boolean) => string;
+type HookTemplate = (phrase: string) => string;
 
 const HOOK_TEMPLATES: HookTemplate[] = [
   // 1. Question — what her buyers are really typing, and why.
-  (p, n) => `Why ${n} buyers keep searching "${p}"`,
+  (p) => `Why people keep searching "${p}"`,
   // 2. Numbered list — what to check before buying.
   (p) => `3 things to check before you buy "${p}"`,
   // 3. Mistake — the pattern worth talking about.
-  (p, n, named) => (named ? `The mistake most people make with "${p}"` : `The ${n} mistake to avoid with "${p}"`),
+  (p) => `The mistake most people make with "${p}"`,
   // 4. Myth — the belief worth correcting.
-  (p, n, named) => (named ? `The truth about "${p}"` : `The ${n} myth worth busting: "${p}"`),
+  (p) => `The truth about "${p}"`,
   // 5. "Nobody tells you" — the insider angle.
-  (p, n, named) => (named ? `What nobody tells you about "${p}"` : `What ${n} buyers get wrong: "${p}"`),
+  (p) => `What nobody tells you about "${p}"`,
   // 6. Worth it? — the buying decision she sells around.
-  (p, n, named) => (named ? `Is "${p}" worth it?` : `Is "${p}" worth it for ${n}?`),
+  (p) => `Is "${p}" worth it?`,
 ];
 
-export function buildContentHook(phrase: string, index: number, niche: string): string {
+/** The niche is accepted for call-site compatibility but never enters the text. */
+export function buildContentHook(phrase: string, index: number, _niche?: string): string {
   const template = HOOK_TEMPLATES[index % HOOK_TEMPLATES.length];
   const p = (phrase || '').replace(/\s+/g, ' ').trim();
-  const n = (niche || '').replace(/\s+/g, ' ').trim();
-  // The quoted phrase already says the niche → never say it a second time.
-  const phraseNamesNiche = n.length > 0 && p.toLowerCase().includes(n.toLowerCase());
-  return template(p, n, phraseNamesNiche).replace(/\s+/g, ' ').trim();
+  return template(p).replace(/\s+/g, ' ').trim();
 }
 
 /**
  * At least MIN_CONTENT_IDEAS hooks, up to MAX_CONTENT_IDEAS.
  *
- * The distinct hook patterns are cycled over the real suggestions, so two
- * suggestions still yield five different hooks (question, list, mistake, myth,
- * "nobody tells you") — never five rewordings of the same line, and never a hook
- * that repeats her niche or that she could not read out loud.
+ * Suggestions that share no significant token with the niche are dropped first, then
+ * the distinct hook patterns are cycled over what is left — so two real suggestions
+ * still yield five different hooks (question, list, mistake, truth, "nobody tells
+ * you", worth it), never five rewordings of the same line. If nothing survives the
+ * filter there are no hooks at all, because a hook must quote a real search.
  */
 export function buildContentIdeas(suggestions: string[], params: IntelTrendsParams): IntelItem[] {
-  const niche = (params.niche || '').trim();
+  const niche = (params.niche || '').replace(/\s+/g, ' ').trim();
 
   const seen = new Set<string>();
   const phrases: string[] = [];
   for (const raw of suggestions) {
     const phrase = (raw || '').replace(/\s+/g, ' ').trim();
     if (!phrase) continue;
+    // A suggestion about something else is not her market (owner, 23 Nov).
+    if (!suggestionIsAboutNiche(phrase, niche)) continue;
     const key = phrase.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -288,8 +326,11 @@ export function buildContentIdeas(suggestions: string[], params: IntelTrendsPara
   for (let i = 0; i < target; i++) {
     const phrase = phrases[i % phrases.length];
     ideas.push({
-      text: buildContentHook(phrase, i, niche),
-      detail: `From the real search suggestion "${phrase}"`,
+      text: buildContentHook(phrase, i),
+      // Her niche moved here, where it reads naturally however long it is.
+      detail: niche
+        ? `From the real search suggestion "${phrase}" for ${niche}`
+        : `From the real search suggestion "${phrase}"`,
       source: 'google' as const,
     });
   }
@@ -383,6 +424,8 @@ export class IntelService {
         const key = suggestion.toLowerCase().replace(/\s+/g, ' ');
         if (seedKeys.has(key)) continue; // the seed itself is not a suggestion
         if (seen.has(key)) continue;
+        // Off-niche suggestions reach no box at all (owner, 23 Nov).
+        if (!suggestionIsAboutNiche(suggestion, params.niche || '')) continue;
         seen.add(key);
         hits.push({ suggestion, seed: r.seed });
       }
