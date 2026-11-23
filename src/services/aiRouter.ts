@@ -1,4 +1,5 @@
 import { reasoningEngine, isPlannerTimeout } from './reasoningEngine.js';
+import { buildTransformationPlannerRule } from './creativeTransformation.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,15 @@ export interface RouterRequest {
    *  generation (e.g. "press Launch Project to generate your video" in the
    *  suppressWand Launch Project flow). Falls back to the classic wand copy. */
   actionHint?: string;
+  /** WHAT THIS CALL IS (owner, 23 Nov — "never basic"). The same model answers two
+   *  completely different jobs: the ROUTER classifies a chat request, and the
+   *  PLANNER writes the shot list a video is built from. Until this field existed
+   *  the planner was sent the router's system prompt ("classify the request, never
+   *  generate media") with the router's JSON schema appended LAST, so the model
+   *  answered with a classification object and no plan — the exact silent bypass
+   *  production hit on 2026-11-02. `purpose: 'planner'` gives that call the
+   *  planner's own contract. Absent (every existing caller) = the router, unchanged. */
+  purpose?: 'router' | 'planner';
 }
 
 /** Closing line the consultant replies with when the user says "generate" /
@@ -58,6 +68,41 @@ export interface RouterRequest {
 export function consultGenerateReply(actionHint?: string): string {
   const hint = String(actionHint || '').trim();
   return hint.length > 0 ? hint : 'Great, tap the wand to generate!';
+}
+
+/**
+ * THE PLANNER'S OWN CONTRACT (owner, 23 Nov — "never basic").
+ *
+ * The planning call is not a routing call. It writes the shot list a video is
+ * built from, so it is sent the rules that govern a finished video — not the
+ * router's classifier schema. Carries:
+ *  - the creative transformation rule already used by the pipeline prompt
+ *    (`buildTransformationPlannerRule`), so the brief is raw material and the
+ *    video is a finished pitch;
+ *  - an explicit ANTI-CLICHÉ rule;
+ *  - the owner's stated/unstated rule: stated → use it exactly; unstated →
+ *    decide from THEIR message, never a stock default;
+ *  - what to show for a brief with no product: the audience, the moment, the
+ *    feeling — never a generic app screen;
+ *  - that the hook lands in scene 1, question-shaped hooks included.
+ *
+ * Pure + exported so a $0 fixture can assert the exact text the model receives.
+ */
+export function buildPlannerSystemPrompt(): string {
+  return `You are the EmpireLaunch AI PLANNER — the one step that writes the shot list for ONE short video for a paying client.
+
+YOUR JOB: turn the client's brief into a finished, shootable plan that could only have been made for THIS client. You are not a classifier and you do not chat. Return the plan JSON the request describes, and nothing else.
+
+NEVER BASIC (owner, 23 Nov — "AI chat should never just go basic"): the client is paying for the best possible video, so never settle for the safe, generic, could-be-anyone answer.
+- ANTI-CLICHÉ: never reach for the stock furniture of advertising — no man in a suit in front of a gold tower, no skyscraper, no handshake, no generic "cozy home-studio", no generic app screen, no stock sunrise-with-arms-raised. If an idea would fit any brand in any industry, it is not an idea for this client.
+- STATED → USE IT EXACTLY. When the client names a hook, a line, a colour, a scene, a product, a place, an audience or a feeling, it goes into the plan in their own words. Never reword it, never substitute something you prefer, never drop it.
+- UNSTATED → DECIDE FROM THEIR MESSAGE. Never a stock default. Every choice you make must follow from the product, the audience and the words the client already gave you, and it must be defensible in one clause from what they said.
+- NO PRODUCT NAMED is not a licence to show a generic app screen: show the AUDIENCE living the MOMENT the video is about and the FEELING the client is selling — the relief, the pride, the calm, the extra income — with real people, real rooms and real light, specific to the audience they named.
+- THE HOOK LANDS IN SCENE 1. The opening scene carries the hook. A question-shaped hook ("Are you tired of being a penny pincher?") belongs in scene 1, spoken as written — never moved to the middle, never answered with an introduction.
+- Every scene must be a DIFFERENT moment that moves the story forward — no repeated opening, no "same shot, different angle/colour".
+${buildTransformationPlannerRule()}
+
+WHAT TO RETURN: ONLY the JSON object the request describes (a "scenes" array, plus "soraContent" / "avatarLook" / "componentAssignments" when the request asks for them). No "classification", no "prompt", no "response", no markdown fences, no commentary.`;
 }
 // ─── AI Router Service ───────────────────────────────────────────────────────
 
@@ -69,8 +114,16 @@ export class AiRouterService {
    * and returns a structured routing decision. Never generates final media.
    */
   async route(request: RouterRequest): Promise<RouterDecision> {
-    const systemPrompt = this.buildSystemPrompt(request.brandContext, request.mode, request.lockedFacts, request.actionHint);
-    const userMessage = this.buildUserMessage(request);
+    // THE PLANNER GETS THE PLANNER'S INSTRUCTIONS (owner, 23 Nov — "never basic").
+    // In planner mode the system prompt IS the planner's contract and the user
+    // message carries NO router schema: the schema used to be the LAST thing the
+    // model read, which is why it answered with a classification object instead of
+    // a shot list. Consult/classify callers are untouched.
+    const isPlanner = request.purpose === 'planner';
+    const systemPrompt = isPlanner
+      ? buildPlannerSystemPrompt()
+      : this.buildSystemPrompt(request.brandContext, request.mode, request.lockedFacts, request.actionHint);
+    const userMessage = isPlanner ? this.buildPlannerUserMessage(request) : this.buildUserMessage(request);
 
     try {
       const raw = await reasoningEngine.reason(`${systemPrompt}\n\n${userMessage}`, {
@@ -169,6 +222,19 @@ RULES:
 - For video_editing needing new visuals, set requiresNewVisualContent=true.
 - Always infer platform from context ("TikTok", "Instagram", "Etsy").
 - Output MUST be valid JSON only — no markdown, no explanation.`;
+  }
+
+  /** The PLANNER's user message: the pipeline's own request text (brief + plan
+   *  shape + components + time budget) and NOTHING ELSE. The router's classifier
+   *  schema used to be appended here, after the plan contract, and the model
+   *  obeyed the last instruction it read. */
+  private buildPlannerUserMessage(request: RouterRequest): string {
+    const history = request.conversationHistory?.length
+      ? `\n\nConversation so far:\n${request.conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}`
+      : '';
+    return `${request.request}${history}
+
+Return ONLY the plan JSON described above — no "classification", no "prompt", no "response", no markdown fences, no commentary.`;
   }
 
   private buildUserMessage(request: RouterRequest): string {

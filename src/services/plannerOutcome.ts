@@ -4,7 +4,8 @@
  * WHY THIS FILE EXISTS
  * --------------------
  * A production run (project 16622f81, 2026-11-02) shipped a video whose plan was
- * the deterministic template arc in `buildArcScenes`, not a model plan. The
+ * a deterministic template arc (the `buildArcScenes` fallback, deleted 2026-11-23
+ * — see NEVER-BASIC), not a model plan. The
  * narration was "Say hello to A 30-second product video for Ember & Oak,." — the
  * raw brief echoed back — and the candle, its scent, its jar and its 50-hour burn
  * never appeared. Nothing on the project said the planner had been bypassed, so a
@@ -274,9 +275,10 @@ export function classifyPlannerOutcome(input: {
 }
 
 /**
- * Record how many scenes came from the plan versus the template. `parseScenes`
- * pads a short plan with the deterministic arc, so a 3-of-5 plan silently ships
- * two invented scenes — that is a bypass for those scenes and must be named.
+ * Record how many scenes the plan actually provided. The template that used to
+ * pad a short plan is GONE (owner, 23 Nov — a plausible output that was never
+ * planned is worse than a failure), so a 3-of-5 plan no longer ships two invented
+ * scenes: the shortfall is named here and the render is refused.
  */
 export function applyTemplateFill(
   outcome: PlannerOutcome,
@@ -291,7 +293,7 @@ export function applyTemplateFill(
       next.planned = false;
       next.reason = 'planner-incomplete-plan';
       next.detail = truncate(
-        `plan covered ${fromPlanner} of ${sceneCount} scenes — ${templateScenes} would have been invented from the template`,
+        `plan covered ${fromPlanner} of ${sceneCount} scenes — ${templateScenes} came back with no planned scene, and nothing is filled in to cover them`,
       );
     } else {
       next.planned = true;
@@ -309,7 +311,7 @@ export function plannerFailureNotice(outcome: PlannerOutcome): PlanningFailure {
   const why = outcome.reason === 'planner-call-failed'
     ? 'The step that writes your shot list could not be reached.'
     : outcome.reason === 'planner-incomplete-plan'
-      ? `The shot list came back short — it covered ${outcome.plannerScenes} of ${outcome.plannerScenes + outcome.templateScenes} scenes, so the rest would have been invented instead of written for you.`
+      ? `The shot list came back short — it covered ${outcome.plannerScenes} of ${outcome.plannerScenes + outcome.templateScenes} scenes, so the rest would have been filled in with something generic instead of written for you. We stopped instead.`
       : "The step that writes your shot list answered, but it did not come back with a shot list we could use.";
   const message =
     `We didn't make this video. ${why} ` +

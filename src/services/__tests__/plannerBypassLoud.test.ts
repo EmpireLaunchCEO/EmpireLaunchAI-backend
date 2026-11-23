@@ -28,7 +28,7 @@ import {
   usableSceneCount,
   PLANNING_FAILED_CODE,
 } from '../plannerOutcome.js';
-import { parseScenePlan, stripBriefMetaFraming } from '../sceneVideoPipelineService.js';
+import { parseScenePlan, planScenesMissingCopy } from '../sceneVideoPipelineService.js';
 import { injectMoodIntoVisualPrompts } from '../plannerFidelity.js';
 
 /** The owner's real brief from the failed production render (project 16622f81). */
@@ -190,48 +190,35 @@ test('the client is told plainly, in the app\'s voice, that no video was made', 
   }
 });
 
-// ─── 6. The template can no longer echo the request ────────────────────────
-test('template arc: the request framing is stripped from the subject', () => {
-  const stripped = stripBriefMetaFraming(EMBER_BRIEF);
-  assert.equal(/30-second product video for/i.test(stripped), false, 'the request framing is gone');
-  assert.match(stripped, /^Ember & Oak,/, 'the advertised thing is what is left');
-  assert.equal(
-    stripBriefMetaFraming('Make me a 30-second product video for Ember & Oak'),
-    'Ember & Oak',
-  );
-});
-
-test('template arc: narration names the product and never recites the brief', () => {
+// ─── 6. No plan → no copy (the template is gone, owner Nov 23) ──────────────
+test('no plan: every scene comes back empty, and the gap is reported as a refusal', () => {
   const scenes = parseScenePlan({}, EMBER_BRIEF, 30, 'scene');
 
-  assert.equal(scenes.length, 5);
+  assert.equal(scenes.length, 5, 'the plan SHAPE is kept so QC stays meaningful');
   for (const s of scenes) {
-    assert.ok(s.narration && s.narration.trim().length > 0, `scene ${s.sceneNumber} must have narration`);
-    assert.equal(/product video for/i.test(s.narration), false, `scene ${s.sceneNumber} echoes the request`);
-    assert.equal(/30-second/i.test(s.narration), false, `scene ${s.sceneNumber} echoes the duration ask`);
-    assert.equal(/product video for/i.test(s.visualPrompt), false, `scene ${s.sceneNumber} prompt echoes the request`);
+    assert.equal(s.narration, '', `scene ${s.sceneNumber} must not speak an invented line`);
+    assert.equal(s.visualPrompt, '', `scene ${s.sceneNumber} must not show an invented shot`);
   }
-  assert.match(scenes[0].narration, /Ember & Oak/, 'the product is named in the hook');
-  // The client's own words are used where the template has nothing of its own.
-  const spoken = scenes.map(s => s.narration).join(' ');
-  assert.match(spoken, /Sunday Morning|candle|soy|wick|vanilla/i, 'the brief\'s own content survives');
+  const gaps = planScenesMissingCopy(scenes, { requireNarration: true });
+  assert.deepEqual(gaps.missingNarration, [1, 2, 3, 4, 5]);
+  assert.deepEqual(gaps.missingVisual, [1, 2, 3, 4, 5]);
+
+  // And that is what the client is told — a refusal, never a generic video.
+  const outcome = classifyPlannerOutcome({ payload: null, attempts: 2, sceneCount: 5 });
+  const notice = plannerFailureNotice(outcome);
+  assert.equal(notice.code, PLANNING_FAILED_CODE);
+  assert.match(notice.message, /We didn't make this video\./);
 });
 
-test('template arc: with nothing to work with it refuses instead of inventing', () => {
+test('an empty brief invents nothing either', () => {
   const scenes = parseScenePlan({}, '   ', 30, 'scene');
   assert.equal(scenes.length, 5);
-  for (const s of scenes) {
-    assert.match(
-      s.narration,
-      /could not be turned into a plan/i,
-      'an empty brief must produce an honest refusal, not a confident generic line',
-    );
-  }
+  assert.ok(scenes.every(s => s.narration === '' && s.visualPrompt === ''));
 });
 
 // ─── 7. The invented "family" scene ────────────────────────────────────────
 test('mood: a tone word alone can no longer invent a family scene', () => {
-  const scenes = parseScenePlan({}, EMBER_BRIEF, 30, 'scene');
+  const scenes = parseScenePlan(REAL_PLAN, EMBER_BRIEF, 30, 'scene');
   const mood = 'calm and cinematic: show the candle on a linen-covered table, the wax being hand-poured in a small studio';
   const out = injectMoodIntoVisualPrompts(scenes as any, mood);
 
@@ -242,7 +229,7 @@ test('mood: a tone word alone can no longer invent a family scene', () => {
 });
 
 test('mood: the owner\'s stressed-then-relaxing sequence still works when it is actually stated', () => {
-  const scenes = parseScenePlan({}, EMBER_BRIEF, 30, 'scene');
+  const scenes = parseScenePlan(REAL_PLAN, EMBER_BRIEF, 30, 'scene');
   const out = injectMoodIntoVisualPrompts(
     scenes as any,
     'someone stressed and overworked at a desk, then relaxing with family',
