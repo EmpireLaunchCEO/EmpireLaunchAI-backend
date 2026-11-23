@@ -65,7 +65,7 @@ export class PaidCallBlockedError extends Error {
     this.name = 'PaidCallBlockedError';
     // The client's words: what stopped, that nothing else was bought, and that
     // their quota is intact. Never a bare provider error.
-    this.clientMessage = `This video stopped because an earlier step failed (${reason}). Nothing further was generated and nothing was charged to your weekly quota.`;
+    this.clientMessage = `This video stopped because an earlier step failed (${reason}). No video was made.`;
   }
 }
 

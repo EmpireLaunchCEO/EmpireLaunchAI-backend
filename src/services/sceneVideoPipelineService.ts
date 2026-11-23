@@ -3818,7 +3818,7 @@ export function componentsNotPlacedNotice(missing: string[]): ComponentsFailure 
     code: COMPONENTS_NOT_PLACED_CODE,
     message:
       `We didn't make this video. These parts of your brief could not be placed into a scene: ${quoted}. ` +
-      'Nothing was rendered, so nothing was charged. Your brief is saved \u2014 tell us in chat where those ' +
+      'Nothing was rendered. Your brief is saved \u2014 tell us in chat where those ' +
       'belong (which scene, or what they should look like) and we will try again.',
     detail: `components could not be placed after the planner checklist + one repair pass: ${items.join(' | ')}`,
     missing: items,
@@ -3931,7 +3931,7 @@ export class CostPreflightFailedError extends Error {
     this.name = 'CostPreflightFailedError';
     this.projectId = projectId;
     this.check = preflight.check;
-    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} Nothing was generated and nothing was charged to your weekly quota.`;
+    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} No video was made.`;
   }
 }
 
