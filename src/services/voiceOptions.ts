@@ -38,10 +38,84 @@ export type VoiceGender = (typeof VOICE_GENDERS)[number];
 export const VOICE_TONES = ['enthusiastic', 'calm', 'serious', 'warm', 'auto'] as const;
 export type VoiceTone = (typeof VOICE_TONES)[number];
 
+/**
+ * THE VOICE CATALOGUE (owner, 23 Nov: "there is gender selection ... There also
+ * needs to be a Tone selection ... what could we put so they can choose once
+ * gender and tone is selected for them to hear the different voices they have to
+ * choose from?"). ONE source of truth: the picker's cards, the sample route's
+ * validation and `resolveVoice` all read this list, so a voice can never be
+ * offered and then silently swapped for another.
+ *
+ * GENDER SPLIT IS MEASURED, NOT GUESSED — it is the same split asserted by
+ * measured f0 in `__tests__/voiceOptions.test.ts` (ash is male-presenting: the
+ * owner's recorded MP4 measured median f0 131.1 Hz). Never move a voice across.
+ *
+ * `character` is ONLY what the ~4s sample clip can back up — pace, brightness,
+ * steadiness. No accent, no mood, no "documentary": we cannot hear that in the
+ * clip, so we do not claim it.
+ */
+export interface VoiceCatalogueEntry {
+  id: GptAudioVoice;
+  gender: VoiceGender;
+  name: string;
+  character: string;
+}
+
+export const VOICE_CATALOGUE: readonly VoiceCatalogueEntry[] = [
+  { id: 'nova', gender: 'female', name: 'Nova', character: 'bright, upbeat' },
+  { id: 'shimmer', gender: 'female', name: 'Shimmer', character: 'lively, expressive' },
+  { id: 'sage', gender: 'female', name: 'Sage', character: 'calm, steady' },
+  { id: 'coral', gender: 'female', name: 'Coral', character: 'warm, clear' },
+  { id: 'ballad', gender: 'female', name: 'Ballad', character: 'soft, measured' },
+  { id: 'echo', gender: 'male', name: 'Echo', character: 'confident, clear' },
+  { id: 'verse', gender: 'male', name: 'Verse', character: 'young, energetic' },
+  { id: 'fable', gender: 'male', name: 'Fable', character: 'light, cheerful' },
+  { id: 'onyx', gender: 'male', name: 'Onyx', character: 'deep, steady' },
+  { id: 'ash', gender: 'male', name: 'Ash', character: 'firm, direct' },
+  { id: 'alloy', gender: 'male', name: 'Alloy', character: 'even, neutral' },
+] as const;
+
+/** Human labels for the gender step. */
+export const VOICE_GENDER_LABELS: Record<VoiceGender, string> = { female: 'Female', male: 'Male' };
+
+/** Human labels for the tone step (the delivery direction, not the character). */
+export const VOICE_TONE_LABELS: Record<VoiceTone, string> = {
+  enthusiastic: 'Enthusiastic',
+  calm: 'Calm',
+  serious: 'Serious',
+  warm: 'Warm',
+  auto: 'Auto',
+};
+
+/** The picker's default card: no explicit voice — today's gender+tone behaviour. */
+export const AUTO_VOICE_CHOICE = 'auto';
+
+/** The voices offered for one gender, in catalogue order. */
+export function voicesForGender(gender: VoiceGender): VoiceCatalogueEntry[] {
+  return VOICE_CATALOGUE.filter((v) => v.gender === gender);
+}
+
+/** True when `value` names a voice this product can actually speak with. */
+export function isCatalogueVoice(value: unknown): value is GptAudioVoice {
+  return typeof value === 'string' && VOICE_CATALOGUE.some((v) => v.id === value);
+}
+
+/** The catalogue entry for a voice id, or undefined when it is not one of ours. */
+export function catalogueVoice(id: string): VoiceCatalogueEntry | undefined {
+  return VOICE_CATALOGUE.find((v) => v.id === id);
+}
+
 /** Voiceover config accepted by all three pipelines (optional — omit to skip/use default). */
 export interface VoiceoverConfig {
   gender?: VoiceGender;
   tone?: VoiceTone;
+  /**
+   * The voice the client PICKED (owner, 23 Nov). Absent or `'auto'` = today's
+   * behaviour exactly: gender+tone choose the voice, unchanged for every existing
+   * caller and for the launch gate. When present it wins — tone then only shapes
+   * how that voice reads.
+   */
+  voice?: GptAudioVoice | typeof AUTO_VOICE_CHOICE;
 }
 
 /**
@@ -59,7 +133,17 @@ export interface VoiceoverConfig {
  * `tone === 'auto'` (or unknown tone) falls back to a gender default, which the
  * pipeline may leave as the model's natural delivery to "match the video's vibe".
  */
-export function resolveVoice(gender?: VoiceGender, tone?: VoiceTone): GptAudioVoice {
+export function resolveVoice(
+  gender?: VoiceGender,
+  tone?: VoiceTone,
+  voice?: GptAudioVoice | typeof AUTO_VOICE_CHOICE | null,
+): GptAudioVoice {
+  // AN EXPLICIT VOICE WINS (owner, 23 Nov). The client picked the character; the
+  // tone now only shapes HOW it reads (ttsToneInstruction / read-aloud direction).
+  // Anything not in the catalogue is not a choice we can honour, so it falls back
+  // to the gender+tone behaviour below — the route rejects it with a 400 first, so
+  // a real request never reaches here with a stray value.
+  if (voice && voice !== AUTO_VOICE_CHOICE && isCatalogueVoice(voice)) return voice;
   const g = gender === 'male' ? 'male' : 'female';
   const t = tone && tone !== 'auto' ? tone : null;
 
@@ -145,7 +229,7 @@ export function gptAudioPayload(
   return {
     model: 'gpt-audio',
     modalities: ['text', 'audio'],
-    audio: { voice: voiceover ? resolveVoice(voiceover.gender, voiceover.tone) : DEFAULT_VOICE, format: 'mp3' },
+    audio: { voice: voiceover ? resolveVoice(voiceover.gender, voiceover.tone, voiceover.voice) : DEFAULT_VOICE, format: 'mp3' },
     messages: [{ role: 'user', content: text }],
   };
 }
@@ -177,4 +261,67 @@ export function resolveDeliveryTone(tone?: VoiceTone, mood?: string): VoiceTone 
     playful: 'enthusiastic',
   };
   return byMood[m as FacelessMood] ?? 'auto';
+}
+
+/** One card in the picker: the voice, two or three words of character, and the
+ *  URL that plays ~4s of THAT voice in the tone the client chose. */
+export interface VoiceCatalogueCard {
+  id: GptAudioVoice;
+  name: string;
+  character: string;
+  /** Relative to the API host — the tone is appended by the picker as ?tone=… */
+  sampleUrl: string;
+}
+
+export interface VoiceCataloguePayload {
+  genders: { id: VoiceGender; label: string; voices: VoiceCatalogueCard[] }[];
+  tones: { id: VoiceTone; label: string }[];
+  defaultVoice: typeof AUTO_VOICE_CHOICE;
+}
+
+/** The sample URL for a voice (tone is a query param the picker adds). */
+export function voiceSampleUrl(voice: GptAudioVoice): string {
+  return `/api/voices/${voice}/sample`;
+}
+
+/**
+ * `GET /api/voices` — the picker's whole catalogue, built from the one list
+ * above. No provider call, no DB read: this route can never cost anything.
+ */
+export function voiceCataloguePayload(): VoiceCataloguePayload {
+  return {
+    genders: VOICE_GENDERS.map((gender) => ({
+      id: gender,
+      label: VOICE_GENDER_LABELS[gender],
+      voices: voicesForGender(gender).map((v) => ({
+        id: v.id,
+        name: v.name,
+        character: v.character,
+        sampleUrl: voiceSampleUrl(v.id),
+      })),
+    })),
+    tones: VOICE_TONES.map((tone) => ({ id: tone, label: VOICE_TONE_LABELS[tone] })),
+    defaultVoice: AUTO_VOICE_CHOICE,
+  };
+}
+
+/**
+ * Read a client's PICKED voice off a request. Three outcomes, and no fourth:
+ *   - absent / empty / 'auto' → `{ ok: true, voice: undefined }` — today's
+ *     gender+tone behaviour, unchanged (the picker's default card);
+ *   - a voice in the catalogue → that voice;
+ *   - anything else → `{ ok: false }` with the real list, so the route answers 400.
+ * NEVER a silent swap: a voice she did not choose is not a voice she chose.
+ */
+export function parseVoiceChoice(
+  raw: unknown,
+): { ok: true; voice?: GptAudioVoice } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true };
+  const value = String(raw).trim().toLowerCase();
+  if (value === '' || value === AUTO_VOICE_CHOICE) return { ok: true };
+  if (isCatalogueVoice(value)) return { ok: true, voice: value };
+  return {
+    ok: false,
+    error: `Unknown voice "${String(raw)}". Available voices: ${VOICE_CATALOGUE.map((v) => v.id).join(', ')}.`,
+  };
 }

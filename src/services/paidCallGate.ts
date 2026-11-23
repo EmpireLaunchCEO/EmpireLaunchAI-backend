@@ -129,3 +129,19 @@ export function __resetPaidCallAttempts(): void {
 export function __resetPaidFailures(): void {
   firstFailure.clear();
 }
+
+/**
+ * IS A VIDEO RENDERING RIGHT NOW?
+ * (owner, 23 Nov — the voice picker's ~4s samples are paid gpt-audio calls)
+ *
+ * A sample is bought by a route, not by a video: it must never be spent inside a
+ * render's window, and its cost must stay separable from a video's. `processProject`
+ * brackets its whole run with `beginRenderRun`/`endRenderRun` (a try/finally, so a
+ * throw closes it too), and the sample route asks this BEFORE its paid call and
+ * answers "a video is rendering, try again in a minute" instead of spending.
+ */
+let activeRenders = 0;
+
+export function beginRenderRun(): void { activeRenders += 1; }
+export function endRenderRun(): void { activeRenders = Math.max(0, activeRenders - 1); }
+export function renderInProgress(): boolean { return activeRenders > 0; }

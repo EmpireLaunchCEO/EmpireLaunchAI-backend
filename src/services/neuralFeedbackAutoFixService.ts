@@ -10,6 +10,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { r2Storage } from './r2StorageService.js';
 import { renderClip, concatClips, runRenderQC, generateSceneAudio } from './sceneVideoPipelineService.js';
+import { isCatalogueVoice, type GptAudioVoice } from './voiceOptions.js';
 import {
   classifyFeedback, classifyFeedbackIntents, parseLineChange, matchLineToScene,
   r2KeyFromUrl, detectRepetitiveScenes, hammingDistance, normalizeNarration,
@@ -262,6 +263,7 @@ async function remixLineChange(
   userId: string,
   projectVoice: 'female' | 'male' | undefined,
   projectTone: 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined,
+  projectVoiceId: GptAudioVoice | undefined,
   projectMood: string | undefined,
   lineChange: { sceneNumber?: number; oldText?: string; newText?: string },
 ): Promise<
@@ -302,7 +304,7 @@ async function remixLineChange(
     // CONTENT HYGIENE (owner Sep 28): the user's edited line is THEIR finished
     // copy — allowPlanSpeak:true voices it verbatim (the hygiene guard only
     // rewrites auto-generated plan-speak, never a deliberate user edit).
-    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone, { allowPlanSpeak: true, mood: projectMood });
+    const audio = await generateSceneAudio(lineChange.newText, userId, target.id, projectVoice, projectTone, { allowPlanSpeak: true, mood: projectMood, voiceId: projectVoiceId });
     if (!audio?.localPath) {
       return { error: 'audio_failed', reason: 'could not regenerate the edited line audio', lineChange: { sceneNumber: match.sceneNumber, oldText: match.narration, newText: lineChange.newText } };
     }
@@ -553,9 +555,12 @@ export async function submitNeuralFeedbackAndAutoFix(opts: {
     const projectTone = pmeta.tone as 'enthusiastic' | 'calm' | 'serious' | 'warm' | 'auto' | undefined;
     // MOOD REACHES THE VOICE (owner Nov 12): a re-voiced line must keep the read
     // the client picked — same mood-derived delivery as the original render.
+    // THE PICKED VOICE (owner, 23 Nov): a re-voiced line must stay in the voice
+    // the client chose — otherwise one edited line comes back in a different voice.
+    const projectVoiceId: GptAudioVoice | undefined = isCatalogueVoice(pmeta.voiceId) ? pmeta.voiceId : undefined;
     const projectMood = typeof pmeta.mood === 'string' && pmeta.mood.trim() !== '' ? pmeta.mood : undefined;
 
-    const lcResult = await remixLineChange(projectId, userId, projectVoice, projectTone, projectMood, lineChange);
+    const lcResult = await remixLineChange(projectId, userId, projectVoice, projectTone, projectVoiceId, projectMood, lineChange);
     if ('error' in lcResult) {
       if (lcResult.error === 'line_not_found') {
         return { status: 'line_not_found', intent, reason: lcResult.reason, lineChange: lcResult.lineChange };
