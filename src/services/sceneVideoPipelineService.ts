@@ -2373,6 +2373,41 @@ const PCT_OFF_RE = /\b\d{1,3}\s?%\s?off\b/gi;
 function normalizeComponent(raw: string): string {
   return String(raw || '').replace(/\u2019/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/\s+/g, ' ').trim();
 }
+/** Dedupe key: case- and punctuation-insensitive, so "Teal palette." and
+ *  "teal palette" are one statement. */
+function componentKey(raw: string): string {
+  return normalizeComponent(raw).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+/** How much of the LONGER statement the shorter one has to cover before the two
+ *  count as the same statement. Below this the shorter one merely MENTIONS part of
+ *  the longer one. */
+const DEDUPE_COVERAGE = 0.7;
+/**
+ * ARE THESE TWO THE SAME STATEMENT? (owner Nov 27 - her brand was being eaten.)
+ *
+ * The Nov-18 dedupe removed near-identical restatements and the synthesised
+ * "EmpireLaunchAi - the This platform is a must have..." splice, where the shorter
+ * form covers essentially ALL of the longer one. It was implemented as a bare
+ * substring test, so a 6-character canonical token inside a 58-character clause
+ * ("TikTok" inside "Beadwick & Co sells handmade bracelets on TikTok for $9.99")
+ * counted as a duplicate and the whole clause - her BRAND NAME and all - was
+ * thrown away. A containment test is not an equality test.
+ *
+ * So containment is PROPORTIONAL: the shorter statement must cover the large
+ * majority of the longer one's words and characters. A clause that merely mentions
+ * a token is kept alongside it.
+ */
+function isSameStatement(a: string, b: string): boolean {
+  const ka = componentKey(a);
+  const kb = componentKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  const [shorter, longer] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+  if (!longer.includes(shorter)) return false;
+  const wordCoverage = shorter.split(' ').length / longer.split(' ').length;
+  const charCoverage = shorter.replace(/ /g, '').length / longer.replace(/ /g, '').length;
+  return wordCoverage >= DEDUPE_COVERAGE || charCoverage >= DEDUPE_COVERAGE;
+}
 /** Deterministically split free text into short, concrete component chunks. */
 function chunkText(text: string): string[] {
   const out: string[] = [];
@@ -2426,11 +2461,8 @@ export function buildComponentInventory(input: ComponentInventoryInput): string[
     // shortest form. This is what removes "This platform will be all you need"
     // (contained in the longer clause) and the synthesised "EmpireLaunchAi — the
     // This platform is a must have…" splice, which no plan could ever contain.
-    const lower = v.toLowerCase();
-    const dup = out.findIndex(o => {
-      const lo = o.toLowerCase();
-      return lo === lower || lo.includes(lower) || lower.includes(lo);
-    });
+    // PROPORTIONAL, never bare substring (owner Nov 27): see isSameStatement.
+    const dup = out.findIndex(o => isSameStatement(o, v));
     if (dup !== -1) {
       if (out[dup].length <= v.length) return;
       out[dup] = v;

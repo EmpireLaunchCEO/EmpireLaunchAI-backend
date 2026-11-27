@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildComponentInventory,
+  buildStyleGuidance,
   verifyComponentsInScript,
   verifyArcCoverage,
   normalizePlanTimeBudget,
@@ -20,6 +21,7 @@ import {
   deliveredVideoDurationSeconds,
   dissolveCompensatedSceneSum,
   type SceneScript,
+  type ComponentInventoryInput,
 } from '../sceneVideoPipelineService.js';
 
 const scene = (n: number, d: number, visualPrompt: string, narration = ''): SceneScript => ({
@@ -37,19 +39,26 @@ test('buildComponentInventory: explicit components preserved, deduped case-insen
 });
 
 test('buildComponentInventory: reads USER turns only (assistant framing stripped) and extracts tokens', () => {
-  const inventory = buildComponentInventory({
+  const input: ComponentInventoryInput = {
     components: [],
     cleanBrief: 'Handmade beaded bracelets from our shop',
     conversation: [
       { role: 'assistant', content: "I'll refine the script for you, tap the wand to generate." },
       { role: 'user', content: 'Our shop Beadwick & Co sells handmade bracelets on TikTok for $9.99 with a teal palette. Follow @beadwick to save this.' },
     ],
-  });
+  };
+  const inventory = buildComponentInventory(input);
   // Canonical tokens from the user's relayed components:
   assert.ok(inventory.some(c => c.toLowerCase() === 'tiktok'), 'platform token TikTok');
-  assert.ok(inventory.some(c => c.toLowerCase() === 'teal'), 'color token teal');
   assert.ok(inventory.some(c => c.toLowerCase() === '$9.99'), 'price token $9.99');
   assert.ok(inventory.some(c => c.toLowerCase() === 'follow @beadwick'), 'CTA wording Follow @beadwick');
+  // A COLOUR IS STYLE GUIDANCE, NOT A SPOKEN COMPONENT (owner Nov 18): it is dropped
+  // from the inventory on purpose and reaches the planner through buildStyleGuidance.
+  assert.ok(!inventory.some(c => c.toLowerCase() === 'teal'), 'a colour is not a spoken component');
+  assert.ok(
+    buildStyleGuidance(input).some(c => c.toLowerCase() === 'teal'),
+    `the colour still reaches the planner as style guidance (got: ${buildStyleGuidance(input).join(' | ')})`,
+  );
   // The subject/concept chunk from the user turn:
   assert.ok(inventory.some(c => c.toLowerCase().includes('beadwick & co')), 'brief chunk carries Beadwick & Co');
   // Assistant/consultant framing is NOT part of the inventory:
@@ -64,6 +73,68 @@ test('buildComponentInventory: reads the clean brief, extracts "20% off" offer',
   });
   assert.ok(inventory.some(c => c.toLowerCase() === '20% off'), 'percent-off offer token');
   assert.ok(inventory.some(c => c.toLowerCase().includes('soothe & smoke')), 'brief chunk carries the brand');
+});
+
+test('buildComponentInventory: a clause that merely MENTIONS a token is not a duplicate — her BRAND survives', () => {
+  // THE DEFECT (owner Nov 27): the Nov-18 containment dedupe was a bare substring
+  // test, so a canonical token pushed first ("TikTok", "20% off") swallowed the
+  // whole clause that mentioned it — and her brand name with it. The inventory is
+  // the must-say list the gate enforces, so nothing made the video say her name.
+  const bracelets = buildComponentInventory({
+    components: [],
+    cleanBrief: '',
+    conversation: [{ role: 'user', content: 'Beadwick & Co sells handmade bracelets on TikTok for $9.99.' }],
+  });
+  assert.ok(bracelets.some(c => c.toLowerCase() === 'tiktok'), `the platform token is kept (got: ${bracelets.join(' | ')})`);
+  assert.ok(bracelets.some(c => c.toLowerCase() === '$9.99'), 'the price token is kept');
+  assert.ok(
+    bracelets.some(c => c.toLowerCase().includes('beadwick & co')),
+    `her BRAND survives next to TikTok and $9.99 (got: ${bracelets.join(' | ')})`,
+  );
+
+  const candles = buildComponentInventory({
+    components: [],
+    cleanBrief: 'Soothe & Smoke apothecary candles, 20% off this week.',
+    conversation: [],
+  });
+  assert.ok(candles.some(c => c.toLowerCase() === '20% off'), 'the offer token is kept');
+  assert.ok(
+    candles.some(c => c.toLowerCase().includes('soothe & smoke')),
+    `her BRAND survives next to 20% off (got: ${candles.join(' | ')})`,
+  );
+
+  // CONTROL — with no token in the sentence the brand always survived, so the two
+  // fixtures above fail only because of the containment dedupe.
+  assert.deepEqual(
+    buildComponentInventory({ components: [], cleanBrief: 'Soothe & Smoke candles', conversation: [] }),
+    ['Soothe & Smoke candles'],
+  );
+
+  // NEGATIVE CONTROL — a GENUINE restatement is still one component, so the fix is
+  // not "delete the dedupe": the splice that broke her 18 Nov video is still gone
+  // and the client's own shortest form is the one kept.
+  const splice = buildComponentInventory({
+    components: [],
+    cleanBrief: '',
+    conversation: [
+      {
+        role: 'user',
+        content:
+          'EmpireLaunchAi \u2014 the This platform is a must have cor content creation. ' +
+          'This platform is a must have cor content creation.',
+      },
+    ],
+  });
+  assert.equal(
+    splice.some(c => /^empirelaunch\s*ai\s*[\u2014-]\s*the/i.test(c)),
+    false,
+    `the synthesised essence splice is still removed (got: ${splice.join(' | ')})`,
+  );
+  assert.deepEqual(
+    splice,
+    ['This platform is a must have cor content creation.'],
+    'the client\'s own shortest form is the one kept — and nothing else',
+  );
 });
 
 test('buildComponentInventory: bounded to the 14-item cap', () => {
