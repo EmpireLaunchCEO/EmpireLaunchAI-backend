@@ -227,6 +227,36 @@ test('CROSS-TENANT: the Studio routes refuse an unauthenticated caller', async (
   assert.equal(list.status, 401);
 });
 
+test('CROSS-TENANT: ?userId= is not identity — a session cannot borrow another user id', async () => {
+  const { token } = await createSession(USER_A, 'authRequired.test');
+
+  // A's real session token, but B's user id in the query. The id is ignored, so
+  // B's project is simply not A's and answers the same 404 as an unknown id.
+  const borrowed = await request(`/api/studio/video/${PROJECT_B}/stream?userId=${USER_B}`, { token });
+  assert.equal(borrowed.status, 404);
+  assert.equal(JSON.stringify(borrowed.body).includes('B private video'), false);
+
+  // …and the same query with no session at all is refused outright.
+  const noToken = await request(`/api/studio/video/${PROJECT_B}/stream?userId=${USER_B}`);
+  assert.equal(noToken.status, 401);
+  assert.equal(noToken.body.error, 'AUTH_REQUIRED');
+});
+
+test('the <video> door: ?token= is the session, a user id in ?token= is not', async () => {
+  const { token } = await createSession(USER_B, 'authRequired.test');
+
+  // A browser <video src> cannot send a header, so the token rides in the query.
+  // Reaching the project at all (not 401) is the proof the token authenticated.
+  const viaQuery = await request(`/api/studio/video/${PROJECT_B}/stream?token=${token}`);
+  assert.notEqual(viaQuery.status, 401, 'a real session token in ?token= must authenticate');
+  assert.equal(viaQuery.body?.error, 'This video did not finish rendering, so there is no file to play.');
+
+  // B's user id pasted into ?token= is not a session — it is just a typed id.
+  const typedId = await request(`/api/studio/video/${PROJECT_B}/stream?token=${USER_B}`);
+  assert.equal(typedId.status, 401);
+  assert.equal(typedId.body.error, 'AUTH_REQUIRED');
+});
+
 test('master login is REFUSED when OWNER_MASTER_KEYS is unset', async () => {
   const saved = process.env.OWNER_MASTER_KEYS;
   delete process.env.OWNER_MASTER_KEYS;

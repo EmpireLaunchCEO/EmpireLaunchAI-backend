@@ -5,7 +5,8 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { collectApprovalSweepIds } from '../services/deleteApprovalSweep.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
-import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody } from '../services/videoStreamService.js';
+import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody, streamAuthRequiredBody } from '../services/videoStreamService.js';
+import { findSession, sessionTokenFromRequest } from '../services/authSessions.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
@@ -799,10 +800,12 @@ router.get('/download/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const idStr = String(id); // req.params ids are typed string | string[]; downloadFailureBody needs a plain string
-    const uid = (req as any).userId;
-    if (!uid) return res.status(401).json({ error: 'userId required' });
-    const resolvedUserId = await resolveUserId(String(uid));
-    if (!resolvedUserId) return res.status(401).json({ error: 'User not found' });
+    // Identity is the VERIFIED session and nothing else (owner, Nov 27): the
+    // token is checked against `auth_sessions`, and `?userId=` / `x-user-id` are
+    // never read — an id the caller can type is not authentication.
+    const session = await findSession(sessionTokenFromRequest(req));
+    if (!session) return res.status(401).json(streamAuthRequiredBody());
+    const resolvedUserId = session.userId;
 
     // Resolve the underlying media row across BOTH namespaces the Operations
     // page surfaces: single-shot creations AND scene-based video projects.
@@ -867,9 +870,12 @@ router.get('/download/:id', mobileAuth, async (req: Request, res: Response) => {
 // is what a browser checks before it offers a play button.
 //
 // AUTH: OWNERSHIP-SCOPED, exactly like GET /api/studio/download/:id above.
-// A project id is not a credential — user privacy is a non-negotiable, so a
-// caller must say who they are (session userId, ?userId=, or x-user-id) and the
-// project query filters on (id, userId) for that resolved user. A project that
+// A project id is not a credential, and neither is a user id — user privacy is a
+// non-negotiable. Identity comes from ONE place: a real session token verified
+// against `auth_sessions`, sent as `Authorization: Bearer` or as `?token=`
+// (a browser `<video src>` cannot set a header). `?userId=` and `x-user-id` are
+// not read here at all, so knowing someone's user id no longer opens their
+// video. The project query filters on (id, sessionUserId); a project that
 // belongs to someone else answers with the SAME 404 as an unknown id: a 403
 // would confirm the id is real. This route still only reads bytes of one
 // already-rendered project — it never writes, lists, deletes or spends — and no
@@ -877,26 +883,22 @@ router.get('/download/:id', mobileAuth, async (req: Request, res: Response) => {
 router.get('/video/:projectId/stream', mobileAuth, async (req: Request, res: Response) => {
   const projectId = String(req.params.projectId || '');
   try {
-    // 1. Who is asking? Same three doors /download/:id accepts.
-    const uid = (req as any).userId;
-    const identified = authorizeStreamAccess({ rawUid: uid });
+    // 1. Who is asking? Only a session token can answer. `mobileAuth` has
+    //    already refused an unauthenticated caller; this second, explicit check
+    //    against `auth_sessions` means the route cannot be opened by removing
+    //    the middleware, and no typed id can stand in for a session.
+    const session = await findSession(sessionTokenFromRequest(req));
+    const identified = authorizeStreamAccess({ sessionUserId: session?.userId });
     if (identified.kind === 'deny') return res.status(identified.status).json(identified.body);
+    const ownerUserId = identified.userId;
 
-    // 2. Resolve it to a real user row (never with an empty id — resolveUserId
-    //    auto-creates a row for an unknown uuid, so it is only ever called with
-    //    an id the caller actually supplied).
-    const resolvedUserId = await resolveUserId(String(uid));
-    const authorised = authorizeStreamAccess({ rawUid: uid, resolvedUserId });
-    if (authorised.kind === 'deny') return res.status(authorised.status).json(authorised.body);
-    const ownerUserId = authorised.userId; // non-null by construction
-
-    // 3. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
+    // 2. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
     //    which would surface as a 500. Answer the honest 404 instead.
     if (!UUID_RE.test(projectId)) {
       return res.status(404).json(streamNotFoundBody());
     }
 
-    // 4. The project, scoped to the caller. Someone else's project simply does
+    // 3. The project, scoped to the caller. Someone else's project simply does
     //    not exist here — the query cannot return it, so nothing can leak.
     const [project] = await db.select()
       .from(schema.videoProjects)
@@ -906,11 +908,10 @@ router.get('/video/:projectId/stream', mobileAuth, async (req: Request, res: Res
       ))
       .limit(1);
 
-    // 5. Belt and braces: the same gate decides, so an edit that drops the
+    // 4. Belt and braces: the same gate decides, so an edit that drops the
     //    scope from the query above cannot silently reopen the route.
     const ownerCheck = authorizeStreamAccess({
-      rawUid: uid,
-      resolvedUserId: ownerUserId,
+      sessionUserId: ownerUserId,
       projectOwnerId: project?.userId ?? null,
     });
     if (ownerCheck.kind === 'deny') return res.status(ownerCheck.status).json(ownerCheck.body);
