@@ -332,8 +332,16 @@ test('THE GATE: a repaired placement the sanitiser then cleaned is not counted m
     'the gate still blocks an item nothing placed',
   );
 
-  // ...and the decision really is taken on the plan AFTER the sanitiser.
+  // ...and the decision really is taken on the plan AFTER the sanitiser. The gate
+  // moved into the component ladder (blockingGateItems -> resolveGateMissingComponents)
+  // and its verdict reaches the refusal through `gateMissing = stillBlocking`, so BOTH
+  // the resolver call and the refusal's gate must sit after the splice pass. (This is
+  // the assertion that went stale: it looked for a `gateMissing = resolveGate...`
+  // line that the ladder replaced, so it failed on the source, not on the behaviour.)
   const spliceAt = SERVICE_SRC.indexOf('const splicePass = narrationAuthoritative');
-  const gateAt = SERVICE_SRC.indexOf('const gateMissing = resolveGateMissingComponents(');
-  assert.ok(spliceAt > 0 && gateAt > spliceAt, 'the gate is decided after the splice sanitiser');
+  const resolverAt = SERVICE_SRC.indexOf('resolveGateMissingComponents({');
+  const gateAt = SERVICE_SRC.indexOf('const gateMissing = stillBlocking;');
+  assert.ok(spliceAt > 0, 'the splice pass is still in createProject');
+  assert.ok(resolverAt > spliceAt, 'the gate resolver is called after the splice sanitiser');
+  assert.ok(gateAt > spliceAt, 'and the refusal is decided on the plan the sanitiser produced');
 });
