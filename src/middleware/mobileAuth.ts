@@ -1,84 +1,44 @@
-import { Request, Response, NextFunction } from 'express';
-import { db, schema } from '../db/index.js';
-import { eq, and, gt } from 'drizzle-orm';
-import { randomUUID } from 'crypto';
-
 /**
- * Middleware for real token-based authentication.
- * Auto-creates sessions for trusted users so no mock tokens are ever needed.
+ * REAL AUTHENTICATION (owner, Nov 27: "fix authentication first").
+ *
+ * WHAT THIS USED TO DO — and why it was the root privacy defect:
+ *   - a Bearer token that matched no session FELL THROUGH to an auto-provision
+ *     branch that created a user row for `x-user-id` (or a random UUID) and
+ *     minted a session, so an unauthenticated caller was logged in as whatever
+ *     user id they typed;
+ *   - `x-user-id` on its own was accepted as identity.
+ *
+ * WHAT IT DOES NOW:
+ *   - a valid, unexpired session token → `req.userId`, `req.user`, `next()`;
+ *   - EVERYTHING else — no header, a malformed header, an unknown token, an
+ *     expired token, a token that is really a user id, `x-user-id` on its own —
+ *     → `401 { error: 'AUTH_REQUIRED' }`.
+ *
+ * It never creates a user. A request can never turn itself into an account.
  */
+import { Request, Response, NextFunction } from 'express';
+import { findSession, sessionTokenFromRequest } from '../services/authSessions.js';
+
+/** The one refusal body. Nothing about the caller, nothing about what exists. */
+export function authRequiredBody(): { error: string } {
+  return { error: 'AUTH_REQUIRED' };
+}
+
 export const mobileAuth = async (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  const userIdFromHeader = req.headers['x-user-id'] as string;
-  const { users } = schema;
-
-  const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-  // If a token is provided, look it up in the database
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-
-    try {
-      const [user] = await db.select()
-        .from(users)
-        .where(and(
-          eq(users.mobileSessionToken, token),
-          gt(users.mobileSessionExpiresAt, new Date())
-        ))
-        .limit(1);
-
-      if (user) {
-        (req as any).userId = user.id;
-        (req as any).user = user;
-        return next();
-      }
-    } catch (err) {
-      console.error('[mobileAuth] Database error:', err);
-    }
-
-    // Token was provided but invalid/expired — fall through to auto-create a session
-    // (This handles the case where the frontend generated a client-side UUID token)
-  }
-
-  // Auto-create a session — use provided userId or generate a new one
-  const finalUserId = userIdFromHeader || randomUUID();
-  const newToken = randomUUID();
-  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+  const token = sessionTokenFromRequest(req);
+  if (!token) return res.status(401).json(authRequiredBody());
 
   try {
-    // Check if user exists
-    const [existingUser] = await db.select().from(users).where(eq(users.id, finalUserId)).limit(1);
+    const session = await findSession(token);
+    if (!session) return res.status(401).json(authRequiredBody());
 
-    if (existingUser) {
-      // Update with new session token
-      await db.update(users)
-        .set({
-          mobileSessionToken: newToken,
-          mobileSessionExpiresAt: expiresAt,
-          updatedAt: new Date()
-        })
-        .where(eq(users.id, finalUserId));
-    } else {
-      // Create user with session — generate placeholder email for auto-provisioned users
-      await db.insert(users).values({
-        id: finalUserId,
-        email: `${finalUserId}@user.empirelaunch.ai`,
-        mobileSessionToken: newToken,
-        mobileSessionExpiresAt: expiresAt,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-    }
-
-    // Return the new token in the response header so the frontend can store it
-    res.setHeader('X-Session-Token', newToken);
-    res.setHeader('X-Session-Expires', expiresAt.toISOString());
-
-    (req as any).userId = finalUserId;
-    (req as any).user = { id: finalUserId, mobileSessionToken: newToken };
+    (req as any).userId = session.userId;
+    (req as any).user = session.user;
     return next();
   } catch (err) {
-    console.error('[mobileAuth] Session creation error:', err);
-    return res.status(500).json({ error: 'Failed to create session' });
+    // A database outage is not a credential problem: answering 401 here would
+    // silently sign every client out. Say the check is unavailable instead.
+    console.error('[mobileAuth] session lookup failed:', (err as Error)?.message || err);
+    return res.status(503).json({ error: 'AUTH_UNAVAILABLE' });
   }
 };

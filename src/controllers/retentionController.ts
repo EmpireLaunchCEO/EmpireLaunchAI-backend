@@ -4,7 +4,7 @@ import { retentionService } from '../services/retentionService.js';
 export class RetentionController {
   async getDrafts(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       const drafts = await retentionService.getInboxDrafts(userId);
       res.json(drafts);
     } catch (error: any) {
@@ -14,7 +14,7 @@ export class RetentionController {
 
   async respond(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       const { id, status } = req.body;
       if (!id || !status) {
         return res.status(400).json({ error: 'id and status are required' });
@@ -28,7 +28,7 @@ export class RetentionController {
 
   async triggerScan(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       await retentionService.scanAndGenerateDrafts(userId);
       res.json({ status: 'success', message: 'Retention scan complete' });
     } catch (error: any) {

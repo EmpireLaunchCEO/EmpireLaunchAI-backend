@@ -7,7 +7,7 @@ import { integrationService } from '../services/integrationService.js';
 
 export const listGmailMessages = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const credentials = await integrationService.getCredentials(userId, 'gmail');
     if (!credentials || !credentials.access_token) {
       return res.status(401).json({ error: 'Gmail not integrated' });
@@ -23,7 +23,7 @@ export const listGmailMessages = async (req: Request, res: Response) => {
 
 export const getGmailMessage = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { messageId } = req.params;
     if (!messageId || typeof messageId !== 'string') {
         return res.status(400).json({ error: 'Invalid messageId' });
@@ -43,7 +43,7 @@ export const getGmailMessage = async (req: Request, res: Response) => {
 
 export const sendGmailEmail = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { to, subject, body } = req.body;
     const credentials = await integrationService.getCredentials(userId, 'gmail');
     if (!credentials || !credentials.access_token) {

@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 
 export const syncMetaCatalog = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { catalogId } = req.body;
 
     if (!catalogId) {
@@ -31,7 +31,7 @@ export const syncMetaCatalog = async (req: Request, res: Response) => {
 
 export const syncTikTokShop = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
 
     const userProducts = await db.select().from(products).where(eq(products.userId, userId));
 
@@ -49,7 +49,7 @@ export const syncTikTokShop = async (req: Request, res: Response) => {
 
 export const getMetaCatalogs = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const catalogs = await metaCatalogService.getCatalogs(userId);
     res.json(catalogs);
   } catch (error: any) {

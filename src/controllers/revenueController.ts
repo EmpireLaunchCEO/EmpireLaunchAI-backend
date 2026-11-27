@@ -4,7 +4,7 @@ import { revenueService } from '../services/revenueService.js';
 
 export const getInfrastructureBalances = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const balances = await infrastructureService.getAllBalances();
     res.json(balances);
   } catch (error: any) {
@@ -15,7 +15,7 @@ export const getInfrastructureBalances = async (req: Request, res: Response) => 
 
 export const getRevenueSummary = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const summary = await revenueService.getAggregateRevenue(userId);
     res.json(summary);
   } catch (error: any) {

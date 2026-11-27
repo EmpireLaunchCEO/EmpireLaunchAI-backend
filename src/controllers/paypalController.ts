@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 
 export const onboardUser = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const returnUrl = `${process.env.FRONTEND_URL}/paypal/callback?userId=${userId}`;
     
     const { onboardingUrl } = await paypalService.generateOnboardingLink(userId, returnUrl);
@@ -34,7 +34,7 @@ export const callback = async (req: Request, res: Response) => {
 
 export const getAccountStatus = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
 
     res.json({

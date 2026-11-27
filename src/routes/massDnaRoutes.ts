@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { massDnaHarvester } from '../services/massDnaHarvestWorker.js';
 import { dnaVaultService } from '../services/dnaVaultService.js';
 import { canvaDnaHarvesterService } from '../services/canvaDnaHarvesterService.js';
+import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
 
@@ -38,7 +39,7 @@ router.get('/stats', async (req: Request, res: Response) => {
  * POST /api/mass-dna/start
  * Manually trigger the mass DNA ingestion worker.
  */
-router.post('/start', async (req: Request, res: Response) => {
+router.post('/start', mobileAuth, async (req: Request, res: Response) => {
   try {
     const stats = massDnaHarvester.getStats();
     if (stats.isRunning) {
@@ -60,9 +61,9 @@ router.post('/start', async (req: Request, res: Response) => {
  * Logs into Canva via Playwright using saved credentials and browses
  * trending free/public templates across 14 categories (no Pro dependency).
  */
-router.post('/canva-gallery-harvest', async (req: Request, res: Response) => {
+router.post('/canva-gallery-harvest', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.body.userId || 'system';
+    const userId = (req as any).userId;
     res.json({ success: true, message: 'Canva gallery harvest starting...' });
 
     // Fire-and-forget: harvest runs asynchronously
@@ -82,10 +83,10 @@ router.post('/canva-gallery-harvest', async (req: Request, res: Response) => {
  * Body: { targetStrands?: number } — defaults to 1,000,000
  * Runs asynchronously (fire-and-forget) — check /stats for progress.
  */
-router.post('/continuous-canva-harvest', async (req: Request, res: Response) => {
+router.post('/continuous-canva-harvest', mobileAuth, async (req: Request, res: Response) => {
   try {
     const targetStrands = req.body.targetStrands || 1_000_000;
-    const userId = (req as any).userId || req.body.userId || 'system';
+    const userId = (req as any).userId;
 
     // Find the actual Canva-linked user
     const { db, schema } = await import('../db/index.js');

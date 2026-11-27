@@ -19,6 +19,24 @@ export const users = pgTable('users', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+/**
+ * Real sessions (auth brief, Nov 27). One row per signed-in device.
+ *
+ * The raw token is returned to the caller ONCE, at login/register/master-login,
+ * and never stored: only its SHA-256 hex digest lives here. A stolen database
+ * therefore contains no usable token, and a token that merely looks like a user
+ * id cannot authenticate anybody.
+ */
+export const authSessions = pgTable('auth_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  userAgent: text('user_agent'),
+});
+
 export const products = pgTable('products', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),

@@ -1,20 +1,22 @@
 import { Router } from 'express';
 import { db } from '../db/index.js';
-import { 
+import {
   registerUser,
   loginUser,
+  logoutUser,
   acceptTerms,
   redeemKey,
   masterLogin,
-  getEtsyAuthUrl, 
-  etsyCallback, 
-  getMetaAuthUrl, 
+  getEtsyAuthUrl,
+  etsyCallback,
+  getMetaAuthUrl,
   metaCallback,
   getTikTokAuthUrl,
   tiktokCallback,
   getPlatformAuthUrl,
   handlePlatformCallback,
 } from '../controllers/authController.js';
+import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
 
@@ -33,22 +35,27 @@ router.get('/debug-db', async (req, res) => {
   }
 });
 router.post('/login', loginUser);
-router.post('/terms/accept', acceptTerms);
+// Revokes the caller's own session row. Behind mobileAuth, so only a real
+// signed-in session can end itself.
+router.post('/logout', mobileAuth, logoutUser);
+router.post('/terms/accept', mobileAuth, acceptTerms);
 router.post('/redeem-key', redeemKey);
 router.post('/master-login', masterLogin);
 
-// ─── UNIVERSAL GATEWAY (High-Trust OAuth flows) ──────────────────
-// Platform-specific URL generation: GET/POST /api/auth/:platform/url
-// Platform-specific callback:    GET/POST /api/auth/:platform/callback
-router.all('/:platform/url', getPlatformAuthUrl);
+// ─── PUBLIC OAUTH DOORS ─────────────────────────────────────────
+// `/:platform/url` needs a signed-in session (it mints an OAuth session for
+// that user), so it sits behind mobileAuth. `/:platform/callback` is a browser
+// redirect from the platform and carries no headers: the user is resolved from
+// the OAuth session row that `sessionId` / `state` identifies.
+router.all('/:platform/url', mobileAuth, getPlatformAuthUrl);
 router.all('/:platform/callback', handlePlatformCallback);
 
 // ─── LEGACY COMPATIBILITY (will be deprecated) ──────────────────
-router.post('/etsy/url', getEtsyAuthUrl);
+router.post('/etsy/url', mobileAuth, getEtsyAuthUrl);
 router.post('/etsy/callback', etsyCallback);
-router.get('/meta/url', getMetaAuthUrl);
+router.get('/meta/url', mobileAuth, getMetaAuthUrl);
 router.post('/meta/callback', metaCallback);
-router.get('/tiktok/url', getTikTokAuthUrl);
+router.get('/tiktok/url', mobileAuth, getTikTokAuthUrl);
 router.post('/tiktok/callback', tiktokCallback);
 
 export default router;

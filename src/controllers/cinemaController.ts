@@ -49,21 +49,13 @@ export const upload = multer({
 // ─── Controller ─────────────────────────────────────────────────────────────
 
 /**
- * Resolve the acting user id for unauthenticated cinema flows. These routes
- * are intentionally fail-open (the Studio boxes call them before auth), so we
- * pull the real user from the transport the frontend actually sends: the
- * `x-user-id` header, or body/query `userId`. Without it we'd always persist
- * Neural Twin / enhanced creations under the sentinel `system`/`anonymous`,
- * which never surfaces on the Operations page.
+ * Resolve the acting user id. Every cinema route now sits behind `mobileAuth`,
+ * so the identity is the verified session and nothing else — never a header or
+ * a body field the caller can type (owner, Nov 27).
  */
 function resolveUserId(req: Request): string {
-  const fromAuth = (req as any).user?.id;
-  const fromBody = (req as any).body?.userId;
-  const fromQuery = (req as any).query?.userId as string | undefined;
-  const fromHeader = (req as any).headers?.['x-user-id'] as string | undefined;
-  const uid = fromAuth || fromBody || fromQuery || fromHeader || '';
-  const sentinels = /^(system|anonymous|)$/i;
-  return sentinels.test(String(uid).trim()) ? '' : String(uid).trim();
+  const uid = (req as any).userId;
+  return typeof uid === 'string' ? uid.trim() : '';
 }
 export class CinemaController {
 

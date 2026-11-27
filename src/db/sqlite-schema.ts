@@ -19,6 +19,17 @@ export const users = sqliteTable('users', {
   mobileSessionExpiresAt: integer('mobile_session_expires_at', { mode: 'timestamp' }),
 });
 
+/** Real sessions (mirror of the pg `auth_sessions` table). Raw token is never stored. */
+export const authSessions = sqliteTable('auth_sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
+  userAgent: text('user_agent'),
+});
+
 export const products = sqliteTable('products', {
   id: text('id').primaryKey(),
   userId: text('user_id').references(() => users.id).notNull(),

@@ -13,15 +13,32 @@ import { integrationService } from '../services/integrationService.js';
 import { universalGatewayService } from '../services/universalGatewayService.js';
 import { OWNER_CONFIG } from '../config/owner.js';
 import { v4 as uuidv4 } from 'uuid';
+import { hashPassword, verifyPassword } from '../services/passwordHash.js';
+import { createSession, revokeSession, sessionTokenFromRequest } from '../services/authSessions.js';
 
-import { promisify } from 'util';
-
-const pbkdf2 = promisify(crypto.pbkdf2);
-
-// Simple password hashing using Node's crypto (Async for scalability)
-async function hashPassword(password: string): Promise<string> {
-  const hash = await pbkdf2(password, 'empire-launch-salt', 1000, 64, 'sha512');
-  return hash.toString('hex');
+/**
+ * Mint a real session for a user and answer with it.
+ *
+ * Every door that signs somebody in (register, login, master login) answers
+ * `{ status:'success', userId, token, expiresAt }`. The token is the raw session
+ * token — returned here once, stored only as a SHA-256 digest — and it is the
+ * ONLY thing the frontend should send back (`Authorization: Bearer <token>`).
+ * The `userId` is informational; it is never a credential.
+ */
+async function issueSession(
+  res: Response,
+  userId: string,
+  extra: Record<string, unknown> = {},
+  req?: Request,
+) {
+  const { token, expiresAt } = await createSession(userId, req?.headers?.['user-agent'] as string | undefined);
+  return res.json({
+    status: 'success',
+    userId,
+    token,
+    expiresAt: expiresAt.toISOString(),
+    ...extra,
+  });
 }
 
 export const registerUser = async (req: Request, res: Response) => {
@@ -70,7 +87,7 @@ export const registerUser = async (req: Request, res: Response) => {
     }
 
     console.log('[DEBUG] Registration successful for:', email);
-    res.json({ status: 'success', userId });
+    return issueSession(res, userId, {}, req);
   } catch (error: any) {
     console.error('Registration error (outer):', error);
     res.status(500).json({ error: `Outer registration error: ${error.message}` });
@@ -87,20 +104,48 @@ export const loginUser = async (req: Request, res: Response) => {
     const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Check if password matches stored hash
-    if (user.passwordHash === await hashPassword(password)) {
-      return res.json({ status: 'success', userId: user.id });
+    // Check the password against the stored hash. A legacy (unsalted pbkdf2)
+    // hash still verifies ONCE and is then rewritten in the scrypt format, so
+    // the old scheme stops being reachable for this account after this login.
+    const check = await verifyPassword(password, user.passwordHash);
+    if (check.ok) {
+      if (check.needsRehash) {
+        try {
+          const upgraded = await hashPassword(password);
+          await db.update(users)
+            .set({ passwordHash: upgraded, updatedAt: new Date() })
+            .where(eq(users.id, user.id));
+        } catch (err) {
+          console.warn('[auth] legacy password upgrade failed:', (err as Error)?.message);
+        }
+      }
+      return issueSession(res, user.id, {}, req);
     }
 
-    // Owner bypass: allow master key as password for the owner
-    const cleanPassword = password.trim().toUpperCase();
-    if (email === OWNER_CONFIG.email && OWNER_CONFIG.allowedMasterKeys.includes(cleanPassword as any)) {
-      return res.json({ status: 'success', userId: user.id });
+    // Owner bypass: allow a configured master key as the owner's password.
+    // With OWNER_MASTER_KEYS unset the list is empty, so this refuses.
+    const cleanPassword = String(password).trim().toUpperCase();
+    if (email === OWNER_CONFIG.email && OWNER_CONFIG.allowedMasterKeys.includes(cleanPassword)) {
+      return issueSession(res, user.id, {}, req);
     }
 
     return res.status(401).json({ error: 'Invalid credentials' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
+ * Revoke the caller's session. The token that made the request stops working
+ * immediately; every other session of the same user is untouched.
+ */
+export const logoutUser = async (req: Request, res: Response) => {
+  try {
+    const token = sessionTokenFromRequest(req);
+    await revokeSession(token);
+    return res.json({ status: 'success' });
+  } catch (error) {
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -123,7 +168,7 @@ export const acceptTerms = async (req: Request, res: Response) => {
 };
 
 export const getEtsyAuthUrl = async (req: Request, res: Response) => {
-    const userId = (req as any).userId || req.headers['x-user-id'];
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -177,17 +222,23 @@ export const getEtsyAuthUrl = async (req: Request, res: Response) => {
 
 export const etsyCallback = async (req: Request, res: Response) => {
   const { code, state, sessionId } = req.body;
-  const userId = (req as any).userId || req.headers['x-user-id'];
+  // Public redirect callback: the OAuth session row it was started with carries
+  // the user. If a signed-in caller also names itself, it must match.
+  const claimedUserId = (req as any).userId as string | undefined;
 
-  if (!code || !state || !sessionId || !userId) {
+  if (!code || !state || !sessionId) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
     const [session] = await db.select().from(oauthSessions).where(eq(oauthSessions.id, sessionId)).limit(1);
-    if (!session || session.used || session.state !== state || new Date() > new Date(session.expiresAt) || session.userId !== userId) {
+    if (!session || session.used || session.state !== state || new Date() > new Date(session.expiresAt)) {
       return res.status(400).json({ error: 'Invalid or expired session' });
     }
+    if (claimedUserId && session.userId !== claimedUserId) {
+      return res.status(400).json({ error: 'Invalid or expired session' });
+    }
+    const userId = session.userId;
 
     await db.update(oauthSessions).set({ used: true }).where(eq(oauthSessions.id, sessionId));
     const tokenData = await etsyService.getAccessToken(code, session.codeVerifier);
@@ -204,7 +255,7 @@ export const etsyCallback = async (req: Request, res: Response) => {
 };
 
 export const getPlatformAuthUrl = async (req: Request, res: Response) => {
-  const userId = (req as any).userId || req.headers['x-user-id'];
+  const userId = (req as any).userId;
   if (!userId) return res.status(401).json({ error: 'Authentication required' });
   const platform = req.params.platform as string;
   try {
@@ -223,7 +274,11 @@ export const getPlatformAuthUrl = async (req: Request, res: Response) => {
 };
 
 export const handlePlatformCallback = async (req: Request, res: Response) => {
-  const userId = (req as any).userId || req.headers['x-user-id'] || req.query.userId;
+  // Public redirect callback (the platform sends the browser here with no
+  // headers). The user is whoever STARTED the flow, carried by the OAuth
+  // session row that `sessionId` / `state` identifies — never `?userId=`, which
+  // any caller can type.
+  const userId = (req as any).userId as string | undefined;
   const platform = req.params.platform as string;
   const { code, state, sessionId } = { ...req.query, ...req.body } as any;
   
@@ -308,17 +363,19 @@ export const redeemKey = async (req: Request, res: Response) => {
 export const masterLogin = async (req: Request, res: Response) => {
   const { email, key } = req.body;
   if (!email || !key) return res.status(400).json({ error: 'Email and master key are required' });
-  
+
   try {
-    const cleanKey = key.trim().toUpperCase();
-    const isMasterKey = OWNER_CONFIG.allowedMasterKeys.includes(cleanKey as any);
+    const cleanKey = String(key).trim().toUpperCase();
+    // Keys come from OWNER_MASTER_KEYS only. When it is unset the list is empty
+    // and master login refuses — fail closed, never a built-in fallback.
+    const isMasterKey = OWNER_CONFIG.allowedMasterKeys.includes(cleanKey);
     if (!isMasterKey) return res.status(401).json({ error: 'Invalid master key' });
-    
+
     const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
     if (!user) return res.status(401).json({ error: 'User not found' });
-    
+
     await db.update(users).set({ tier: 'OWNER_MASTER', businessSlots: 3, updatedAt: new Date() }).where(eq(users.id, user.id));
-    res.json({ status: 'success', userId: user.id });
+    return issueSession(res, user.id, {}, req);
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }

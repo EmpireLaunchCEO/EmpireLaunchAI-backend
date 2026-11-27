@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { libraryService } from '../services/libraryService.js';
+import { mobileAuth } from '../middleware/mobileAuth.js';
 
 const router = Router();
 
@@ -12,12 +13,12 @@ const upload = multer({
 
 // ─── POST /api/library/upload — Multipart upload to R2 + DB record ────────────
 
-router.post('/upload', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/upload', upload.single('file'), mobileAuth, async (req: Request, res: Response) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
 
-    const userId = (req as any).userId || req.body.userId || 'system';
+    const userId = (req as any).userId;
     const brandId = req.body.brandId;
     const type = req.body.type || 'video';
     const name = req.body.name;
@@ -42,9 +43,9 @@ router.post('/upload', upload.single('file'), async (req: Request, res: Response
 
 // ─── GET /api/library/counts — Category counts ────────────────────────────────
 
-router.get('/counts', async (req: Request, res: Response) => {
+router.get('/counts', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req.query.userId as string) || (req as any).userId || 'system';
+    const userId = (req as any).userId;
     const brandId = req.query.brandId as string | undefined;
     const counts = await libraryService.getCounts(userId, brandId);
     res.json(counts);
@@ -55,9 +56,9 @@ router.get('/counts', async (req: Request, res: Response) => {
 
 // ─── GET /api/library/expired — Expired assets ─────────────────────────────────
 
-router.get('/expired', async (req: Request, res: Response) => {
+router.get('/expired', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req.query.userId as string) || (req as any).userId || 'system';
+    const userId = (req as any).userId;
     const assets = await libraryService.getExpired(userId);
     res.json({ assets, total: assets.length });
   } catch (error: any) {
@@ -67,9 +68,9 @@ router.get('/expired', async (req: Request, res: Response) => {
 
 // ─── DELETE /api/library/expired — Clean up expired assets ─────────────────────
 
-router.delete('/expired', async (req: Request, res: Response) => {
+router.delete('/expired', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req.query.userId as string) || (req as any).userId || 'system';
+    const userId = (req as any).userId;
     const deleted = await libraryService.cleanupExpired(userId);
     res.json({ deleted, message: `${deleted} expired asset(s) cleaned up` });
   } catch (error: any) {
@@ -79,9 +80,9 @@ router.delete('/expired', async (req: Request, res: Response) => {
 
 // ─── GET /api/library — List assets (paginated, brand-isolated) ────────────────
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req.query.userId as string) || (req as any).userId || 'system';
+    const userId = (req as any).userId;
     const type = req.query.type as string | undefined;
     const brandId = req.query.brandId as string | undefined;
     const page = parseInt(req.query.page as string) || 1;
@@ -97,9 +98,9 @@ router.get('/', async (req: Request, res: Response) => {
 
 // ─── POST /api/library — Create a library asset (integration hook) ─────────────
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.body.userId || 'system';
+    const userId = (req as any).userId;
     const { brandId, type, name, filePath, thumbnailPath, mimeType, fileSize, metadata } = req.body;
 
     if (!type || !filePath) {
@@ -118,7 +119,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 // ─── GET /api/library/:id — Single asset details (presigned URLs) ──────────────
 
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const asset = await libraryService.getById(req.params.id);
     if (!asset) return res.status(404).json({ error: 'Asset not found' });
@@ -130,7 +131,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // ─── PUT /api/library/:id/rename — Rename an asset ─────────────────────────────
 
-router.put('/:id/rename', async (req: Request, res: Response) => {
+router.put('/:id/rename', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -145,7 +146,7 @@ router.put('/:id/rename', async (req: Request, res: Response) => {
 
 // ─── POST /api/library/:id/name — Set name (operations page naming flow) ───────
 
-router.post('/:id/name', async (req: Request, res: Response) => {
+router.post('/:id/name', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -160,7 +161,7 @@ router.post('/:id/name', async (req: Request, res: Response) => {
 
 // ─── DELETE /api/library/:id — Delete asset (R2 first, then local, then DB) ────
 
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const deleted = await libraryService.delete(req.params.id);
     if (!deleted) return res.status(404).json({ error: 'Asset not found' });
