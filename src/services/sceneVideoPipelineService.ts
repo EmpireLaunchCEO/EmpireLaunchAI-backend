@@ -212,6 +212,12 @@ export function buildDraftBase(
   // window fell back to its still and why; without it on the draft payload the
   // client is told nothing and a 14-second-motion video looks like a 16-second one.
   const motionFallbacks = (pmeta as any)?.motionFallbacks;
+  // THE LENGTH SHE PICKED, MEASURED ON THE FILE (owner, 23 Nov). The card carries the
+  // probe of the delivered bytes and the band it was held to, so "15s" on the card is
+  // the file's own length and not a number the plan promised.
+  const deliveredSeconds = Number((pmeta as any)?.deliveredDurationSeconds);
+  const deliveredSource = (pmeta as any)?.deliveredDurationSource;
+  const deliveredBand = (pmeta as any)?.deliveredDurationBand;
   return {
     projectId,
     mode,
@@ -219,6 +225,13 @@ export function buildDraftBase(
     saved: false,
     ...(mode === 'faceless' ? { category: 'faceless-video' } : {}),
     ...(Array.isArray(motionFallbacks) && motionFallbacks.length ? { motionFallbacks } : {}),
+    ...(Number.isFinite(deliveredSeconds) && deliveredSeconds > 0
+      ? {
+          deliveredDurationSeconds: deliveredSeconds,
+          deliveredDurationSource: deliveredSource,
+          ...(deliveredBand ? { deliveredDurationBand: deliveredBand } : {}),
+        }
+      : {}),
     ...(qc ? { qc } : {}),
   };
 }
@@ -3534,6 +3547,114 @@ export function resolveDeliveredDuration(input: {
   }
   return { seconds: deliveredVideoDuration(input.sceneRows ?? []), source: 'projected' };
 }
+/**
+ * ── THE SELECTED LENGTH IS THE CONTRACT (owner, 23 Nov) ─────────────────────
+ * "the clients only have the voice and video length options we give them to
+ *  select from. so it should aim to get it on the dot or within a second or 2
+ *  from that selection."
+ *
+ * Only 30s was ever held to anything (29.5–30.5, and only in fixtures): a 10s or
+ * 15s video was whatever the plan plus the measured narration happened to add up
+ * to, and the number persisted was arithmetic on the plan. So the delivered file
+ * is MEASURED (ffprobe — the exact bytes uploaded) against the SAME band for every
+ * length the product offers, and an out-of-band file is FITTED before it ships.
+ */
+export const DELIVERED_DURATION_TOLERANCE_SECONDS = 0.5;
+/** The band the DELIVERED file must land in for a selected length: the 30s
+ *  standard (29.5–30.5) applied to every length the product offers. */
+export function deliveredDurationBand(selectedSeconds: number): { min: number; max: number } {
+  const n = Number(selectedSeconds);
+  const target = Number.isFinite(n) && n > 0 ? n : 30;
+  const round = (v: number) => Math.round(v * 100) / 100;
+  return {
+    min: round(Math.max(0.5, target - DELIVERED_DURATION_TOLERANCE_SECONDS)),
+    max: round(target + DELIVERED_DURATION_TOLERANCE_SECONDS),
+  };
+}
+/** Did the file we are about to deliver land on the length she picked? */
+export function deliveredDurationInBand(measuredSeconds: number, selectedSeconds: number): boolean {
+  const m = Number(measuredSeconds);
+  if (!Number.isFinite(m) || m <= 0) return false;
+  const band = deliveredDurationBand(selectedSeconds);
+  return m >= band.min - 0.005 && m <= band.max + 0.005;
+}
+/** How far a finished file may be retimed to reach the selected length. Past this
+ *  the picture is not being "fitted", it is being played at the wrong speed, so the
+ *  fit declines and the honest out-of-band measurement is recorded instead. */
+export const MAX_DELIVERED_FIT_FACTOR = 1.6;
+export const MIN_DELIVERED_FIT_FACTOR = 0.6;
+export interface DeliveredDurationFitPlan {
+  needed: boolean;
+  /** setpts multiplier for the picture (the audio is sped by its inverse). */
+  factor: number;
+  strategy: 'none' | 'retime';
+  reason: string;
+}
+/** Pure, deterministic: what has to happen to a file of `measuredSeconds` to land on
+ *  `selectedSeconds`. No ffmpeg, no paid call — a fixture can pin every case. */
+export function planDeliveredDurationFit(input: { measuredSeconds: number; selectedSeconds: number }): DeliveredDurationFitPlan {
+  const measured = Number(input.measuredSeconds);
+  const selected = Number(input.selectedSeconds);
+  if (!Number.isFinite(measured) || measured <= 0) return { needed: false, factor: 1, strategy: 'none', reason: 'unmeasurable' };
+  if (!Number.isFinite(selected) || selected <= 0) return { needed: false, factor: 1, strategy: 'none', reason: 'no-selection' };
+  if (deliveredDurationInBand(measured, selected)) return { needed: false, factor: 1, strategy: 'none', reason: 'in-band' };
+  const factor = Math.round((selected / measured) * 10000) / 10000;
+  if (factor > MAX_DELIVERED_FIT_FACTOR || factor < MIN_DELIVERED_FIT_FACTOR) {
+    // A 10s selection delivered as 25s is a PLANNING defect, not something to hide
+    // by playing the shot at 2.5x. Decline the fit; the caller records the truth.
+    return { needed: true, factor, strategy: 'none', reason: 'outside-repairable-range' };
+  }
+  return { needed: true, factor, strategy: 'retime', reason: measured > selected ? 'overrun-compressed' : 'underrun-stretched' };
+}
+/** FIT THE FINISHED FILE ONTO THE LENGTH THE CLIENT SELECTED (owner, 23 Nov).
+ *
+ *  A narration that ran past its planned window used to make the VIDEO LONGER (the
+ *  measured-narration growth passes widen scene windows so no spoken word is cut —
+ *  that part is right), so a client who picked 15s could be handed 18s. The
+ *  correction belongs at the END, on the file that is about to be uploaded: retime
+ *  the whole shot by `selected/measured` — picture via setpts, narration via atempo
+ *  (pitch preserved, nothing cut) — so the delivered file lands in the band for the
+ *  length she chose. One local ffmpeg pass, zero paid seconds.
+ *
+ *  A fit that does not make the length CLOSER is thrown away rather than shipped. */
+export async function fitDeliveredFileToSelection(
+  file: string,
+  selectedSeconds: number,
+): Promise<{ applied: boolean; path: string; before: number; after: number; factor: number; strategy: 'none' | 'retime'; reason: string; inBand: boolean }> {
+  const before = probeDuration(file);
+  const plan = planDeliveredDurationFit({ measuredSeconds: before, selectedSeconds });
+  const declined = { applied: false, path: file, before, after: before, factor: plan.factor, strategy: plan.strategy, reason: plan.reason, inBand: deliveredDurationInBand(before, selectedSeconds) };
+  if (!plan.needed || plan.strategy !== 'retime' || !file || !fs.existsSync(file)) return declined;
+  const out = `${file}.duration-fit.mp4`;
+  const atempo = Math.round((1 / plan.factor) * 10000) / 10000;
+  const pts = plan.factor.toFixed(6);
+  const cap = String(selectedSeconds);
+  const args = inputHasAudio(file)
+    ? ['-y', '-i', file,
+       '-filter_complex', `[0:v]setpts=PTS*${pts},fps=30[v];[0:a]atempo=${atempo.toFixed(4)}[a]`,
+       '-map', '[v]', '-map', '[a]', '-t', cap,
+       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+       '-c:a', 'aac', '-movflags', '+faststart', out]
+    : ['-y', '-i', file,
+       '-vf', `setpts=PTS*${pts},fps=30`, '-t', cap, '-an',
+       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+       '-movflags', '+faststart', out];
+  await new Promise<void>((resolve, reject) => {
+    execFile('ffmpeg', args, { maxBuffer: 32 * 1024 * 1024, timeout: mediaToolTimeoutMs('ffmpeg') }, (err, _stdout, stderr) => {
+      if (err) {
+        if (isMediaToolTimeout(err)) reject(mediaToolTimeoutError('ffmpeg', 'fitDeliveredFileToSelection'));
+        else reject(new Error('ffmpeg duration fit exited with code ' + (err.code ?? '') + ': ' + String(stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' ')));
+      } else resolve();
+    });
+  });
+  const after = probeDuration(out);
+  if (!(Math.abs(after - selectedSeconds) < Math.abs(before - selectedSeconds))) {
+    try { fs.unlinkSync(out); } catch { /* best-effort */ }
+    return { ...declined, applied: false, reason: 'fit-did-not-improve' };
+  }
+  fs.renameSync(out, file);
+  return { applied: true, path: file, before, after, factor: plan.factor, strategy: 'retime', reason: plan.reason, inBand: deliveredDurationInBand(after, selectedSeconds) };
+}
 
 export function normalizePlanTimeBudget(script: SceneScript[], targetDuration: number, opts?: { dissolveCompensate?: boolean }): SceneScript[] {
   if (!script.length) return [];
@@ -4872,7 +4993,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       componentsFailure,
       missingComponents: qc.missingComponents,
     });
-    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',voiceId:isCatalogueVoice(input.voiceId)?input.voiceId:'',mood:input.mood||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(photoRepairs.length?{repairs:{photoUrlRefreshed:{count:photoRepairs.length,clientMessage:'The link to your uploaded photo had expired, so I refreshed it and used your photo.',detail:photoRepairs.map(r=>`${r.from} -> ${r.to}`).join(' | ')}}}:{}),...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
+    await db.insert(schema.videoProjects).values({id:projectId,userId:input.userId,title:input.title||input.idea.slice(0,80),status:creation.status,totalDuration:deliveredVideoDurationSeconds(planned),sceneCount:planned.length,script:planned,metadata:{requestedVisuals: requested,...(requestedImagery.length?{requestedImagery:{phrases:requestedImagery,applied:imageryPass.applied,scenes:imageryPass.scenes}}:{}),creativeTransformation:extractCreativeEssence(cleanIdea),platforms:input.platforms||[],style:input.style||'',voice:input.voice||'',tone:input.tone||'',voiceId:isCatalogueVoice(input.voiceId)?input.voiceId:'',mood:input.mood||'',sourceImages:input.sourceImages||[],mode,soraCallBudget:budget,plan:{scenes:planned,soraCallBudget:budget},selectedDurationSeconds: duration, plannedDurationSeconds: deliveredVideoDuration(planned),spans:spanPlans.map(({soraBlock,sceneNumbers,totalSeconds,prompt,windows})=>({soraBlock,sceneNumbers,totalSeconds,prompt,...(windows?{windows}:{})})),...(slotFit.report?{motionSlotFit:slotFit.report}:{}),conversation:input.conversation||[],components:inventory,componentsVerified:creation.componentsVerified,componentsMissing:creation.componentsMissing,componentsInjected:injected,componentAssignments: Object.keys(componentAssignments).length?componentAssignments:undefined,componentRepair: componentRepair.attempted.length?componentRepair:undefined,arcFlags:qc.arcFlags,f4:{sellingPoints:f4SellingPoints,narrationInjected:f4Narr.injected,narrationStillMissing:f4Narr.stillMissing,visualStrippedScenes:f4Visual.strippedScenes},narrationOverride: narrationOverride ? { script: narrationOverride, mapping: overridePlan?.mapping ?? [], expected: narrationOverride.length, spoken: overrideSpoken, source: narrationAuthoritative ? 'supplied-script' : 'narrationScript', authoritative: narrationAuthoritative } : undefined,linkInBioAllowed,linkInBioStrippedNarrationScenes:linkInBioPass.strippedNarrationScenes,linkInBioStrippedVisualScenes:linkInBioPass.strippedVisualScenes,narrationRoles:narrationRolesFinal,avatarLook:avatarPass.avatarLook || undefined,avatarRoleViolations:avatarRoleViolationsFinal,actionAbstractVisual:actionAudit.visualAbstract,actionAbstractNarration:actionAudit.narrationAbstract,onScreenOverlays:onScreenOverlaysMeta,visualPromptOverrides:visualPromptOverridesMeta,sceneDurationOverrides: sceneDurationOverrides ?? undefined,stillCoverFit: input.stillCoverFit === true,...(photoRepairs.length?{repairs:{photoUrlRefreshed:{count:photoRepairs.length,clientMessage:'The link to your uploaded photo had expired, so I refreshed it and used your photo.',detail:photoRepairs.map(r=>`${r.from} -> ${r.to}`).join(' | ')}}}:{}),...(sourceImagePlacementMeta?{sourceImagePlacement:sourceImagePlacementMeta}:{}),planner:plannerOutcome,...(planningFailure?{failureCode:planningFailure.code,error:planningFailure.message,planningFailure:{code:planningFailure.code,reason:plannerOutcome.reason,detail:planningFailure.detail,clientMessage:planningFailure.message}}:{}),...(componentsFailure?{failureCode:componentsFailure.code,error:componentsFailure.message,componentsFailure:{code:componentsFailure.code,detail:componentsFailure.detail,missing:componentsFailure.missing,clientMessage:componentsFailure.message}}:{})}});
     if (planningFailure) {
       trace(`planner_bypassed project=${projectId} reason=${plannerOutcome.reason} attempts=${plannerOutcome.attempts} detail=${plannerOutcome.detail} — refusing to render an unplanned video`);
       throw new PlanningFailedError(projectId, planningFailure);
@@ -5045,6 +5166,17 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     // narration is voiced with the user's gender/tone instead of a hardcoded alloy.
     const [projectRow] = await db.select().from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
     const pmeta = ((projectRow?.metadata as any) || {});
+    // THE LENGTH THE CLIENT SELECTED (owner, 23 Nov) — persisted by createProject so
+    // the worker can hold the FINISHED file to it. Legacy rows predate the field: the
+    // planned delivered length is the same number the plan was built to, and 30 is the
+    // product default. Never silently a 30 for a 10s selection.
+    const selectedDurationSeconds = (() => {
+      const chosen = Number(pmeta.selectedDurationSeconds);
+      if (Number.isFinite(chosen) && chosen > 0) return chosen;
+      const planned = Number(pmeta.plannedDurationSeconds);
+      if (Number.isFinite(planned) && planned > 0) return planned;
+      return 30;
+    })();
     // FACELESS MOTION (owner, Nov 10): Faceless now runs the Veo pre-pass too, and
     // its failure policy is deliberately DIFFERENT from Scene's — see the pre-pass
     // catch below (fail SOFT: the still, stated, never a dead project).
@@ -5248,6 +5380,12 @@ if (!skipGeneration) {
       return;
     }
 
+    // NARRATION OVERRUN IS FITTED, NOT EXTENDED (owner, 23 Nov). The growth passes
+    // below widen a scene window so no spoken word is cut — that is right, but it also
+    // used to make the VIDEO longer than the length the client selected. Every growth
+    // is recorded here and the finished file is fitted back onto her selection before
+    // it is uploaded (`fitDeliveredFileToSelection`).
+    const narrationOverrun: Array<{ scene: number; plannedSeconds: number; grownSeconds: number }> = [];
     // ONE work dir for narration audio, shared by the growth pass and the assembly
     // loop below, so the same file is resolved (and, from R2, downloaded) once.
     const narrationWorkDir = path.join(process.cwd(), 'temp', 'scene-projects', projectId, 'narration');
@@ -5292,7 +5430,10 @@ if (!skipGeneration) {
         const byScene = new Map(sizing.scenes.map((s) => [s.sceneNumber, s.duration]));
         for (const sc of complete) {
           const nd = byScene.get(sc.sceneNumber);
-          if (typeof nd === 'number' && nd !== (sc.duration ?? null)) sc.duration = nd;
+          if (typeof nd === 'number' && nd !== (sc.duration ?? null)) {
+            narrationOverrun.push({ scene: Number(sc.sceneNumber), plannedSeconds: Number(sc.duration) || 0, grownSeconds: nd });
+            sc.duration = nd;
+          }
         }
         for (const [sceneNumber, duration] of byScene) {
           await db.update(schema.videoScenes)
@@ -5395,6 +5536,7 @@ if (!skipGeneration) {
           if (speechEndMs > windowMs) {
             const grownSeconds = Math.max(3, Math.ceil((speechEndMs + MEASURED_NARRATION_MARGIN_MS) / 1000));
             scene.duration = grownSeconds;
+            narrationOverrun.push({ scene: Number(scene.sceneNumber), plannedSeconds: windowMs / 1000, grownSeconds });
             await db.update(schema.videoScenes).set({ duration: grownSeconds, updatedAt: new Date() }).where(eq(schema.videoScenes.id, scene.id));
             trace(`scene_window_grown_at_assembly project=${projectId} scene=${scene.sceneNumber} speechEnd=${speechEndMs}ms planned=${windowMs}ms grown=${grownSeconds}s`);
             if (speechEndMs > grownSeconds * 1000) {
@@ -5505,6 +5647,21 @@ if (!skipGeneration) {
         assembled = overlaid;
         trace(`overlay_end project=${projectId}`);
       }
+      // ── THE DELIVERED FILE LANDS ON THE LENGTH SHE PICKED (owner, 23 Nov) ──
+      // Runs on the FINISHED file (after the overlays, before QC probes it, before the
+      // variants and the upload), so the number the row carries and the bytes the
+      // client downloads are the same artefact. A narration overrun is compressed
+      // here — never allowed to extend the video — and zero paid seconds are spent.
+      let durationFit: { applied: boolean; before: number; after: number; factor: number; strategy: string; reason: string; inBand: boolean } | undefined;
+      try {
+        const fit = await fitDeliveredFileToSelection(assembled, selectedDurationSeconds);
+        durationFit = { applied: fit.applied, before: fit.before, after: fit.after, factor: fit.factor, strategy: fit.strategy, reason: fit.reason, inBand: fit.inBand };
+        if (fit.applied) assembled = fit.path;
+        trace(`duration_fit project=${projectId} selected=${selectedDurationSeconds}s before=${fit.before.toFixed(2)}s after=${fit.after.toFixed(2)}s applied=${fit.applied} factor=${fit.factor} reason=${fit.reason} inBand=${fit.inBand}`);
+        if (!fit.inBand) trace(`delivered_duration_out_of_band project=${projectId} selected=${selectedDurationSeconds}s measured=${fit.after.toFixed(2)}s reason=${fit.reason}`);
+      } catch (fitErr: any) {
+        trace(`duration_fit_failed project=${projectId} error=${fitErr?.message}`);
+      }
       // POST-RENDER SMOOTHNESS QC (deterministic ffprobe; NO AI / NO paid render).
       // Auto-flags choppy/silent/multi-audio renders BEFORE upload and surfaces the
       // report on the draft payload for the GPT-5.2 exception-handler router
@@ -5598,6 +5755,16 @@ if (!skipGeneration) {
           // did not run, and `deliveredDurationSource` says which one this row carries.
           deliveredDurationSeconds: delivered.seconds,
           deliveredDurationSource: delivered.source,
+          // The band the measured file was held to for the length she selected, and
+          // what the fit had to do to get it there. `inBand:false` is recorded, never
+          // hidden — a length we could not reach is a defect we must be able to see.
+          deliveredDurationBand: {
+            selectedSeconds: selectedDurationSeconds,
+            ...deliveredDurationBand(selectedDurationSeconds),
+            inBand: deliveredDurationInBand(delivered.seconds, selectedDurationSeconds),
+          },
+          ...(durationFit ? { durationFit } : {}),
+          ...(narrationOverrun.length ? { narrationOverrunFitted: { scenes: narrationOverrun, fittedToSelection: durationFit?.applied === true } } : {}),
           variantExportCount: variantResults.length,
         }),
       };
