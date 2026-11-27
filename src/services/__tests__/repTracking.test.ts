@@ -46,6 +46,7 @@ const REP = 'a0000000-0000-4000-8000-000000000002';
 const CLIENT = 'a0000000-0000-4000-8000-000000000003';
 const DEMO = 'a0000000-0000-4000-8000-000000000004';
 const PROMOTABLE = 'a0000000-0000-4000-8000-000000000005';
+const EMAILREP = 'a0000000-0000-4000-8000-000000000006';
 
 let server: http.Server;
 let baseUrl = '';
@@ -138,7 +139,8 @@ before(async () => {
     ('${REP}', 'marcy@example.com', 'Marcy Lane', ${now}, ${now}, 'STANDARD_USER', 'sales_rep'),
     ('${CLIENT}', 'client@example.com', 'Plain Client', ${now}, ${now}, 'STANDARD_USER', 'client'),
     ('${DEMO}', 'demo@example.com', 'Demo Account', ${now}, ${now}, 'STANDARD_USER', 'demo'),
-    ('${PROMOTABLE}', 'newrep@example.com', 'New Rep', ${now}, ${now}, 'STANDARD_USER', 'client')`);
+    ('${PROMOTABLE}', 'newrep@example.com', 'New Rep', ${now}, ${now}, 'STANDARD_USER', 'client'),
+    ('${EMAILREP}', 'byemail@example.com', 'Ada Email', ${now}, ${now}, 'STANDARD_USER', 'client')`);
 
   ownerToken = (await createSession(OWNER)).token;
   repToken = (await createSession(REP)).token;
@@ -322,6 +324,55 @@ test('the owner creates a code and sets a role; a bad role is refused', async ()
     method: 'POST',
     token: repToken,
     body: { userId: PROMOTABLE, role: 'client' },
+  });
+  assert.equal(byRep.status, 403);
+});
+
+test('assign-role by email: the owner promotes an existing sign-up and gets its code', async () => {
+  const byEmail = await request('/api/rep/assign-role', {
+    method: 'POST',
+    token: ownerToken,
+    body: { email: '  ByEmail@Example.com ', role: 'sales_rep' },
+  });
+  assert.equal(byEmail.status, 200);
+  assert.equal(byEmail.body.userId, EMAILREP, 'the typed address resolves to the real account');
+  assert.equal(byEmail.body.email, 'byemail@example.com');
+  assert.equal(byEmail.body.role, 'sales_rep');
+  assert.equal(byEmail.body.code, 'ADA', 'a rep with no code is given one, from her own name');
+  assert.match(byEmail.body.link, /\/join\/ADA$/);
+
+  // Assigning again hands back the same code — a code is never reissued.
+  const again = await request('/api/rep/assign-role', {
+    method: 'POST',
+    token: ownerToken,
+    body: { email: 'byemail@example.com', role: 'sales_rep' },
+  });
+  assert.equal(again.body.code, 'ADA');
+  assert.equal(
+    await count(`SELECT COUNT(*) AS n FROM referral_codes WHERE rep_user_id = '${EMAILREP}'`),
+    1,
+  );
+
+  // The owner's summary shows each rep's email and code.
+  const summary = await request('/api/rep/summary', { token: ownerToken });
+  const row = summary.body.reps.find((entry: any) => entry.repUserId === EMAILREP);
+  assert.ok(row, 'the promoted account appears in the summary');
+  assert.equal(row.email, 'byemail@example.com');
+  assert.equal(row.code, 'ADA');
+
+  // An address nobody signed up with is a 404, not a silent no-op.
+  const unknown = await request('/api/rep/assign-role', {
+    method: 'POST',
+    token: ownerToken,
+    body: { email: 'nobody-signed-up@example.com', role: 'sales_rep' },
+  });
+  assert.equal(unknown.status, 404);
+
+  // Only the owner can promote, whether she names an id or an address.
+  const byRep = await request('/api/rep/assign-role', {
+    method: 'POST',
+    token: repToken,
+    body: { email: 'byemail@example.com', role: 'demo' },
   });
   assert.equal(byRep.status, 403);
 });
