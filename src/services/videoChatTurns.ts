@@ -432,3 +432,23 @@ export function buildPlannerConversationSection(
     : '';
   return `\n\nTHE CONVERSATION FOR THIS VIDEO (mandatory): everything said about this video, oldest first${asked ? '' : ', so nothing she already said is asked again or dropped'}.${questionClause} Read ALL of it: her earlier turns are still part of the brief. This is CONTEXT to obey — never text to speak, never a line of narration, never on-screen text.\n${lines.join('\n')}${selectionLines.length ? `\n\nHER SELECTIONS FOR THIS VIDEO (still stand unless her answer changes them): ${selectionLines.join('; ')}.` : ''}\n`;
 }
+
+/**
+ * WHAT A REFUSAL HANDS THE CLIENT'S UI (owner, 23 Nov — the question belongs in the chat).
+ *
+ * `err.chat.turns` is the WHOLE conversation for that video: her brief, every earlier
+ * turn, and the question we just asked. Her earlier messages are already on her screen,
+ * so sending them back duplicates them in her chat. This returns ONLY what is new — the
+ * question we asked and any answer of hers to it — as a plain array, which is the shape
+ * the Studio chat renders (each turn keeps its `options` so the choices are tappable).
+ *
+ * Returns `{}` when the error carries no chat at all, so the caller spreads it and the
+ * response shape is unchanged for every failure that asks nothing.
+ */
+export function refusalChatPayload(
+  chat: { turns?: VideoChatTurn[]; awaitingAnswer?: boolean } | null | undefined,
+): { chat?: VideoChatTurn[]; awaitingAnswer?: boolean } {
+  const turns = Array.isArray(chat?.turns) ? chat!.turns : [];
+  const own = turns.filter((t) => t?.kind === 'refusal-question' || t?.kind === 'client-answer');
+  return own.length ? { chat: own, awaitingAnswer: chat!.awaitingAnswer === true } : {};
+}

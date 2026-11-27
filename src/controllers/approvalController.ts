@@ -1,3 +1,4 @@
+import { refusalChatPayload } from '../services/videoChatTurns.js';
 import { Request, Response } from 'express';
 import { approvalService } from '../services/approvalService.js';
 import { libraryService } from '../services/libraryService.js';
@@ -334,7 +335,11 @@ export const createApproval = async (req: Request, res: Response) => {
           // THE REFUSAL IS A TURN IN THE CHAT (owner, 23 Nov): the client shows this
           // message in the video's chat and answers it there. It says what happened to
           // the video and asks one specific question — it never mentions money.
-          ...(renderErr?.chat ? { chat: renderErr.chat } : {}),
+          // Only what is NEW: her earlier messages are already in her chat, so the
+          // whole conversation would duplicate them. `refusalChatPayload` sends the
+          // question (with its options) and her answer to it, as the array the Studio
+          // chat renders.
+          ...refusalChatPayload(renderErr?.chat),
         });
       }
     }

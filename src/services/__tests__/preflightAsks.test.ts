@@ -39,6 +39,7 @@ import {
   componentRefusalAsk,
   moneyWordsIn,
   NOT_MADE_SENTENCE,
+  refusalChatPayload,
   storedChatFromMetadata,
   type VideoChatTurn,
 } from '../videoChatTurns.js';
@@ -304,4 +305,43 @@ test('the refused attempt spends no quota and records no paid call', async () =>
   assert.match(String(err.chat.turns[err.chat.turns.length - 1].content), /does-not-resolve\.png/,
     'and the question names HER file');
   allZero('dead photo');
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE 422 HANDS THE UI ONLY WHAT IS NEW
+// A refusal's chat is the WHOLE conversation (brief + every earlier turn + the
+// question). Her earlier messages are already on her screen, so sending them
+// back duplicates them in her chat. This is the payload the controller sends.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('a refusal hands the UI the question and its options — never her earlier turns again', () => {
+  const question = buildRefusalAsk({ check: 'voice', reason: 'voice "robot" is not one we can speak' });
+  const chat = {
+    turns: [
+      { role: 'user', content: 'Make me a video about AI business tools', kind: 'brief' },
+      { role: 'assistant', content: 'What mood?', kind: 'chat' },
+      { role: 'user', content: 'energetic', kind: 'chat' },
+      question.turn,
+    ] as VideoChatTurn[],
+    awaitingAnswer: true,
+  };
+  const payload = refusalChatPayload(chat);
+  assert.equal(payload.chat?.length, 1, 'only the question comes back');
+  assert.equal(payload.chat?.[0].kind, 'refusal-question');
+  assert.ok(payload.chat?.[0].options?.length, 'the real options ride along so the UI can offer them');
+  assert.equal(payload.awaitingAnswer, true);
+  assert.ok(!payload.chat?.some((t) => t.kind === 'brief' || t.kind === 'chat'),
+    'her brief and earlier turns are not sent back — they are already in her chat');
+  assert.deepEqual(moneyWordsIn(JSON.stringify(payload.chat)), [], 'no money words in what she sees');
+});
+
+test('a failure that asks nothing carries no chat at all', () => {
+  assert.deepEqual(refusalChatPayload(null), {});
+  assert.deepEqual(refusalChatPayload(undefined), {});
+  assert.deepEqual(
+    refusalChatPayload({ turns: [{ role: 'user', content: 'brief', kind: 'brief' }] as VideoChatTurn[] }),
+    {},
+    'a conversation with no question is not a refusal to show',
+  );
 });
