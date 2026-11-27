@@ -108,15 +108,39 @@ export const createCode = async (req: Request, res: Response) => {
   }
 };
 
-/** POST /api/rep/assign-role — owner only: 'sales_rep' | 'demo' | 'client'. */
+/**
+ * POST /api/rep/assign-role — owner only: 'sales_rep' | 'demo' | 'client'.
+ *
+ * The account may be named by `userId` or by `email` — the owner turns an
+ * existing sign-up into a rep by typing the address she already has. A rep
+ * always comes back with a working code: an existing one, or a new one derived
+ * from her own name.
+ */
 export const assignRole = async (req: Request, res: Response) => {
   try {
-    const { userId, role } = req.body || {};
-    if (!userId || !role) return res.status(400).json({ error: 'userId and role are required' });
+    const { userId, email, role } = req.body || {};
+    if ((!userId && !email) || !role) {
+      return res.status(400).json({ error: 'userId or email, and role, are required' });
+    }
 
-    const updated = await assignUserRole({ userId, role });
+    const updated = await assignUserRole({ userId, email, role });
     if (!updated) return res.status(404).json({ error: 'no such user' });
-    return res.json({ status: 'success', userId: updated.id, role: updated.role });
+
+    // Only a rep hands out a link; promoting to client/demo creates nothing.
+    let code: string | null = null;
+    if (updated.role === 'sales_rep') {
+      const row = await createReferralCode({ repUserId: updated.id });
+      code = row?.code ?? null;
+    }
+
+    return res.json({
+      status: 'success',
+      userId: updated.id,
+      email: updated.email ?? null,
+      role: updated.role,
+      code,
+      link: referralLink(code),
+    });
   } catch (error: any) {
     console.error('[rep] /assign-role failed:', error?.message || error);
     return res.status(400).json({ error: error?.message || 'Could not assign role' });

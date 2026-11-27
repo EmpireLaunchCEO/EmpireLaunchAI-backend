@@ -22,7 +22,7 @@
  * never duplicated.
  */
 import { db, schema } from '../db/index.js';
-import { and, eq, isNull, lte, inArray } from 'drizzle-orm';
+import { and, eq, isNull, lte, inArray, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 const { users, referrals, referralCodes, commissionEvents } = schema;
@@ -368,17 +368,44 @@ export async function markCommissionPaid(input: {
   };
 }
 
-/** Set an account's role. Only 'client' | 'sales_rep' | 'demo' — never `tier`. */
-export async function assignUserRole(input: { userId: string; role: unknown }): Promise<any | null> {
+/**
+ * The account behind an email address, or null. The owner types an address off
+ * her own signup list, so case and stray spaces must not decide whether it
+ * matches: `Staci@Example.com ` is the same person as `staci@example.com`.
+ */
+export async function findUserByEmail(rawEmail: unknown): Promise<any | null> {
+  const email = String(rawEmail ?? '').trim().toLowerCase();
+  if (!email) return null;
+
+  const rows = await db.select().from(users)
+    .where(sql`lower(${users.email}) = ${email}`)
+    .limit(1);
+  return rows?.[0] ?? null;
+}
+
+/**
+ * Set an account's role. Only 'client' | 'sales_rep' | 'demo' — never `tier`.
+ * The account is named either by `userId` or by `email` (the owner can type
+ * either); an address that matches no account is `null`, which the caller
+ * answers 404.
+ */
+export async function assignUserRole(input: {
+  userId?: string | null;
+  email?: string | null;
+  role: unknown;
+}): Promise<any | null> {
   const userId = String(input.userId || '').trim();
+  const email = String(input.email || '').trim();
   const role = String(input.role || '').trim().toLowerCase();
-  if (!userId) throw new Error('userId is required');
+  if (!userId && !email) throw new Error('userId or email is required');
   if (!isUserRole(role) || !ASSIGNABLE_ROLES.includes(role)) throw new Error('invalid role');
 
-  const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const existing = userId
+    ? (await db.select().from(users).where(eq(users.id, userId)).limit(1))[0]
+    : await findUserByEmail(email);
   if (!existing) return null;
 
-  await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, userId));
+  await db.update(users).set({ role, updatedAt: new Date() }).where(eq(users.id, existing.id));
   return { ...existing, role };
 }
 
@@ -424,6 +451,7 @@ export const repTracking = {
   accrueCommissionForPayment,
   repStats,
   markCommissionPaid,
+  findUserByEmail,
   assignUserRole,
   listReps,
   DEMO_SAMPLE_CONTENT,
