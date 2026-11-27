@@ -52,7 +52,7 @@ export const initializeAgent = async (req: Request, res: Response) => {
     if (!existingUser) {
       await db.insert(users).values({
         id: userId,
-        email: 'stacipeabody@gmail.com', // Default for onboarding
+        email: 'empirelaunchai@gmail.com', // Default for onboarding
         termsAcceptedVersion: 1,
         businessSlots: 3,
         tier: 'BETA_TESTER',

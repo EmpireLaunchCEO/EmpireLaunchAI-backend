@@ -413,7 +413,7 @@ test('(3b) some subscriptions: per-brand paying clients + the cancellations coun
       { userId: CLIENT, id: CLIENT, email: 'a@b.com', tier: 'STANDARD_USER' },
       { userId: CLIENT_B, id: CLIENT_B, email: 'b@b.com', tier: 'STANDARD_USER' },
       // the owner also owns an empire — she must never be counted as a client
-      { userId: OWNER_USER_ID, id: OWNER_USER_ID, email: 'stacipeabody@gmail.com', tier: 'OWNER_MASTER' },
+      { userId: OWNER_USER_ID, id: OWNER_USER_ID, email: 'empirelaunchai@gmail.com', tier: 'OWNER_MASTER' },
     ],
   });
   try {

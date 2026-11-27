@@ -7,7 +7,7 @@ export class ProtectedButtonController {
    */
   async generate(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       const { productId, platform, isSingleUse, contentId, campaignId } = req.body;
 
       if (!productId) {

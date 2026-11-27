@@ -80,7 +80,7 @@ before(async () => {
         // Scene-Based is parked for clients (owner Nov 9), so this fixture — which
         // drives the REAL Scene route — must act as the OWNER, exactly as she would.
         // A client here gets a 403 by design; sceneParked.test.ts proves that.
-        limit: async () => [{ id: USER_ID, email: 'stacipeabody@gmail.com', tier: 'OWNER_MASTER' }],
+        limit: async () => [{ id: USER_ID, email: 'empirelaunchai@gmail.com', tier: 'OWNER_MASTER' }],
       }),
     }),
   });
@@ -107,10 +107,15 @@ after(async () => {
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
 });
 
+// The route is behind mobileAuth: identity comes from a verified session and
+// nothing else. This fixture's stubbed db answers the session lookup with the
+// OWNER row (see before()), so it must present a Bearer token like a real client.
+const SESSION_TOKEN = 'fixture-session-token';
+
 async function postVideoProject(body: Record<string, unknown>): Promise<{ status: number; json: any }> {
   const res = await fetch(`${baseUrl}/api/studio/video-project`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${SESSION_TOKEN}` },
     body: JSON.stringify(body),
   });
   return { status: res.status, json: await res.json().catch(() => ({})) };

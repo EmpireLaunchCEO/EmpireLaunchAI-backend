@@ -1,29 +1,27 @@
 import { Request, Response, NextFunction } from 'express';
+import { authRequiredBody } from './mobileAuth.js';
 
 /**
  * Logical Multi-Tenant Isolation Middleware
- * 
- * Ensures that every request has a valid user context and scopes 
- * all subsequent operations to that specific user (tenant).
+ *
+ * Ensures that every request has a verified user context and scopes all
+ * subsequent operations to that specific user (tenant).
+ *
+ * Identity comes from the session that `mobileAuth` (or the router) verified —
+ * never from a header the caller can type. `x-user-id` used to be read here,
+ * which made "change one header, become another account" possible.
  */
 export function tenantIsolation(req: Request, res: Response, next: NextFunction) {
-  // In a real app, this would be extracted from a verified JWT
-  const userId = req.headers['x-user-id'] as string;
+  const userId = (req as any).userId as string | undefined;
 
   if (!userId) {
-    return res.status(401).json({ 
-      error: 'Unauthorized', 
-      message: 'No user context provided. Security policy requires a valid tenant ID.' 
-    });
+    return res.status(401).json(authRequiredBody());
   }
 
-  // Attach the user ID to the request object for use in controllers/services
-  (req as any).userId = userId;
-  
   // Set a logical "Security Boundary" for the request
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  
+
   next();
 }
 

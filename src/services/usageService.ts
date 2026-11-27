@@ -256,9 +256,9 @@ export class UsageService {
 
   /**
    * Check if a user is the app owner (unlimited usage).
-   * Owner detection is robust to Gmail dot-variants: the owner's stored email may
-   * be 'stacipeabody@gmail.com' or 'staci.peabody@gmail.com' (same Gmail mailbox),
-   * so we compare normalized addresses. We ALSO treat the unbounded tiers
+   * Owner detection is robust to Gmail dot-variants: the owner's stored email is
+   * 'empirelaunchai@gmail.com', and Gmail ignores dots and case, so we compare
+   * normalized addresses. We ALSO treat the unbounded tiers
    * (OWNER_MASTER / BETA_TESTER) as owner-exempt as a defense in depth, because
    * the owner's DB row is provisioned OWNER_MASTER and those tiers are already
    * unbounded in subscriptionGuard/revenueOracle.

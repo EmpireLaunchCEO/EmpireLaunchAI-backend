@@ -45,7 +45,7 @@ export class ReviewController {
 
   async getTrustPulse(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       const metrics = await reviewService.getTrustMetrics(userId);
       res.json(metrics);
     } catch (error: any) {
@@ -55,7 +55,7 @@ export class ReviewController {
 
   async getSentimentMap(req: Request, res: Response) {
     try {
-      const userId = req.headers['x-user-id'] as string || 'default-user';
+      const userId = (req as any).userId;
       const map = await reviewService.getSentimentMap(userId);
       res.json(map);
     } catch (error: any) {

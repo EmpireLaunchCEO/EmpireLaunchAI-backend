@@ -14,7 +14,7 @@ const router = Router();
  */
 router.post('/harvest', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     const { niche } = req.body;
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });

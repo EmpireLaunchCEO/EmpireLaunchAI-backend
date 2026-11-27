@@ -3,7 +3,7 @@ import { blueprintService } from '../services/blueprintService.js';
 
 export const createKittlBlueprint = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { niche, productTitle, targetAudience, isEmpireMode } = req.body;
 
     if (!niche || !productTitle) {
@@ -28,7 +28,7 @@ export const createKittlBlueprint = async (req: Request, res: Response) => {
 
 export const createCapCutBlueprint = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string || 'default-user';
+    const userId = (req as any).userId;
     const { niche, productTitle, targetAudience } = req.body;
 
     if (!niche || !productTitle) {

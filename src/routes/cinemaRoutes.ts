@@ -9,22 +9,22 @@ const router = Router();
  */
 
 // Upload facial photo for Neural Twin (max 10MB)
-router.post('/upload-photo', upload.single('photo'), (req, res) =>
+router.post('/upload-photo', mobileAuth, upload.single('photo'), (req, res) =>
   cinemaController.uploadPhoto(req, res)
 );
 
 // Upload raw video material for AI editing (max 200MB)
-router.post('/upload-video', upload.single('video'), (req, res) =>
+router.post('/upload-video', mobileAuth, upload.single('video'), (req, res) =>
   cinemaController.uploadVideo(req, res)
 );
 
 // Enhance uploaded video with Empire Style
-router.post('/enhance-video', (req, res) =>
+router.post('/enhance-video', mobileAuth, (req, res) =>
   cinemaController.enhanceVideo(req, res)
 );
 
 // Create Neural Twin video from photo + script
-router.post('/create-twin', (req, res) =>
+router.post('/create-twin', mobileAuth, (req, res) =>
   cinemaController.createNeuralTwin(req, res)
 );
 
@@ -34,17 +34,17 @@ router.post('/generate-video', mobileAuth, (req, res) =>
 );
 
 // Get daily usage remaining
-router.get('/usage', (req, res) =>
+router.get('/usage', mobileAuth, (req, res) =>
   cinemaController.getUsage(req, res)
 );
 
 // Check asset status
-router.get('/status/:assetId', (req, res) =>
+router.get('/status/:assetId', mobileAuth, (req, res) =>
   cinemaController.getAssetStatus(req, res)
 );
 
 // Get user's creations (for Operations Base display)
-router.get('/creations', (req, res) =>
+router.get('/creations', mobileAuth, (req, res) =>
   cinemaController.getCreations(req, res)
 );
 

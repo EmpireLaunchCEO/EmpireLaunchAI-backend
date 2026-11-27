@@ -17,7 +17,7 @@ import {
   s3RangeHeader,
   authorizeStreamAccess,
   streamNotFoundBody,
-  streamUserIdRequiredBody,
+  streamAuthRequiredBody,
   StreamProjectLike,
 } from '../videoStreamService.js';
 
@@ -190,49 +190,51 @@ test('inlineDisposition: inline (play), not attachment (download)', () => {
 
 // ─── OWNERSHIP GATE (a project id is not a credential) ──────────────────────
 //
-// GET /api/studio/video/:projectId/stream must be scoped to the owner exactly
-// like /api/studio/download/:id. Before this gate existed, anyone holding a
-// project uuid could stream any client's finished video with no credential at
-// all. These four branches are the whole fix.
+// GET /api/studio/video/:projectId/stream and /download/:id are scoped to the
+// owner. Before the gate existed, anyone holding a project uuid could stream
+// any client's finished video with no credential at all. Then the gate trusted
+// a user id the caller could TYPE (`?userId=`, `x-user-id`) — so knowing
+// someone's user id still opened their video. Identity is now ONE thing only:
+// the user a real session token resolved to in `auth_sessions`. These branches
+// are the whole fix.
 
 const OWNER = '399ef884-0000-4000-8000-00000000000a';
 const STRANGER = '7f1c2d3e-0000-4000-8000-00000000000b';
 
-test('authorizeStreamAccess: no user id at all → 401 "userId required"', () => {
-  for (const rawUid of [undefined, null, '', '   ']) {
-    const d = authorizeStreamAccess({ rawUid, projectOwnerId: OWNER });
+test('authorizeStreamAccess: no session at all → 401 AUTH_REQUIRED', () => {
+  for (const sessionUserId of [undefined, null, '', '   ', 42, {}]) {
+    const d = authorizeStreamAccess({ sessionUserId, projectOwnerId: OWNER });
     assert.equal(d.kind, 'deny');
     if (d.kind !== 'deny') return;
     assert.equal(d.status, 401);
-    assert.equal(d.body.error, 'userId required');
-    assert.deepEqual(d.body, streamUserIdRequiredBody());
+    assert.deepEqual(d.body, streamAuthRequiredBody());
+    assert.equal(d.body.error, 'AUTH_REQUIRED');
   }
 });
 
-test('authorizeStreamAccess: id supplied but not yet resolved → pass, NOT a 401', () => {
-  // The route checks "did they tell us who they are?" before it resolves the id.
-  // Treating "not resolved yet" as "resolved to nobody" made the owner's own
-  // video answer 401 — this pins the distinction.
-  const d = authorizeStreamAccess({ rawUid: OWNER });
-  assert.equal(d.kind, 'pass');
+test('authorizeStreamAccess: a typed id is NOT a session — ?userId=/x-user-id open nothing', () => {
+  // The old signature read `rawUid`; a caller that still passes one (or any
+  // other id-shaped field) must get no identity out of it. This fails the
+  // moment someone re-adds a typed-identity door to the gate.
+  const typedOnly = authorizeStreamAccess({ rawUid: OWNER, userId: OWNER, 'x-user-id': OWNER } as any);
+  assert.equal(typedOnly.kind, 'deny');
+  if (typedOnly.kind === 'deny') assert.equal(typedOnly.status, 401);
 });
 
-test('authorizeStreamAccess: a supplied id that resolves to nobody → 401 "User not found"', () => {
-  const d = authorizeStreamAccess({ rawUid: 'not-a-real-key', resolvedUserId: null, projectOwnerId: OWNER });
-  assert.equal(d.kind, 'deny');
-  if (d.kind !== 'deny') return;
-  assert.equal(d.status, 401);
-  assert.equal(d.body.error, 'User not found');
+test('authorizeStreamAccess: a verified session, project not looked up yet → allow', () => {
+  const d = authorizeStreamAccess({ sessionUserId: OWNER });
+  assert.equal(d.kind, 'allow');
+  if (d.kind === 'allow') assert.equal(d.userId, OWNER);
 });
 
 test('authorizeStreamAccess: the owner asking for their own video → allow', () => {
-  const d = authorizeStreamAccess({ rawUid: OWNER, resolvedUserId: OWNER, projectOwnerId: OWNER });
+  const d = authorizeStreamAccess({ sessionUserId: OWNER, projectOwnerId: OWNER });
   assert.equal(d.kind, 'allow');
   if (d.kind === 'allow') assert.equal(d.userId, OWNER);
 });
 
 test('authorizeStreamAccess: a different user asking for it → 404, never 403', () => {
-  const d = authorizeStreamAccess({ rawUid: STRANGER, resolvedUserId: STRANGER, projectOwnerId: OWNER });
+  const d = authorizeStreamAccess({ sessionUserId: STRANGER, projectOwnerId: OWNER });
   assert.equal(d.kind, 'deny');
   if (d.kind !== 'deny') return;
   assert.equal(d.status, 404);
@@ -240,8 +242,8 @@ test('authorizeStreamAccess: a different user asking for it → 404, never 403',
 });
 
 test('authorizeStreamAccess: wrong owner is BYTE-IDENTICAL to an unknown id (no existence leak)', () => {
-  const wrongOwner = authorizeStreamAccess({ rawUid: STRANGER, resolvedUserId: STRANGER, projectOwnerId: OWNER });
-  const unknownId = authorizeStreamAccess({ rawUid: STRANGER, resolvedUserId: STRANGER, projectOwnerId: null });
+  const wrongOwner = authorizeStreamAccess({ sessionUserId: STRANGER, projectOwnerId: OWNER });
+  const unknownId = authorizeStreamAccess({ sessionUserId: STRANGER, projectOwnerId: null });
   const unknownViaLookup = resolveStreamTarget(null);
   assert.equal(wrongOwner.kind, 'deny');
   assert.equal(unknownId.kind, 'deny');
@@ -254,27 +256,20 @@ test('authorizeStreamAccess: wrong owner is BYTE-IDENTICAL to an unknown id (no 
 });
 
 test('authorizeStreamAccess: scoped query matched no row (unknown OR not-yours) → 404', () => {
-  // The route filters on (id, userId); another user's project simply returns no
-  // row, so both cases arrive here as projectOwnerId: null.
-  const d = authorizeStreamAccess({ rawUid: OWNER, resolvedUserId: OWNER, projectOwnerId: null });
+  // The route filters on (id, sessionUserId); another user's project simply
+  // returns no row, so both cases arrive here as projectOwnerId: null.
+  const d = authorizeStreamAccess({ sessionUserId: OWNER, projectOwnerId: null });
   assert.equal(d.kind, 'deny');
   if (d.kind === 'deny') assert.equal(d.status, 404);
 });
 
-test('authorizeStreamAccess: identity is compared exactly — case/whitespace cannot slip past', () => {
-  const upper = authorizeStreamAccess({ rawUid: OWNER, resolvedUserId: OWNER, projectOwnerId: OWNER.toUpperCase() });
+test('authorizeStreamAccess: identity is compared exactly — case cannot slip past', () => {
+  const upper = authorizeStreamAccess({ sessionUserId: OWNER, projectOwnerId: OWNER.toUpperCase() });
   assert.equal(upper.kind, 'deny');
-  const padded = authorizeStreamAccess({ rawUid: `  ${OWNER}  `, resolvedUserId: OWNER, projectOwnerId: OWNER });
-  assert.equal(padded.kind, 'allow');
 });
 
-test('authorizeStreamAccess: the three doors /download/:id accepts all reach the gate', () => {
-  // ?userId= arrives as a string, a repeated query param as an array, x-user-id
-  // as a header string. All three must be treated as "an id was supplied".
-  const asQuery = authorizeStreamAccess({ rawUid: OWNER, resolvedUserId: OWNER, projectOwnerId: OWNER });
-  const asArray = authorizeStreamAccess({ rawUid: [OWNER], resolvedUserId: OWNER, projectOwnerId: OWNER });
-  const asHeader = authorizeStreamAccess({ rawUid: String(OWNER), resolvedUserId: OWNER, projectOwnerId: OWNER });
-  assert.equal(asQuery.kind, 'allow');
-  assert.equal(asArray.kind, 'allow');
-  assert.equal(asHeader.kind, 'allow');
+test('authorizeStreamAccess: a padded session id is trimmed, not rejected', () => {
+  // Whitespace around a token-derived id is ours to clean; a wrong id is not.
+  const padded = authorizeStreamAccess({ sessionUserId: `  ${OWNER}  `, projectOwnerId: OWNER });
+  assert.equal(padded.kind, 'allow');
 });

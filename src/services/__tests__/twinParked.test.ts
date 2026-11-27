@@ -37,8 +37,8 @@ test('OWNER KEEPS TWIN: the seeded owner zero-UUID is still allowed to render', 
 });
 
 test('OWNER KEEPS TWIN: her email and OWNER_MASTER tier are allowed too', () => {
-  assert.equal(twinAllowedForIdentity({ id: 'x', email: 'Staci.Peabody@Gmail.com' }), true);
-  assert.equal(twinAllowedForIdentity({ id: 'x', email: 'stacipeabody@gmail.com' }), true);
+  assert.equal(twinAllowedForIdentity({ id: 'x', email: 'EmpireLaunchAI@Gmail.com' }), true);
+  assert.equal(twinAllowedForIdentity({ id: 'x', email: 'empirelaunchai@gmail.com' }), true);
   assert.equal(twinAllowedForIdentity({ id: 'x', tier: 'OWNER_MASTER' }), true);
 });
 

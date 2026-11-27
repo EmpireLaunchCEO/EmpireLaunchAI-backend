@@ -5,7 +5,8 @@ import { aiRouter, RouterDecision } from '../services/aiRouter.js';
 import { mediaUrlsFromPayload } from '../services/approvalPayloadRefresh.js';
 import { collectApprovalSweepIds } from '../services/deleteApprovalSweep.js';
 import { classifyDownload, downloadFailureBody } from '../services/downloadProxy.js';
-import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody } from '../services/videoStreamService.js';
+import { resolveStreamTarget, buildStreamHeaders, parseByteRange, s3RangeHeader, authorizeStreamAccess, streamNotFoundBody, streamAuthRequiredBody } from '../services/videoStreamService.js';
+import { findSession, sessionTokenFromRequest } from '../services/authSessions.js';
 import { ffmpegRenderService } from '../services/ffmpegRenderService.js';
 import { renderingEngine } from '../services/renderingEngine.js';
 import { generateDesignAndRecord } from '../services/designGenerationService.js';
@@ -108,26 +109,14 @@ function extractConfirmedFacts(
 const resolveUserId = async (raw: string): Promise<string | null> => {
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (uuidRegex.test(raw)) {
-    // It's a valid UUID — check if user exists, auto-create if not
+    // A valid UUID — look it up. NEVER create a user row from a request: that
+    // is exactly how identity used to be forged (owner, Nov 27).
     try {
       const [existing] = await db.select({ id: schema.users.id })
         .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
-      if (existing) return existing.id;
-
-      // Auto-create minimal user record (frontend generates UUIDs via crypto.randomUUID)
-      // email is .notNull().unique() per schema — use synthetic to satisfy both constraints
-      await db.insert(schema.users).values({
-        id: raw,
-        email: `${raw.slice(0, 8)}@empirelaunch.ai`,
-        accessKey: null,
-      }).onConflictDoNothing();
-
-      // Re-read to handle race: another request may have created between our SELECT and INSERT
-      const [created] = await db.select({ id: schema.users.id })
-        .from(schema.users).where(eq(schema.users.id, raw)).limit(1);
-      return created?.id ?? null;
+      return existing?.id ?? null;
     } catch (err) {
-      console.warn('[StudioRoute] resolveUserId failed to verify/create user:', (err as Error).message);
+      console.warn('[StudioRoute] resolveUserId failed to look up user:', (err as Error).message);
       return null;
     }
   }
@@ -150,7 +139,7 @@ const resolveUserId = async (raw: string): Promise<string | null> => {
 };
 
 
-router.post('/process', async (req: Request, res: Response) => {
+router.post('/process', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { userId, brandId, request, attachments, conversationHistory, actionHint } = req.body as StudioRequest;
     const { voice, tone, duration } = req.body as StudioRequest;
@@ -160,15 +149,9 @@ router.post('/process', async (req: Request, res: Response) => {
       return res.status(400).json({ status: 'error', error: 'request is required' });
     }
 
-    // Resolve userId from all possible sources. Guard against sentinel
-    // values ('system', 'anonymous', '') that reach the route when the
-    // frontend hasn't generated a device UUID yet.
-    let uid = userId || (req as any).userId || req.headers['x-user-id'] as string || '';
-    const nonUuidSentinels = /^(system|anonymous|)$/i;
-    if (nonUuidSentinels.test(String(uid).trim())) {
-      console.warn(`[StudioRoute] Received sentinel userId "${uid}", generating device UUID`);
-      uid = uuidv4();
-    }
+    // Identity is the verified session — never the `userId` in the body, which
+    // any caller can type. mobileAuth has already refused a request without one.
+    const uid = String((req as any).userId);
 
     // 1. Fetch brand context if brandId provided
     let brandContext: any = undefined;
@@ -606,14 +589,15 @@ router.post('/process', async (req: Request, res: Response) => {
 
 // ─── GET /api/studio/creation/:id — Poll async video status ──────────────────
 
-router.get('/creation/:id', async (req: Request, res: Response) => {
+router.get('/creation/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
-    // FIRST: Check creations table (single-shot videos)
+    // FIRST: Check creations table (single-shot videos), scoped to the caller:
+    // someone else's creation simply does not exist here.
     const [creation] = await db.select()
       .from(schema.creations)
-      .where(eq(schema.creations.id, id))
+      .where(and(eq(schema.creations.id, id), eq(schema.creations.userId, (req as any).userId)))
       .limit(1);
 
     if (creation) {
@@ -742,9 +726,9 @@ async function refreshR2Url(storedUrl: string): Promise<string> {
   }
 }
 
-router.get('/assets', async (req: Request, res: Response) => {
+router.get('/assets', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    const uid = (req as any).userId;
     if (!uid) return res.status(400).json({ status: 'error', error: 'userId required' });
 
     const resolvedUserId = await resolveUserId(String(uid));
@@ -812,14 +796,16 @@ router.get('/assets', async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/studio/download/:id — Proxy download (solves R2 CORS on mobile) ─
-router.get('/download/:id', async (req: Request, res: Response) => {
+router.get('/download/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const idStr = String(id); // req.params ids are typed string | string[]; downloadFailureBody needs a plain string
-    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
-    if (!uid) return res.status(401).json({ error: 'userId required' });
-    const resolvedUserId = await resolveUserId(String(uid));
-    if (!resolvedUserId) return res.status(401).json({ error: 'User not found' });
+    // Identity is the VERIFIED session and nothing else (owner, Nov 27): the
+    // token is checked against `auth_sessions`, and `?userId=` / `x-user-id` are
+    // never read — an id the caller can type is not authentication.
+    const session = await findSession(sessionTokenFromRequest(req));
+    if (!session) return res.status(401).json(streamAuthRequiredBody());
+    const resolvedUserId = session.userId;
 
     // Resolve the underlying media row across BOTH namespaces the Operations
     // page surfaces: single-shot creations AND scene-based video projects.
@@ -884,36 +870,35 @@ router.get('/download/:id', async (req: Request, res: Response) => {
 // is what a browser checks before it offers a play button.
 //
 // AUTH: OWNERSHIP-SCOPED, exactly like GET /api/studio/download/:id above.
-// A project id is not a credential — user privacy is a non-negotiable, so a
-// caller must say who they are (session userId, ?userId=, or x-user-id) and the
-// project query filters on (id, userId) for that resolved user. A project that
+// A project id is not a credential, and neither is a user id — user privacy is a
+// non-negotiable. Identity comes from ONE place: a real session token verified
+// against `auth_sessions`, sent as `Authorization: Bearer` or as `?token=`
+// (a browser `<video src>` cannot set a header). `?userId=` and `x-user-id` are
+// not read here at all, so knowing someone's user id no longer opens their
+// video. The project query filters on (id, sessionUserId); a project that
 // belongs to someone else answers with the SAME 404 as an unknown id: a 403
 // would confirm the id is real. This route still only reads bytes of one
 // already-rendered project — it never writes, lists, deletes or spends — and no
 // other route's auth is touched.
-router.get('/video/:projectId/stream', async (req: Request, res: Response) => {
+router.get('/video/:projectId/stream', mobileAuth, async (req: Request, res: Response) => {
   const projectId = String(req.params.projectId || '');
   try {
-    // 1. Who is asking? Same three doors /download/:id accepts.
-    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
-    const identified = authorizeStreamAccess({ rawUid: uid });
+    // 1. Who is asking? Only a session token can answer. `mobileAuth` has
+    //    already refused an unauthenticated caller; this second, explicit check
+    //    against `auth_sessions` means the route cannot be opened by removing
+    //    the middleware, and no typed id can stand in for a session.
+    const session = await findSession(sessionTokenFromRequest(req));
+    const identified = authorizeStreamAccess({ sessionUserId: session?.userId });
     if (identified.kind === 'deny') return res.status(identified.status).json(identified.body);
+    const ownerUserId = identified.userId;
 
-    // 2. Resolve it to a real user row (never with an empty id — resolveUserId
-    //    auto-creates a row for an unknown uuid, so it is only ever called with
-    //    an id the caller actually supplied).
-    const resolvedUserId = await resolveUserId(String(uid));
-    const authorised = authorizeStreamAccess({ rawUid: uid, resolvedUserId });
-    if (authorised.kind === 'deny') return res.status(authorised.status).json(authorised.body);
-    const ownerUserId = authorised.userId; // non-null by construction
-
-    // 3. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
+    // 2. A non-uuid id would make Postgres raise `invalid input syntax for uuid`,
     //    which would surface as a 500. Answer the honest 404 instead.
     if (!UUID_RE.test(projectId)) {
       return res.status(404).json(streamNotFoundBody());
     }
 
-    // 4. The project, scoped to the caller. Someone else's project simply does
+    // 3. The project, scoped to the caller. Someone else's project simply does
     //    not exist here — the query cannot return it, so nothing can leak.
     const [project] = await db.select()
       .from(schema.videoProjects)
@@ -923,11 +908,10 @@ router.get('/video/:projectId/stream', async (req: Request, res: Response) => {
       ))
       .limit(1);
 
-    // 5. Belt and braces: the same gate decides, so an edit that drops the
+    // 4. Belt and braces: the same gate decides, so an edit that drops the
     //    scope from the query above cannot silently reopen the route.
     const ownerCheck = authorizeStreamAccess({
-      rawUid: uid,
-      resolvedUserId: ownerUserId,
+      sessionUserId: ownerUserId,
       projectOwnerId: project?.userId ?? null,
     });
     if (ownerCheck.kind === 'deny') return res.status(ownerCheck.status).json(ownerCheck.body);
@@ -1006,9 +990,10 @@ router.get('/video/:projectId/stream', async (req: Request, res: Response) => {
 });
 
 // ─── DELETE /api/studio/creation/:id — Delete a creation + R2 file + approval ─
-router.delete('/creation/:id', async (req: Request, res: Response) => {
+router.delete('/creation/:id', mobileAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const uid = String((req as any).userId);
     const { r2Storage } = await import('../services/r2StorageService.js');
 
     // Delete an R2 object (best-effort — never fail the row delete on R2 errors).
@@ -1023,7 +1008,9 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     const deleteProject = async (projectId: string): Promise<void> => {
       if (!projectId) return;
       const [proj] = await db.select()
-        .from(schema.videoProjects).where(eq(schema.videoProjects.id, projectId)).limit(1);
+        .from(schema.videoProjects)
+        .where(and(eq(schema.videoProjects.id, projectId), eq(schema.videoProjects.userId, uid)))
+        .limit(1);
       if (!proj) return;
       try {
         const scenes = await db.select()
@@ -1044,9 +1031,13 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     const deleteApprovalsFor = async (ids: string[]): Promise<void> => {
       if (!ids.length) return;
       try {
-        await db.delete(schema.approvals).where(sql`
-          ${schema.approvals.payload}->>'assetId' = ANY(${ids}) OR
-          ${schema.approvals.payload}->>'projectId' = ANY(${ids})`);
+        await db.delete(schema.approvals).where(and(
+          eq(schema.approvals.userId, uid),
+          sql`(
+            ${schema.approvals.payload}->>'assetId' = ANY(${ids}) OR
+            ${schema.approvals.payload}->>'projectId' = ANY(${ids})
+          )`,
+        ));
       } catch {}
     };
 
@@ -1058,7 +1049,9 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
 
     // 1) Creation found by its own id.
     let creation = (await db.select()
-      .from(schema.creations).where(eq(schema.creations.id, id)).limit(1))[0];
+      .from(schema.creations)
+      .where(and(eq(schema.creations.id, id), eq(schema.creations.userId, uid)))
+      .limit(1))[0];
 
     // 2) Creation resolved through an approval (approval.payload.assetId == id, OR approval.id == id).
     //    Keep the approval row itself too: an orphaned approval (one whose payload.assetId has no
@@ -1067,23 +1060,34 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     let approvalRow: any = undefined;
     if (!creation) {
       const [ap] = await db.select().from(schema.approvals)
-        .where(sql`${schema.approvals.payload}->>'assetId' = ${id}`).limit(1);
+        .where(and(eq(schema.approvals.userId, uid), sql`${schema.approvals.payload}->>'assetId' = ${id}`))
+        .limit(1);
       const approval = ap || (await db.select()
-        .from(schema.approvals).where(eq(schema.approvals.id, id)).limit(1))[0];
+        .from(schema.approvals)
+        .where(and(eq(schema.approvals.id, id), eq(schema.approvals.userId, uid)))
+        .limit(1))[0];
       approvalRow = approval;
       if (approval?.payload?.assetId) {
         creation = (await db.select()
-          .from(schema.creations).where(eq(schema.creations.id, approval.payload.assetId)).limit(1))[0];
+          .from(schema.creations)
+          .where(and(eq(schema.creations.id, approval.payload.assetId), eq(schema.creations.userId, uid)))
+          .limit(1))[0];
       }
     }
 
     // 3) Video project found by its own id → link back to the creation the scene
     //    pipeline wrote (metadata.projectId == this project id).
     const [projectById] = await db.select()
-      .from(schema.videoProjects).where(eq(schema.videoProjects.id, id)).limit(1);
+      .from(schema.videoProjects)
+      .where(and(eq(schema.videoProjects.id, id), eq(schema.videoProjects.userId, uid)))
+      .limit(1);
     if (!creation && projectById) {
       const [linked] = await db.select().from(schema.creations)
-        .where(sql`${schema.creations.metadata}->>'projectId' = ${projectById.id}`).limit(1);
+        .where(and(
+          eq(schema.creations.userId, uid),
+          sql`${schema.creations.metadata}->>'projectId' = ${projectById.id}`,
+        ))
+        .limit(1);
       creation = linked;
     }
 
@@ -1112,7 +1116,7 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
         try { await deleteR2(url); } catch {}
       }
       try {
-        await db.delete(schema.approvals).where(eq(schema.approvals.id, approvalRow.id));
+        await db.delete(schema.approvals).where(and(eq(schema.approvals.id, approvalRow.id), eq(schema.approvals.userId, uid)));
       } catch (err: any) {
         throw new Error('Failed to delete approval row: ' + (err?.message ?? err));
       }
@@ -1123,7 +1127,7 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
     if (creation) {
       await deleteR2(creation.fileUrl);
       await deleteR2(creation.thumbnailUrl);
-      await db.delete(schema.creations).where(eq(schema.creations.id, creation.id));
+      await db.delete(schema.creations).where(and(eq(schema.creations.id, creation.id), eq(schema.creations.userId, uid)));
     }
     // Sweep EVERY approval row of the run (faceless + completed scene receipts) —
     // including the orphan-approval click path where only approvalRow resolved.
@@ -1142,9 +1146,9 @@ router.delete('/creation/:id', async (req: Request, res: Response) => {
 });
 
 /** Scene-based video project endpoints. All work is persisted and runs after response. */
-router.post('/video-project', async (req: Request, res: Response) => {
+router.post('/video-project', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const rawUser = req.body.userId || (req as any).userId || req.headers['x-user-id'];
+    const rawUser = (req as any).userId;
     const resolvedUserId = await resolveUserId(typeof rawUser === 'string' ? rawUser : undefined as any);
     if (!resolvedUserId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' });
     const { title, idea, platforms, style, script } = req.body;
@@ -1266,12 +1270,12 @@ router.post('/video-project', async (req: Request, res: Response) => {
     return res.status(500).json({ status: 'error', error: error.message });
   }
 });
-router.get('/video-project/:id', async (req: Request, res: Response) => {
-  try { const userId = await resolveUserId(typeof req.query.userId === 'string' ? req.query.userId : ((req as any).userId || req.headers['x-user-id']) as string); const result = userId ? await sceneVideoPipelineService.getProject(req.params.id, userId) : null; if (!result) return res.status(404).json({ status: 'error', error: 'Project not found' }); return res.json(result); }
+router.get('/video-project/:id', mobileAuth, async (req: Request, res: Response) => {
+  try { const userId = await resolveUserId(String((req as any).userId)); const result = userId ? await sceneVideoPipelineService.getProject(req.params.id, userId) : null; if (!result) return res.status(404).json({ status: 'error', error: 'Project not found' }); return res.json(result); }
   catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
 });
-router.post('/scene/:id/regenerate', async (req: Request, res: Response) => {
-  try { const userId = await resolveUserId(req.body.userId || (req as any).userId); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
+router.post('/scene/:id/regenerate', mobileAuth, async (req: Request, res: Response) => {
+  try { const userId = await resolveUserId(String((req as any).userId)); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
   catch (error: any) {
     // A parked-Scene refusal on regeneration is an answer, not a crash (owner Nov 9).
     if (isSceneUnavailableError(error)) return res.status(403).json(sceneRefusalBody());
@@ -1280,9 +1284,9 @@ router.post('/scene/:id/regenerate', async (req: Request, res: Response) => {
 });
 
 /** List all video projects for the authenticated user (Operations page). */
-router.get('/video-projects', async (req: Request, res: Response) => {
+router.get('/video-projects', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const uid = (req as any).userId || req.query.userId || req.headers['x-user-id'];
+    const uid = (req as any).userId;
     if (!uid) return res.status(400).json({ status: 'error', error: 'userId required' });
     const resolvedUserId = await resolveUserId(String(uid));
     if (!resolvedUserId) return res.status(400).json({ status: 'error', error: 'User not found' });
@@ -1326,7 +1330,7 @@ export default router;
 
 
 // Diagnostic: test API connectivity
-router.get('/diag', async (_req: Request, res: Response) => {
+router.get('/diag', mobileAuth, async (_req: Request, res: Response) => {
   // 15-second hard deadline for the entire diag response
   let sent = false;
   const timer = setTimeout(() => {
@@ -1364,8 +1368,8 @@ router.get('/diag', async (_req: Request, res: Response) => {
   if (!sent) { sent = true; clearTimeout(timer); res.json(results); }
 });
 
-// ─── GET /api/studio/recent — No auth needed, shows last 10 creations ──────
-router.get('/recent', async (_req: Request, res: Response) => {
+// ─── GET /api/studio/recent — the caller's own last 10 creations ───────────
+router.get('/recent', mobileAuth, async (req: Request, res: Response) => {
   try {
     const recent = await db.select({
       id: schema.creations.id,
@@ -1375,6 +1379,7 @@ router.get('/recent', async (_req: Request, res: Response) => {
       createdAt: schema.creations.createdAt,
       metadata: schema.creations.metadata,
     }).from(schema.creations)
+      .where(eq(schema.creations.userId, (req as any).userId))
       .orderBy(desc(schema.creations.createdAt))
       .limit(10);
     res.json(recent.map(r => ({
@@ -1387,10 +1392,10 @@ router.get('/recent', async (_req: Request, res: Response) => {
 });
 
 // ─── GET /api/studio/trace — Quick check: latest creation trace ──────────────
-router.get('/trace', async (req: Request, res: Response) => {
+router.get('/trace', mobileAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId || req.headers['x-user-id'] as string || req.query.userId as string;
-    if (!userId) return res.status(401).json({ error: 'No user ID — pass ?userId=YOUR_ID or set x-user-id header' });
+    const userId = (req as any).userId as string;
+    if (!userId) return res.status(401).json({ error: 'AUTH_REQUIRED' });
     const [latest] = await db.select({
       id: schema.creations.id,
       status: schema.creations.status,
@@ -1415,7 +1420,7 @@ router.get('/trace', async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/studio/openai-diag — Quick OpenAI connectivity check ──────
-router.get('/openai-diag', async (_req: Request, res: Response) => {
+router.get('/openai-diag', mobileAuth, async (_req: Request, res: Response) => {
   const key = process.env.OPENAI_API_KEY;
   if (!key) return res.json({ ok: false, error: 'OPENAI_API_KEY not set in env' });
   try {

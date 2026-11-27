@@ -198,7 +198,7 @@ export const triggerInstantPayout = async (req: Request, res: Response) => {
 
 export const createPlatformCheckout = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     const { returnUrl, currency, amountInCents, clientName, referral } = req.body;
     if (!userId) return res.status(401).json({ error: 'Auth required' });
 
@@ -221,7 +221,7 @@ export const createPlatformCheckout = async (req: Request, res: Response) => {
 
 export const createExpansionCheckout = async (req: Request, res: Response) => {
   try {
-    const userId = req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     const { returnUrl, clientName, referral } = req.body;
     if (!userId) return res.status(401).json({ error: 'Auth required' });
 

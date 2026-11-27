@@ -20,7 +20,7 @@ const { scheduledPosts, users, approvals, creations } = schema;
 
 export const getPendingApprovals = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -56,7 +56,7 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
 
 export const createApproval = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -376,7 +376,7 @@ export const createApproval = async (req: Request, res: Response) => {
 
 export const clearApprovals = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -463,7 +463,7 @@ export const respondToApproval = async (req: Request, res: Response) => {
  */
 export const saveToLibrary = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     const { approvalId } = req.body;
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
@@ -677,7 +677,7 @@ export const saveToLibrary = async (req: Request, res: Response) => {
  */
 export const submitNeuralFeedback = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id || (req as any).userId || req.headers['x-user-id'] as string;
+    const userId = (req as any).userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const approvalId = (req.params.id || req.body.approvalId) as string;
     const { feedback } = req.body || {};

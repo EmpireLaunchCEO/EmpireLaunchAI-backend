@@ -120,80 +120,58 @@ export function streamNotFoundBody(): Record<string, unknown> {
   };
 }
 
-/** The 401 body when the caller did not say who they are (mirrors /download/:id). */
-export function streamUserIdRequiredBody(): Record<string, unknown> {
-  return {
-    status: 'error',
-    error: 'userId required',
-    reason: 'Pass your user id as ?userId=..., an x-user-id header, or a signed-in session.',
-  };
-}
-
-/** The 401 body when the supplied id resolves to no known user (mirrors /download/:id). */
-export function streamUserNotFoundBody(): Record<string, unknown> {
-  return {
-    status: 'error',
-    error: 'User not found',
-    reason: 'That user id does not resolve to an account.',
-  };
+/**
+ * The one 401 for "we do not know who you are".
+ *
+ * Byte-identical to the middleware's refusal (`mobileAuth`), because it is the
+ * same statement: this route has no other way to learn an identity. It names no
+ * header and no query parameter, because there is nothing the caller can type
+ * that would be believed.
+ */
+export function streamAuthRequiredBody(): Record<string, unknown> {
+  return { error: 'AUTH_REQUIRED' };
 }
 
 export type StreamAccess =
   | { kind: 'allow'; userId: string }
-  /** The caller supplied an id; nothing beyond that has been checked yet. */
-  | { kind: 'pass' }
   | { kind: 'deny'; status: 401 | 404; body: Record<string, unknown> };
 
 /**
- * OWNERSHIP GATE for GET /api/studio/video/:projectId/stream.
+ * OWNERSHIP GATE for GET /api/studio/video/:projectId/stream (and /download/:id).
  *
- * A project id is NOT a credential. User privacy is a non-negotiable, so the
- * stream route is scoped to the owner exactly like GET /api/studio/download/:id
- * — the query filters on (id, userId) and this decision mirrors it:
+ * A project id is NOT a credential, and neither is a user id. Identity arrives
+ * here ONE way: `sessionUserId`, the user a real session token resolved to in
+ * `auth_sessions` (Bearer, or `?token=` because a `<video>` element cannot send
+ * a header). `?userId=` and `x-user-id` are not read at all — an identity the
+ * caller can type is not authentication (owner, Nov 27). A caller who knows
+ * someone else's user id can no longer open their video with it.
  *
- *   no user id supplied        -> 401 'userId required'
- *   id does not resolve        -> 401 'User not found'
- *   no project for this owner  -> 404, the SAME body as an unknown id
- *   project belongs to another -> 404, identical (never confirms existence)
- *   project belongs to caller  -> allow
+ *   no session                  -> 401 AUTH_REQUIRED
+ *   project not looked up yet   -> allow (the scoped query has not run)
+ *   no project for this owner   -> 404, the SAME body as an unknown id
+ *   project belongs to another  -> 404, identical (never confirms existence)
+ *   project belongs to caller   -> allow
  *
  * `projectOwnerId` is null whenever the scoped query matched no row, so
  * "wrong owner" and "unknown id" are indistinguishable here by construction.
- * Keeping the rule pure lets all five branches be tested with no DB, and means
- * a future edit that drops the scope from the query still cannot open the door.
- *
- * The route calls this more than once per request, so the difference between
- * "not established yet" and "established as nothing" is explicit:
- *   resolvedUserId === undefined  -> caller id not resolved yet  (kind 'pass')
- *   resolvedUserId === null / ''  -> resolved to nobody          (401)
- *   projectOwnerId === undefined  -> project not looked up yet   (allow)
- *   projectOwnerId === null / ''  -> no row for this owner       (404)
- * Getting that wrong in the other direction is what produced a route that
- * answered 401 to the owner's own video; the tests pin all five branches.
+ * Keeping the rule pure lets every branch be tested with no DB, and means a
+ * future edit that drops the scope from the query still cannot open the door.
  */
 export function authorizeStreamAccess(input: {
-  rawUid?: unknown;
-  resolvedUserId?: string | null;
-  projectOwnerId?: string | null;
+  sessionUserId?: unknown;
+  projectOwnerId?: unknown;
 }): StreamAccess {
-  const raw = Array.isArray(input.rawUid)
-    ? String(input.rawUid[0] ?? '').trim()
-    : (typeof input.rawUid === 'string' ? input.rawUid.trim() : '');
-  if (!raw) return { kind: 'deny', status: 401, body: streamUserIdRequiredBody() };
+  const session = typeof input.sessionUserId === 'string' ? input.sessionUserId.trim() : '';
+  if (!session) return { kind: 'deny', status: 401, body: streamAuthRequiredBody() };
 
-  if (input.resolvedUserId === undefined) return { kind: 'pass' };
-
-  const resolved = typeof input.resolvedUserId === 'string' ? input.resolvedUserId.trim() : '';
-  if (!resolved) return { kind: 'deny', status: 401, body: streamUserNotFoundBody() };
-
-  if (input.projectOwnerId === undefined) return { kind: 'allow', userId: resolved };
+  if (input.projectOwnerId === undefined) return { kind: 'allow', userId: session };
 
   const owner = typeof input.projectOwnerId === 'string' ? input.projectOwnerId.trim() : '';
-  if (!owner || owner !== resolved) {
+  if (!owner || owner !== session) {
     return { kind: 'deny', status: 404, body: streamNotFoundBody() };
   }
 
-  return { kind: 'allow', userId: resolved };
+  return { kind: 'allow', userId: session };
 }
 
 /**

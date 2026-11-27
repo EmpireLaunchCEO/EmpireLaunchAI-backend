@@ -266,16 +266,16 @@ test('(b3) email fallback: case, Gmail dots and googlemail all match one mailbox
       makeSub({
         id: 'sub_email',
         metadata: {},
-        customer: { id: 'cus_x', email: 'Staci.Peabody@GoogleMail.com' },
+        customer: { id: 'cus_x', email: 'Jane.Cooper@GoogleMail.com' },
       }),
     ],
   });
   const snapshot = await readBillingSnapshot({ fresh: true });
 
   for (const email of [
-    'stacipeabody@gmail.com',
-    'Staci.Peabody@gmail.com',
-    'STACI.PEABODY@GOOGLEMAIL.COM',
+    'janecooper@gmail.com',
+    'Jane.Cooper@gmail.com',
+    'JANECOOPER@GOOGLEMAIL.COM',
   ]) {
     const matches = matchClientSubscriptions(snapshot, { userId: 'no-ref-here', email });
     assert.equal(matches.length, 1, `${email} must match`);
@@ -394,7 +394,7 @@ test('(c5) the owner is never a client of her own product — by id or by email'
         id: 'sub_owner_mail',
         ref: null,
         slot: 'subscription',
-        email: 'staci.peabody@gmail.com',
+        email: 'empirelaunchai@gmail.com',
       }),
       normalizedFixture({ id: 'sub_real', ref: 'client-real', slot: 'brand3' }),
     ],
