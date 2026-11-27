@@ -38,6 +38,10 @@ import { extractCreativeEssence, isInternalBriefEcho, isInternalTalkPoint, isCha
 // on the project, and produce the client-facing failure copy.
 import { PlanningFailedError, applyTemplateFill, classifyPlannerOutcome, describeNonPlanResponse, planPayloadFromDecision, plannerFailureNotice, runPlanningAttempts, suppliedScriptPlannerOutcome, usableSceneCount, type PlannerOutcome } from './plannerOutcome.js';
 import { normalizeAssemblyOverlays, applyAssemblyOverlays, resolveSceneVideoStarts, probeClipSeconds } from './assemblyOverlays.js';
+// HER PHOTO, MEASURED IN THE DELIVERED FRAMES (roadmap 78): the only place the
+// pipeline looks at PIXELS to answer "is the photo she uploaded actually in this
+// video?" — and repairs it into the frames when the answer is no.
+import { ensurePhotoInDeliveredFrames, type PhotoInFramesResult, type PhotoWindow } from './photoInFrames.js';
 import { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolTimeoutError, mediaToolFailure } from './mediaToolDeadline.js';
 // COST PRE-FLIGHT (owner, 23 Nov): every free check that can refuse a video runs
 // BEFORE the planner's first paid call, so a brief that could never be rendered
@@ -218,6 +222,19 @@ export function buildDraftBase(
   const deliveredSeconds = Number((pmeta as any)?.deliveredDurationSeconds);
   const deliveredSource = (pmeta as any)?.deliveredDurationSource;
   const deliveredBand = (pmeta as any)?.deliveredDurationBand;
+  // THE PHOTO VERDICT REACHES THE CARD (roadmap 78): the measurement travels with
+  // the draft so "your photo is in the video" is never a claim made from the plan.
+  // When it did not come through, she is told plainly — and the sentence says
+  // nothing about charges, cost or refunds (owner, 23 Nov).
+  const photoInFrames = (pmeta as any)?.photoInFrames;
+  // Two honest sentences, never one dishonest one: a measured 'absent' says the
+  // photo is not in the frames; a check that could not run says so instead of
+  // borrowing the verdict it did not reach.
+  const photoNotice = !photoInFrames || photoInFrames.verdict === 'present'
+    ? undefined
+    : photoInFrames.verdict === 'absent'
+      ? 'Your photo did not come through into this video — it is not visible in the finished frames.'
+      : 'We could not confirm your photo is in this video, so we are not claiming it is.';
   return {
     projectId,
     mode,
@@ -232,6 +249,8 @@ export function buildDraftBase(
           ...(deliveredBand ? { deliveredDurationBand: deliveredBand } : {}),
         }
       : {}),
+    ...(photoInFrames ? { photoInFrames } : {}),
+    ...(photoNotice ? { photoNotice } : {}),
     ...(qc ? { qc } : {}),
   };
 }
@@ -5636,12 +5655,15 @@ if (!skipGeneration) {
       // mathematics stay untouched and the delivered video is THE overlaid file
       // (downstream QC + variant export + R2 upload all see it).
       let assembled = assembled0;
+      // Scene timing in the DELIVERED file — used by the overlays below AND by the
+      // photo-in-frames check: each clip's measured length, and where it starts once
+      // one dissolve overlap is consumed per boundary.
+      const sceneSeconds = clips.map((c: string) => probeClipSeconds(c));
+      const trSecNow = Math.min(Number(process.env.SCENE_TRANSITION_MS ?? 800), 1000) / 1000;
+      const sceneStarts = resolveSceneVideoStarts(sceneSeconds, trSecNow);
       const overlaySpec = normalizeAssemblyOverlays((pmeta.onScreenOverlays as any), clips.length);
       if (overlaySpec) {
         trace(`overlay_start project=${projectId} scenes=${clips.length} bottomBar=${Boolean(overlaySpec.bottomBar)}`);
-        const sceneSeconds = clips.map((c: string) => probeClipSeconds(c));
-        const trSecNow = Math.min(Number(process.env.SCENE_TRANSITION_MS ?? 800), 1000) / 1000;
-        const sceneStarts = resolveSceneVideoStarts(sceneSeconds, trSecNow);
         const overlaid = path.join(dir, 'final_overlay.mp4');
         await applyAssemblyOverlays(assembled0, overlaid, overlaySpec, sceneStarts, sceneSeconds);
         assembled = overlaid;
@@ -5661,6 +5683,59 @@ if (!skipGeneration) {
         if (!fit.inBand) trace(`delivered_duration_out_of_band project=${projectId} selected=${selectedDurationSeconds}s measured=${fit.after.toFixed(2)}s reason=${fit.reason}`);
       } catch (fitErr: any) {
         trace(`duration_fit_failed project=${projectId} error=${fitErr?.message}`);
+      }
+      // ── IS HER PHOTO ACTUALLY IN THESE FRAMES? (roadmap 78) ──────────────
+      // Runs on THE FILE SHE ACTUALLY DOWNLOADS: after the length fit, so the pixels
+      // measured are the pixels uploaded — not a file that gets re-cut afterwards.
+      // Before QC, the variants and the R2 upload, so those all see the measured bytes.
+      // `sourceImagePlacement` is written from the PLAN; this is the only place that
+      // looks at PIXELS. On 'absent' the photo is composited into the scene window(s)
+      // it was assigned to and the check runs again on the NEW file — a photo that did
+      // not make it is repaired, never silently missing, and a photo that still cannot
+      // be found is never claimed.
+      let photoInFrames: PhotoInFramesResult | undefined;
+      if (heroSource && sourceImageTargetScenes.length && clips.length === complete.length) {
+        try {
+          // The fit retimes the WHOLE delivered file (setpts/atempo), so a scene window
+          // measured on the pre-fit clips sits at the wrong second in the file she
+          // downloads: move it by the same factor the fit applied, and never past the
+          // delivered end. No fit → scale 1, nothing moved.
+          const deliveredTimeScale = durationFit?.applied ? durationFit.factor : 1;
+          const deliveredEndSec = durationFit?.applied ? durationFit.after : probeDuration(assembled);
+          const windows: PhotoWindow[] = [];
+          complete.forEach((s: any, idx: number) => {
+            if (!sourceImageTargetScenes.includes(Number(s.sceneNumber))) return;
+            const startSec = (sceneStarts[idx] ?? 0) * deliveredTimeScale;
+            const endSec = Math.min((startSec + (sceneSeconds[idx] ?? 0) * deliveredTimeScale), deliveredEndSec);
+            if (endSec > startSec) windows.push({ sceneNumber: Number(s.sceneNumber), startSec, endSec });
+          });
+          if (deliveredTimeScale !== 1) trace(`photo_in_frames_windows_scaled project=${projectId} scale=${deliveredTimeScale} deliveredEnd=${deliveredEndSec.toFixed(2)}s`);
+          photoInFrames = await ensurePhotoInDeliveredFrames({
+            videoPath: assembled,
+            photoPath: '',
+            photoUrl: heroSource,
+            windows,
+            trace,
+          });
+          if (photoInFrames.repairedVideoPath && fs.existsSync(photoInFrames.repairedVideoPath)) {
+            assembled = photoInFrames.repairedVideoPath;
+            trace(`photo_in_frames_delivered_repaired project=${projectId} file=${path.basename(assembled)}`);
+          }
+        } catch (photoErr: any) {
+          // NEVER SILENT, NEVER A LIE: a check that could not run records that it
+          // could not run — it never falls back to claiming the photo is there.
+          photoInFrames = {
+            verdict: 'not-pixel-provable',
+            bestDistance: null,
+            framesChecked: 0,
+            matchedFrame: null,
+            repaired: false,
+            reason: `the photo check could not run (${photoErr?.message || 'unknown error'})`,
+            sceneNumbers: sourceImageTargetScenes,
+          };
+          trace(`photo_in_frames_error project=${projectId} err=${photoErr?.message}`);
+        }
+        trace(`photo_in_frames project=${projectId} verdict=${photoInFrames.verdict} best=${photoInFrames.bestDistance} frames=${photoInFrames.framesChecked} repaired=${photoInFrames.repaired} scenes=[${photoInFrames.sceneNumbers.join(',')}]`);
       }
       // POST-RENDER SMOOTHNESS QC (deterministic ffprobe; NO AI / NO paid render).
       // Auto-flags choppy/silent/multi-audio renders BEFORE upload and surfaces the
@@ -5769,6 +5844,12 @@ if (!skipGeneration) {
         }),
       };
       if (variantIssue) completeMeta.variantExportError = variantIssue;
+      if (photoInFrames) {
+        // The MEASURED verdict, on the row — the delivered file's own pixels, not
+        // the plan. `repairedVideoPath` is an internal hand-off, never persisted.
+        const { repairedVideoPath: _internalPath, ...persisted } = photoInFrames;
+        completeMeta.photoInFrames = persisted;
+      }
       await db.update(schema.videoProjects).set({status:'completed',finalVideoUrl:finalUrl,updatedAt:new Date(),metadata:completeMeta}).where(eq(schema.videoProjects.id,projectId)); trace(`project_complete project=${projectId}`);
       await this.settleSubmissionReceipt(projectId, userId, { status: 'completed' });
       // ── Deliver to Operations page AS DRAFTS (owner auto-save change) ────
