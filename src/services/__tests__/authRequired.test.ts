@@ -92,6 +92,7 @@ before(async () => {
     id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, stripe_account_id TEXT,
     paypal_merchant_id TEXT, terms_accepted_version INTEGER DEFAULT 0, business_slots INTEGER DEFAULT 1,
     is_locked INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER, tier TEXT DEFAULT 'STANDARD_USER',
+    role TEXT NOT NULL DEFAULT 'client',
     access_key TEXT, password_hash TEXT, is_review_mode INTEGER DEFAULT 0,
     mobile_session_token TEXT, mobile_session_expires_at INTEGER)`);
   await exec(`CREATE TABLE auth_sessions (

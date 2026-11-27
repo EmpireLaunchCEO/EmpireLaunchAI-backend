@@ -15,6 +15,7 @@ import { OWNER_CONFIG } from '../config/owner.js';
 import { v4 as uuidv4 } from 'uuid';
 import { hashPassword, verifyPassword } from '../services/passwordHash.js';
 import { createSession, revokeSession, sessionTokenFromRequest } from '../services/authSessions.js';
+import { attributeSignupReferral } from '../services/repTracking.js';
 
 /**
  * Mint a real session for a user and answer with it.
@@ -43,7 +44,7 @@ async function issueSession(
 
 export const registerUser = async (req: Request, res: Response) => {
   console.log('[DEBUG] Registering user:', req.body.email);
-  const { email, password } = req.body;
+  const { email, password, referralCode } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
   }
@@ -84,6 +85,18 @@ export const registerUser = async (req: Request, res: Response) => {
     } catch (settingsError: any) {
       console.error('[DEBUG] Settings insert failed:', settingsError);
       // Not a fatal error for registration itself, but let's report it
+    }
+
+    // Attribution happens at SIGNUP, not at payment: whoever's /join/<code>
+    // brought this client in owns them from here, whether they pay today or in
+    // March. An unknown or inactive code attributes nothing, and a failure here
+    // must never fail the signup itself.
+    if (referralCode) {
+      try {
+        await attributeSignupReferral({ clientUserId: userId, code: referralCode });
+      } catch (referralError: any) {
+        console.error('[register] referral attribution failed:', referralError?.message || referralError);
+      }
     }
 
     console.log('[DEBUG] Registration successful for:', email);

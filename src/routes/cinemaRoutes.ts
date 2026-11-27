@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { cinemaController, upload } from '../controllers/cinemaController.js';
 import { mobileAuth } from '../middleware/mobileAuth.js';
+import { denyDemo } from '../middleware/demoRefusal.js';
 
 const router = Router();
 
@@ -29,7 +30,7 @@ router.post('/create-twin', mobileAuth, (req, res) =>
 );
 
 // Generate video from text idea (Gemini → Sora 2 / GPT Image 2 + FFmpeg pipeline)
-router.post('/generate-video', mobileAuth, (req, res) =>
+router.post('/generate-video', mobileAuth, denyDemo, (req, res) =>
   cinemaController.generateVideo(req, res)
 );
 

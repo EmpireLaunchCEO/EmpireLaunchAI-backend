@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, blob } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, blob, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -12,6 +12,9 @@ export const users = sqliteTable('users', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
   tier: text('tier').default('STANDARD_USER').notNull(),
+  // 'client' | 'sales_rep' | 'demo' — what the account may see and do.
+  // Never confuses owner rights: those stay tier = 'OWNER_MASTER'.
+  role: text('role').default('client').notNull(),
   accessKey: text('access_key').unique(),
   passwordHash: text('password_hash'),
   isReviewMode: integer('is_review_mode', { mode: 'boolean' }).default(false).notNull(),
@@ -745,6 +748,43 @@ export const referrals = sqliteTable('referrals', {
   id: text('id').primaryKey(),
   clientUserId: text('client_user_id').references(() => users.id).notNull(),
   salespersonName: text('salesperson_name').notNull(),
+  repUserId: text('rep_user_id').references(() => users.id),
+  source: text('source').default('payment').notNull(), // 'signup' | 'payment'
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+/** Referral codes — SQLite mirror of referral_codes (one link per rep). */
+export const referralCodes = sqliteTable('referral_codes', {
+  id: text('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  repUserId: text('rep_user_id').references(() => users.id).notNull(),
+  active: integer('active', { mode: 'boolean' }).default(true).notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+/** Commission ledger — SQLite mirror of commission_events ($1/client/month). */
+export const commissionEvents = sqliteTable('commission_events', {
+  id: text('id').primaryKey(),
+  repUserId: text('rep_user_id').references(() => users.id).notNull(),
+  clientUserId: text('client_user_id').references(() => users.id).notNull(),
+  period: text('period').notNull(), // 'YYYY-MM'
+  amountCents: integer('amount_cents').default(100).notNull(),
+  sourceSubscriptionId: text('source_subscription_id'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  paidOutAt: integer('paid_out_at', { mode: 'timestamp' }),
+}, (t) => ({
+  repClientPeriod: uniqueIndex('commission_events_rep_client_period_idx')
+    .on(t.repUserId, t.clientUserId, t.period),
+}));
+/** SQLite mirror of `subscriptions` (dev/local parity). */
+export const subscriptions = sqliteTable('subscriptions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  type: text('type').default('subscription').notNull(),
+  stripeSessionId: text('stripe_session_id'),
+  amount: integer('amount'),
+  paidAt: integer('paid_at', { mode: 'timestamp' }),
+  stripeSubscriptionId: text('stripe_subscription_id'),
+  canceledAt: integer('canceled_at', { mode: 'timestamp' }),
+  customerName: text('customer_name'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 });
 /**

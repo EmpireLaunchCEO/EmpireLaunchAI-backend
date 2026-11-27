@@ -31,6 +31,7 @@ import Stripe from 'stripe';
 import dotenv from 'dotenv';
 import { and, eq, isNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { accrueCommissionForPayment } from './repTracking.js';
 
 // The payment-link → brand map below is built at import time, so .env must be
 // loaded first (same pattern as services/stripeService.ts). In production these
@@ -305,6 +306,18 @@ export const drizzleStripeWebhookStore: StripeWebhookStore = {
       .update(schema.users)
       .set({ businessSlots: slots, isLocked: false, updatedAt: input.paidAt })
       .where(eq(schema.users.id, input.userId));
+    // One commission row for the month this payment covers. The unique
+    // (rep, client, period) key is what makes a replayed webhook a no-op; a
+    // failure here must never fail the payment itself.
+    try {
+      await accrueCommissionForPayment({
+        clientUserId: input.userId,
+        paidAt: input.paidAt,
+        sourceSubscriptionId: input.stripeSubscriptionId ?? input.sessionId,
+      });
+    } catch (accrualError: any) {
+      console.error('[StripeWebhook] commission accrual failed:', accrualError?.message || accrualError);
+    }
   },
 
   async cancelSubscription(stripeSubscriptionId) {

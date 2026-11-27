@@ -46,6 +46,7 @@ import actionRoutes from './routes/actionRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import etsyRoutes from './routes/etsyRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import repRoutes from './routes/repRoutes.js';
 import billingRoutes from './routes/billingRoutes.js';
 import versionRoutes from './routes/versionRoutes.js';
 import voiceRoutes from './routes/voiceRoutes.js';
@@ -200,6 +201,9 @@ app.use('/api/actions', actionRoutes);
 app.use('/api/etsy', etsyRoutes);
 // Owner-only admin numbers (must be mounted before the catch-all '/api' router)
 app.use('/api/admin', adminRoutes);
+// Sales-rep tracking (spec REP-TRACKING-SPEC.md): a rep's own link + numbers,
+// and the owner's view of what she owes. Mounted before the catch-all '/api'.
+app.use('/api/rep', repRoutes);
 // Real billing truth (GET /api/billing/me, POST /api/billing/cancel) — also
 // mounted before the catch-all '/api' router.
 app.use('/api/billing', billingRoutes);

@@ -7,6 +7,7 @@ import { db, schema } from '../db/index.js';
 const { users, products, paymentLinks, subscriptions } = schema;
 import { eq, and, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { attributePaymentReferral, accrueCommissionForPayment } from '../services/repTracking.js';
 
 export const onboardUser = async (req: Request, res: Response) => {
   try {
@@ -250,21 +251,15 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
         if (customerName) {
           await db.update(users).set({ name: customerName, updatedAt: new Date() }).where(eq(users.id, userId));
         }
-        // Record referral attribution (salesperson first name) — commission payout later.
+        // Payment-time attribution (legacy `metadata.referral`): resolves a
+        // rep code or a salesperson name, and never duplicates an attribution
+        // the client already got at signup.
         const referral = session.metadata?.referral;
         if (referral) {
-          const [existing] = await db.select().from(schema.referrals)
-            .where(and(
-              eq(schema.referrals.clientUserId, userId),
-              eq(schema.referrals.salespersonName, referral)
-            )).limit(1);
-          if (!existing) {
-            await db.insert(schema.referrals).values({
-              id: uuidv4(),
-              clientUserId: userId,
-              salespersonName: referral,
-              createdAt: new Date(),
-            });
+          try {
+            await attributePaymentReferral({ clientUserId: userId, referral });
+          } catch (referralError: any) {
+            console.error('[stripe] referral attribution failed:', referralError?.message || referralError);
           }
         }
         if (session.metadata?.type === 'expansion') {
@@ -286,6 +281,17 @@ export const verifyPlatformPayment = async (req: Request, res: Response) => {
           customerName,
           createdAt: new Date(),
         });
+        // One commission row per paid month. Idempotent on the unique
+        // (rep, client, period) key, so a replayed verify cannot double-pay.
+        try {
+          await accrueCommissionForPayment({
+            clientUserId: userId,
+            paidAt: new Date(),
+            sourceSubscriptionId: sessionId as string,
+          });
+        } catch (accrualError: any) {
+          console.error('[stripe] commission accrual failed:', accrualError?.message || accrualError);
+        }
       }
       return res.json({ status: 'paid' });
     }
