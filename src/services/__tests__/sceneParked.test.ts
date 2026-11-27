@@ -45,8 +45,8 @@ test('OWNER KEEPS SCENE: the seeded owner zero-UUID is still allowed to render',
 });
 
 test('OWNER KEEPS SCENE: her email and OWNER_MASTER tier are allowed too', () => {
-  assert.equal(sceneAllowedForIdentity({ id: 'x', email: 'Staci.Peabody@Gmail.com' }), true);
-  assert.equal(sceneAllowedForIdentity({ id: 'x', email: 'stacipeabody@gmail.com' }), true);
+  assert.equal(sceneAllowedForIdentity({ id: 'x', email: 'EmpireLaunchAI@Gmail.com' }), true);
+  assert.equal(sceneAllowedForIdentity({ id: 'x', email: 'empirelaunchai@gmail.com' }), true);
   assert.equal(sceneAllowedForIdentity({ id: 'x', tier: 'OWNER_MASTER' }), true);
 });
 

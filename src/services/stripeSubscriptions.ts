@@ -577,8 +577,8 @@ export async function readBillingSnapshot(options: { fresh?: boolean } = {}): Pr
 /**
  * Canonical mailbox key. Reuses the owner helper's normalisation rather than
  * duplicating it: Gmail/Googlemail ignore dots and case, so
- * `Staci.Peabody@gmail.com`, `stacipeabody@gmail.com` and
- * `stacipeabody@googlemail.com` are one mailbox. Non-Gmail is lowercased only.
+ * `Jane.Cooper@gmail.com`, `janecooper@gmail.com` and
+ * `janecooper@googlemail.com` are one mailbox. Non-Gmail is lowercased only.
  */
 export function normalizeBillingEmail(email: string | null | undefined): string {
   return normalizeOwnerEmail(String(email || ''));

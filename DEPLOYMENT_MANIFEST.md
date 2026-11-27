@@ -1,6 +1,6 @@
 # Empire Launch AI — Final Deployment Manifest
 
-> **Owner:** Staci Peabody (`stacipeabody@gmail.com`)
+> **Owner:** Staci Peabody (`empirelaunchai@gmail.com`)
 > **Product:** EmpireLaunch AI — Autonomous Business Builder Platform
 > **Target Platform:** Vercel (Serverless + Edge Functions)
 > **Status:** ✅ **READY FOR OWNER FINAL REVIEW**
@@ -161,7 +161,7 @@ POST /api/studio/chat
 ## 7. Owner Handover Summary
 
 ### Owner Contact
-- **Email:** ✅ `stacipeabody@gmail.com`
+- **Email:** ✅ `empirelaunchai@gmail.com`
 - **Product:** EmpireLaunch AI (App Store: "EmpireLaunch: Biz Builder")
 - **Core Value Prop:** "AI builds, launches, and grows your online business while you stay in control"
 
@@ -207,5 +207,5 @@ POST /api/studio/chat
 
 ---
 
-*Generated for Staci Peabody (`stacipeabody@gmail.com`) — EmpireLaunch AI Autonomous Business Builder Platform*
+*Generated for Staci Peabody (`empirelaunchai@gmail.com`) — EmpireLaunch AI Autonomous Business Builder Platform*
 *Last updated: 2026-06-04 | Status: ✅ Ready for Owner Final Review*

@@ -12,7 +12,7 @@ export class ReviewService {
     
     // Fetch user info for identification
     const [user] = await db.select().from(schema.users).where(eq(schema.users.id, userId)).limit(1);
-    const userEmail = user?.email || 'stacipeabody@gmail.com'; // Default to owner for demo/mock users
+    const userEmail = user?.email || 'empirelaunchai@gmail.com'; // Default to owner for demo/mock users
 
     console.log(`[Feedback] from ${userEmail} (${userId}): ${rating} stars. Message: "${comment}"`);
 

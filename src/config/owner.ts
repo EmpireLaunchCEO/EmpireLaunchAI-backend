@@ -31,7 +31,7 @@ function keyListFromEnv(): string[] {
 
 export const OWNER_CONFIG = {
   /** Primary owner email for system notifications and admin access */
-  email: process.env.OWNER_EMAIL || 'stacipeabody@gmail.com',
+  email: process.env.OWNER_EMAIL || 'empirelaunchai@gmail.com',
 
   /** Owner display name */
   name: 'Staci Peabody',

@@ -43,14 +43,13 @@ export const OWNER_USER_ID = '00000000-0000-0000-0000-000000000000';
 /**
  * Everything the app considers an owner account. Every entry is normalized so
  * Gmail dot-variants collapse to one canonical comparison. OWNER_CONFIG.email is
- * the primary owner email; the .ai address and the dotted variant are kept for
- * robustness against older rows / internal accounts. The owner (Staci) is
+ * the primary owner email (empirelaunchai@gmail.com); the .ai address is kept
+ * for robustness against older rows / internal accounts. The owner (Staci) is
  * unlimited on ALL quotas.
  */
 export const OWNER_EMAILS: ReadonlySet<string> = new Set([
-  normalizeOwnerEmail(OWNER_CONFIG.email),        // stacipeabody@gmail.com (canonical)
-  normalizeOwnerEmail('staci.peabody@gmail.com'), // dotted variant -> same mailbox
-  normalizeOwnerEmail('staci@empirelaunch.ai'),   // internal .ai account
+  normalizeOwnerEmail(OWNER_CONFIG.email),      // empirelaunchai@gmail.com (canonical)
+  normalizeOwnerEmail('staci@empirelaunch.ai'), // internal .ai account
 ]);
 
 /** Tiers that are the owner (never a client). See module note re: BETA_TESTER. */
