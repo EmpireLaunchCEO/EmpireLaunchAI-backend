@@ -145,7 +145,12 @@ test('createProject: an illegal voice fails the project with its own reason — 
   assert.equal(err.code, COST_PREFLIGHT_FAILED_CODE, 'the route answers 422 with this code');
   assert.equal(err.check, 'voice', 'the reason names WHICH check refused');
   assert.match(err.message, /robot/);
-  assert.match(err.clientMessage, /weekly quota/, 'the client is told the quota is untouched');
+  // Owner (23 Nov): no client sentence mentions money, so this asserts what happened
+  // to the video and that no charge/cost/refund/quota wording crept back in.
+  assert.match(err.clientMessage, /(wasn't made|was not made)/i, 'the client is told the video was not made');
+  assert.match(err.clientMessage, /\?/, 'a refusal the client can fix asks one question (owner, 23 Nov)');
+  assert.doesNotMatch(err.clientMessage, /charg|cost|refund|quota|money/i,
+    'no client-facing sentence mentions money (owner, 23 Nov)');
   // THE PROOF: the planner (the first paid call) was never reached.
   allZero('illegal voice');
 });

@@ -42,6 +42,8 @@ import { spawnSync } from 'child_process';
 // renderer can actually speak or deliver.
 import { GPT_AUDIO_VOICES, VOICE_GENDERS, VOICE_TONES } from './voiceOptions.js';
 import { refreshR2Url } from './approvalPayloadRefresh.js';
+// ONE RETRY, THEN ONE SPECIFIC QUESTION: the shared ladder (see retryThenAsk.ts).
+import { retryThenAsk } from './retryThenAsk.js';
 
 /** The code the route answers with, so the client sees the pre-flight reason. */
 export const COST_PREFLIGHT_FAILED_CODE = 'COST_PREFLIGHT_FAILED';
@@ -292,33 +294,50 @@ export async function runCostPreflight(input: CostPreflightInput): Promise<CostP
   // refused — the repair costs nothing and the render then uses the fresh URL. Only
   // a link that still cannot be reached after the refresh is refused, and it names
   // HER file.
+  // ONE RETRY, THEN ONE SPECIFIC QUESTION: the ladder itself is the shared machinery
+  // (`retryThenAsk`) — attempt, exactly one free retry, then the question — so the
+  // retry count and the "ask once" rule are defined in one place for every repair.
   const probeUrl = input.deps?.probeUrl ?? probeUrlOnce;
   const refreshUrl = input.deps?.refreshUrl ?? refreshPhotoUrlOnce;
   const photos = (input.sourceImages ?? []).filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)).slice(0, 3);
   const resolvedPhotos: string[] = [];
   const photoRepairs: PhotoRepair[] = [];
   for (const url of photos) {
-    const first = await probeUrl(url);
-    if (first.ok) {
-      resolvedPhotos.push(url);
+    const firstProbe: { value: UrlProbeResult | null } = { value: null };
+    let refreshed: string | null = null;
+    const ladder = await retryThenAsk<UrlProbeResult>({
+      attempt: async () => {
+        firstProbe.value = await probeUrl(url);
+        return firstProbe.value;
+      },
+      succeeded: (r) => r.ok,
+      // The ONE free retry: sign the same object again and probe the fresh link.
+      retry: async () => {
+        const fresh = await refreshUrl(url);
+        if (!fresh) return { ok: false, detail: 'no fresh link could be signed' };
+        refreshed = fresh;
+        return probeUrl(fresh);
+      },
+    });
+    if (ladder.ok) {
+      if (refreshed) {
+        photoRepairs.push({ from: url, to: refreshed });
+        resolvedPhotos.push(refreshed);
+      } else {
+        resolvedPhotos.push(url);
+      }
       continue;
     }
-    const fresh = await refreshUrl(url);
-    if (fresh) {
-      const retry = await probeUrl(fresh);
-      if (retry.ok) {
-        photoRepairs.push({ from: url, to: fresh });
-        resolvedPhotos.push(fresh);
-        continue;
-      }
+    const last: UrlProbeResult = ladder.value || firstProbe.value || { ok: false };
+    if (refreshed) {
       return fail(
         'photo',
-        `The photo you uploaded (${photoFileName(url)}) is no longer there${retry.status ? ` (HTTP ${retry.status})` : retry.detail ? ` (${retry.detail})` : ''} — a fresh link could not reach it either, so the video was not started.`,
+        `The photo you uploaded (${photoFileName(url)}) is no longer there${last.status ? ` (HTTP ${last.status})` : last.detail ? ` (${last.detail})` : ''} — a fresh link could not reach it either, so the video was not started.`,
       );
     }
     return fail(
       'photo',
-      `The photo you uploaded (${photoFileName(url)}) does not resolve${first.status ? ` (HTTP ${first.status})` : first.detail ? ` (${first.detail})` : ''} — the video would have been made without it, so it was not started.`,
+      `The photo you uploaded (${photoFileName(url)}) does not resolve${firstProbe.value?.status ? ` (HTTP ${firstProbe.value.status})` : firstProbe.value?.detail ? ` (${firstProbe.value.detail})` : ''} — the video would have been made without it, so it was not started.`,
     );
   }
 

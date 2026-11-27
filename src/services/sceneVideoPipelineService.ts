@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
-import { eq, asc, and, inArray, or } from 'drizzle-orm';
+import { eq, asc, and, desc, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { soraVideoService, snapSora16or20, SORA_SCENE_SIZE, soraCallBudget } from './soraVideoService.js';
 import { buildBriefOverlaySpec, buildDictationSection, extractRequestedVisuals, userConversationText } from './requestedVisuals.js';
@@ -44,7 +44,12 @@ import { mediaToolTimeoutMs, isMediaToolTimeout, mediaToolTimeoutError, mediaToo
 // fails with its own reason at $0. The paid-call gate is the ONE choke point every
 // planner / image / audio / Veo call goes through, so "no further paid call after
 // the first paid failure" holds even with scenes in flight in parallel.
-import { COST_PREFLIGHT_FAILED_CODE, runCostPreflight, type CostPreflightResult } from './costPreflight.js';
+import { COST_PREFLIGHT_FAILED_CODE, photoFileName, runCostPreflight, type CostPreflightResult } from './costPreflight.js';
+// A REFUSAL IS A CONVERSATION (owner, 23 Nov): the ONE place a refusal becomes a chat
+// turn, and the ONE place a chat becomes the planner's input. See videoChatTurns.ts.
+import { applyAnswerToSelections, assembleVideoChat, buildPlannerConversationSection, buildRefusalAsk, chatMetadata, componentRefusalAsk, storedChatFromMetadata, type StoredVideoChat, type VideoChatTurn, type VideoSelections } from './videoChatTurns.js';
+// ONE RETRY, THEN ONE SPECIFIC QUESTION: the shared ladder the repair pass walks.
+import { retryThenAsk } from './retryThenAsk.js';
 import { beginRenderRun, clearPaidFailure, endRenderRun, notePaidFailure, paidCall, paidCallAllowed, paidFailureFor, PaidCallBlockedError } from './paidCallGate.js';
 import { usageService } from './usageService.js';
 /**
@@ -101,7 +106,15 @@ export interface VideoProjectInput { userId: string; title: string; idea: string
    *  screenshot still to COVER the 1080x1920 frame (center-crop overflow edges)
    *  instead of contain+letterbox — "photos more screen-fitting". Our exact
    *  1080x1920 sources are a no-op; non-9:16 sources fill the frame. */
-  stillCoverFit?: boolean; }
+  stillCoverFit?: boolean;
+  /** THE VIDEO CHAT THIS REQUEST REPLIES TO (owner, 23 Nov — "what the client responds
+   *  in the AI chat needs to be carried through to the video"): the id of the refused
+   *  attempt whose question she is answering. Absent ⇒ the latest refused attempt still
+   *  waiting for an answer is used, but only when this request carries a NEW client turn. */
+  replyToProjectId?: string;
+  /** Her answer to the refusal's question, when the caller knows it explicitly. Absent ⇒
+   *  the last new client turn of `conversation` IS the answer. */
+  answer?: string; }
 /** NO-VOICEOVER MODE (owner directive): `voice:'none'` means the scene narration
  *  text is NEVER sent to GPT-Audio — no audioUrl, no narration track, and the
  *  final MP4 is silent by design (0 audio streams is OK for QC when voice==='none').
@@ -116,6 +129,9 @@ export function shouldGenerateSceneNarration(narration?: string | null, voice?: 
 const SCENE_SORA_MAX_ATTEMPTS = 3; // initial + 2 automatic retries
 const SCENE_SORA_RETRY_BACKOFF_MS = [0, 10_000, 15_000]; // backoff before attempts 1/2/3
 function trace(message: string) { process.stderr.write(`[SCENE_PIPELINE] ${message}\n`); }
+/** How long a refused attempt's question waits for her answer: the chat belongs to the
+ *  video, so a reply the next day is still a reply to that question. */
+const PRIOR_CHAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**
  * Variant-export loud-failure policy (owner run b5f88145: variant pass silently
  * produced count=0 because the local master was unlinked by uploadLocalFile()).
@@ -3907,12 +3923,20 @@ export class ComponentsNotPlacedError extends Error {
   readonly projectId: string;
   readonly clientMessage: string;
   readonly missing: string[];
-  constructor(projectId: string, failure: ComponentsFailure) {
+  /** THE QUESTION THE CHAT NOW HOLDS (owner, 23 Nov): the repair ladder spent its one
+   *  retry, so the client is asked what to do instead of being handed a sentence. */
+  readonly chat: { turns: VideoChatTurn[]; awaitingAnswer: boolean; question?: unknown } | null;
+  constructor(
+    projectId: string,
+    failure: ComponentsFailure,
+    chat: { turns: VideoChatTurn[]; awaitingAnswer: boolean; question?: unknown } | null = null,
+  ) {
     super(failure.message);
     this.name = 'ComponentsNotPlacedError';
     this.projectId = projectId;
-    this.clientMessage = failure.message;
+    this.clientMessage = chat?.turns?.length ? String(chat.turns[chat.turns.length - 1].content) : failure.message;
     this.missing = failure.missing;
+    this.chat = chat;
   }
 }
 
@@ -3926,12 +3950,23 @@ export class CostPreflightFailedError extends Error {
   readonly projectId: string;
   readonly clientMessage: string;
   readonly check: string | undefined;
-  constructor(projectId: string, preflight: CostPreflightResult) {
+  /** THE TURN THE CHAT NOW HOLDS (owner, 23 Nov): the issue, "this video wasn't made",
+   *  and the ONE question with its real options — so the refusal speaks in the video's
+   *  chat instead of ending at a sentence. Absent only if the chat could not be built. */
+  readonly chat: { turns: VideoChatTurn[]; awaitingAnswer: boolean; question?: unknown } | null;
+  constructor(
+    projectId: string,
+    preflight: CostPreflightResult,
+    chat: { turns: VideoChatTurn[]; awaitingAnswer: boolean; question?: unknown } | null = null,
+  ) {
     super(preflight.reason || 'This video could not be made on this machine.');
     this.name = 'CostPreflightFailedError';
     this.projectId = projectId;
     this.check = preflight.check;
-    this.clientMessage = `${preflight.reason || 'This video could not be made on this machine.'} No video was made.`;
+    this.chat = chat;
+    // The chat turn is the client-facing message now; the sentence stays for the log.
+    const asked = chat?.turns?.length ? String(chat.turns[chat.turns.length - 1].content) : '';
+    this.clientMessage = asked || `${preflight.reason || 'This video could not be made on this machine.'} No video was made.`;
   }
 }
 
@@ -3980,18 +4015,22 @@ export function buildPlannerTimeBudgetSection(duration: number, sceneCount: numb
 /** Assemble the full planner request (brief + shape + arc + components + time
  *  budget + uniqueness). Factored out so the ONE re-plan pass reuses the exact
  *  same prompt with corrective feedback appended. */
-function buildPlannerRequest(params: {
+export function buildPlannerRequest(params: {
   cleanIdea: string; duration: number; sceneCount: number; perScene: number;
   constrain: string; toneHint: string; moodHint: string; srcHint: string;
   componentsSection: string; styleSection?: string; timeBudgetSection: string; actionSection: string; avatarSection: string;
   dictation?: string;
+  /** THE WHOLE CONVERSATION FOR THIS VIDEO (owner, 23 Nov): her brief, every earlier
+   *  turn, the question we asked and her answer. Context the plan must obey — never
+   *  text to speak. Empty for a first launch, so that prompt is unchanged. */
+  conversationSection?: string;
 }): string {
   // CONTENT HYGIENE (owner Sep 28): narration is FINISHED COPY ONLY and
   // visualPrompts are IMAGERY ONLY. Shared by the Scene + Faceless planner so
   // both shapes carry the same anti-plan-speak directive.
   const finishedCopySection = '\n\nFINISHED COPY ONLY (mandatory): every narration value is the EXACT voiceover copy the viewer hears \u2014 polished, natural, customer-facing final copy. It must NEVER read like a plan or production note: no "Opening \u2014", no "Getting started:", no "Now it comes together", no "The payoff:", no "Call to action:", no "we\'ll walk you through", no "in this video", no "Scene N of M", no step-by-step recitals, no stage directions, no labels describing the video\'s own structure (hook/about/payoff/CTA), and never a transcript of the brief or conversation. Write the way a creator talks to an audience about the subject. Every narration value must be SHORT \u2014 at most ~15 words / ~120 characters, because each reads aloud in a ~6-second scene; never a multi-sentence paragraph. Every visualPrompt must describe IMAGERY ONLY \u2014 never ask the image model to render readable sentences, captions, plan text, or the prompt itself as on-screen text.' + buildTransformationPlannerRule();
-  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, styleSection = '', timeBudgetSection, actionSection, avatarSection, dictation = '' } = params;
-  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (the whole scenes array must sum to EXACTLY ${dissolveCompensatedSceneSum(duration, sceneCount).toFixed(1)}s — the ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades at each seam overlap adjacent scenes, so the DELIVERED file lands at exactly ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${styleSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.${dictation}`;
+  const { cleanIdea, duration, sceneCount, perScene, constrain, toneHint, moodHint, srcHint, componentsSection, styleSection = '', timeBudgetSection, actionSection, avatarSection, dictation = '', conversationSection = '' } = params;
+  return `Create a JSON scene script using ONLY this clean creative brief: ${cleanIdea}. Do not narrate consultant dialogue, planning notes, questions, UI instructions, or chat history.${finishedCopySection} The final video is ${duration} seconds long, planned as exactly ${sceneCount} short scenes of about ${perScene} seconds each (the whole scenes array must sum to EXACTLY ${dissolveCompensatedSceneSum(duration, sceneCount).toFixed(1)}s — the ${Math.round(DISSOLVE_OVERLAP_SECONDS*1000)}ms xfades at each seam overlap adjacent scenes, so the DELIVERED file lands at exactly ${duration}s).${constrain}${toneHint}${moodHint}${srcHint}${conversationSection}\n\nSTORY ARC REQUIREMENT (mandatory)\n: because this is a longer video, the scenes MUST form a coherent multi-scene progression with ONE continuous subject (never random unrelated clips). Structure it as: the first ~25% establishes the hook/subject, the middle ~50% develops the subject and shows the transformation or key benefit, and the final ~25% delivers the payoff and a clear call-to-action. Each scene must ADVANCE the story from the previous one — do NOT repeat the opening scene multiple times. Keep the same subject, setting, and visual identity across every scene so the video feels continuous.${componentsSection}${styleSection}${timeBudgetSection}${actionSection}${avatarSection}\n\nUNIQUENESS REQUIREMENT (mandatory): every scene's visualPrompt must describe a DIFFERENT moment, action, camera angle, or stage of the story that moves it forward — a unique scene-specific visual. It is NOT acceptable to give multiple scenes the same visual with only a change of "variant"/"angle"/"color"; if scenes 1-3 look the same, you have failed. Each of the ${sceneCount} visualPrompt and narration values must be distinct from the others.${dictation}`;
 }
 export class SceneVideoPipelineService {
   async createProject(input: VideoProjectInput): Promise<string> {
@@ -4011,6 +4050,71 @@ export class SceneVideoPipelineService {
     }
     trace(`project_create_start user=${input.userId}`);
     const projectId = uuidv4();
+    // The consultant UI may send its transcript as `idea`; isolate the actual creative
+    // brief before it reaches the planner or fallback arc.
+    const cleanIdea = normalizeVideoIdea(input.idea);
+    // ── A REFUSAL IS A CONVERSATION (owner, 23 Nov) ────────────────────────────────
+    // "if the preflight check didn't clear, then the AI should go back in the video chat
+    //  and state what the issue with the video is ... and ask the client how it wants it
+    //  to be fixed, what the client responds in the AI chat needs to be carried through to
+    //  the video with what was previously given as well"
+    // The refused attempt stored its chat on the failed row (our one question included).
+    // This attempt loads it, puts the WHOLE conversation together — her brief, every
+    // earlier turn, our question, her answer — and applies the unambiguous parts of her
+    // answer BEFORE the next pre-flight runs, so the answer changes the video instead of
+    // riding along beside it.
+    const priorChat = await this.loadPriorChat(input);
+    const chat = assembleVideoChat({
+      prior: priorChat?.turns,
+      incoming: input.conversation,
+      answer: input.answer,
+      brief: priorChat ? cleanIdea : undefined,
+    });
+    if (priorChat?.selections) {
+      // Her original selections still stand unless this request or her answer changes them.
+      if (input.durationTarget === undefined && priorChat.selections.duration) input.durationTarget = priorChat.selections.duration;
+      if (!input.voiceId && isCatalogueVoice(priorChat.selections.voiceId)) input.voiceId = priorChat.selections.voiceId;
+      if (!input.tone && priorChat.selections.tone) input.tone = priorChat.selections.tone as VideoProjectInput['tone'];
+      if (!input.mood && priorChat.selections.mood) input.mood = priorChat.selections.mood;
+      if (!(input.sourceImages || []).length && (priorChat.selections.sourceImages || []).length) {
+        input.sourceImages = priorChat.selections.sourceImages!.slice();
+      }
+    }
+    if (chat.answer) {
+      const answered = applyAnswerToSelections(chat.answer, {
+        duration: input.durationTarget,
+        voice: input.voice,
+        voiceId: input.voiceId,
+        tone: input.tone,
+        mood: input.mood,
+        sourceImages: input.sourceImages,
+      });
+      if (answered.applied.length) {
+        if (answered.selections.duration !== undefined) input.durationTarget = answered.selections.duration;
+        if (isCatalogueVoice(answered.selections.voiceId)) input.voiceId = answered.selections.voiceId;
+        if (answered.selections.tone) input.tone = answered.selections.tone as VideoProjectInput['tone'];
+        input.sourceImages = answered.selections.sourceImages;
+        trace(`chat_answer_applied project=${projectId} applied=[${answered.applied.join(',')}] answer="${chat.answer.slice(0, 80)}"`);
+      }
+    }
+    if (priorChat || chat.answered) {
+      // The extraction layers (inventory, imagery, style) read the conversation too, so
+      // the question and her answer reach them exactly as her own turns always have.
+      input.conversation = chat.turns.filter((t) => t.kind !== 'brief').map((t) => ({ role: t.role, content: t.content }));
+      trace(`video_chat project=${projectId} turns=${chat.turns.length} answered=${chat.answered} question=${chat.question ? 'asked' : 'none'}`);
+    }
+    const chatSelections: VideoSelections = {
+      duration: input.durationTarget,
+      voice: input.voice,
+      voiceId: input.voiceId,
+      tone: input.tone,
+      mood: input.mood,
+      sourceImages: input.sourceImages,
+    };
+    // THE PLANNER READS THE WHOLE CONVERSATION (owner, 23 Nov — roadmap 68): her brief,
+    // every earlier turn, our question and her answer, plus the selections that still
+    // stand. Empty for a launch with nothing said, so that prompt is unchanged.
+    const plannerChatSection = buildPlannerConversationSection(chat.turns, chatSelections, { answered: chat.answered });
     // COST PRE-FLIGHT (owner, 23 Nov) — NOTHING IS BOUGHT UNTIL THE VIDEO IS PROVABLY
     // PRODUCIBLE. Every check is free, and all of them run BEFORE the planner's first
     // paid call, so a request that could never come out as a video fails here with its
@@ -4030,8 +4134,22 @@ export class SceneVideoPipelineService {
     });
     if (!preflight.ok) {
       trace(`cost_preflight_failed project=${projectId} check=${preflight.check} reason=${preflight.reason} spent=0`);
-      await this.recordPreflightFailure(projectId, input, mode, preflight);
-      throw new CostPreflightFailedError(projectId, preflight);
+      // A REFUSAL IS A TURN IN THE CHAT (owner, 23 Nov): the issue in plain words, "this
+      // video wasn't made", and ONE question with the real options — or, for what she
+      // cannot resolve (our machine, our credential), the reason and no question. No
+      // sentence about money, ever: she pays one monthly subscription.
+      const refusal = buildRefusalAsk({
+        check: preflight.check,
+        reason: preflight.reason,
+        photoName: preflight.check === 'photo' && (input.sourceImages || [])[0] ? photoFileName(String((input.sourceImages || [])[0])) : undefined,
+      });
+      const chatTurns: VideoChatTurn[] = [...chat.turns, refusal.turn];
+      await this.recordPreflightFailure(projectId, input, mode, preflight, chatTurns, chatSelections, refusal.ask.resolvable);
+      throw new CostPreflightFailedError(projectId, preflight, {
+        turns: chatTurns,
+        awaitingAnswer: refusal.ask.resolvable,
+        question: refusal.ask,
+      });
     }
     trace(`cost_preflight_ok project=${projectId} mode=${mode} spent=0`);
     // A REPAIRED PHOTO IS THE PHOTO THE RENDER USES (owner, 23 Nov — repair before
@@ -4044,9 +4162,6 @@ export class SceneVideoPipelineService {
       input.sourceImages = preflight.sourceImages;
       trace(`photo_url_refreshed project=${projectId} count=${photoRepairs.length}`);
     }
-    // The consultant UI may send its transcript as `idea`; isolate the actual
-    // creative brief before it reaches the planner or fallback arc.
-    const cleanIdea = normalizeVideoIdea(input.idea);
     // Planning-layer inventory (owner directives, Sep 8): every concrete component
     // the client relayed — explicit `components`, the clean brief, and the USER
     // turns of the consultant conversation — is extracted deterministically and
@@ -4151,7 +4266,7 @@ Your response must be ONLY that JSON object (no markdown fences, no commentary).
         const plannerBrief = (plannerEssence.internal || plannerEssence.degenerateFallback)
           ? finishedEssenceBrief(plannerEssence)
           : stripInstructionResidue(cleanIdea);
-        const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection, dictation: buildDictationSection(requested, sceneCount) });
+        const request = buildPlannerRequest({ cleanIdea: plannerBrief, duration, sceneCount, perScene, constrain: legacyConstrain, toneHint, moodHint, srcHint, componentsSection, timeBudgetSection, actionSection, avatarSection, dictation: buildDictationSection(requested, sceneCount), conversationSection: plannerChatSection });
         // FIRST DOOR + SECOND DOOR. The planning call shares one model with the
         // router, whose system prompt asks for a classification object. Production
         // evidence (2026-10-11 a02014a3) shows the model answering with
@@ -4661,29 +4776,44 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
       explicitComponents: input.components,
       repairedPlaced: componentRepair.placed,
     });
-    const neverRepaired = blockingGateItems().filter(c => !componentRepair.attempted.some(a => a.toLowerCase() === normalizeComponent(c).toLowerCase()));
-    if (neverRepaired.length) {
-      trace(`component_repair_late project=${projectId} items=[${neverRepaired.join(' | ')}]`);
-      await runComponentRepairPass(neverRepaired);
-    }
-    const stillBlocking = blockingGateItems();
-    if (stillBlocking.length) {
-      // A link-in-bio phrase the client did not ask for is BANNED from the video by
-      // product rule — it is never "placed", so it is never spoken by the decision.
-      const placeable = stillBlocking.filter(c => linkInBioAllowed || !containsLinkInBio(c));
-      const banned = stillBlocking.filter(c => !placeable.includes(c));
-      if (banned.length) trace(`component_decision_banned project=${projectId} items=[${banned.join(' | ')}]`);
-      const decided = placeable.length ? placeComponentsByDecision(planned, placeable, { voice: input.voice }) : null;
-      if (decided && decided.placed.length) {
-        planned.splice(0, planned.length, ...decided.script);
-        componentAssignments = { ...componentAssignments, ...decided.assignments };
-        for (const c of decided.placed) {
-          if (!componentRepair.placed.some(p => p.toLowerCase() === c.toLowerCase())) componentRepair.placed.push(c);
-          componentRepair.placedByDecision.push({ component: c, scene: Number(decided.assignments[c.toLowerCase()]) });
+    // THE LADDER ITSELF IS THE SHARED MACHINERY (`retryThenAsk`): attempt the late
+    // text-only repair pass, spend EXACTLY ONE retry placing it by the pipeline's own
+    // decision, and — if it still cannot be placed — produce ONE question for the client.
+    const gateLadder = await retryThenAsk<{ blocking: string[] }>({
+      attempt: async () => {
+        const neverRepaired = blockingGateItems().filter(c => !componentRepair.attempted.some(a => a.toLowerCase() === normalizeComponent(c).toLowerCase()));
+        if (neverRepaired.length) {
+          trace(`component_repair_late project=${projectId} items=[${neverRepaired.join(' | ')}]`);
+          await runComponentRepairPass(neverRepaired);
         }
-        qc = runPlanQC(planned, inventory, componentAssignments);
-        trace(`component_placed_by_decision project=${projectId} placed=[${componentRepair.placedByDecision.map(p => `${p.component} -> scene ${p.scene}`).join(' | ')}] stillMissing=[${qc.missingComponents.join(' | ')}]`);
-      }
+        return { blocking: blockingGateItems() };
+      },
+      succeeded: (r) => r.blocking.length === 0,
+      retry: async () => {
+        const stillBlocking = blockingGateItems();
+        // A link-in-bio phrase the client did not ask for is BANNED from the video by
+        // product rule — it is never "placed", so it is never spoken by the decision.
+        const placeable = stillBlocking.filter(c => linkInBioAllowed || !containsLinkInBio(c));
+        const banned = stillBlocking.filter(c => !placeable.includes(c));
+        if (banned.length) trace(`component_decision_banned project=${projectId} items=[${banned.join(' | ')}]`);
+        const decided = placeable.length ? placeComponentsByDecision(planned, placeable, { voice: input.voice }) : null;
+        if (decided && decided.placed.length) {
+          planned.splice(0, planned.length, ...decided.script);
+          componentAssignments = { ...componentAssignments, ...decided.assignments };
+          for (const c of decided.placed) {
+            if (!componentRepair.placed.some(p => p.toLowerCase() === c.toLowerCase())) componentRepair.placed.push(c);
+            componentRepair.placedByDecision.push({ component: c, scene: Number(decided.assignments[c.toLowerCase()]) });
+          }
+          qc = runPlanQC(planned, inventory, componentAssignments);
+          trace(`component_placed_by_decision project=${projectId} placed=[${componentRepair.placedByDecision.map(p => `${p.component} -> scene ${p.scene}`).join(' | ')}] stillMissing=[${qc.missingComponents.join(' | ')}]`);
+        }
+        return { blocking: blockingGateItems() };
+      },
+      ask: (last) => componentRefusalAsk(last.blocking).ask,
+    });
+    const stillBlocking = gateLadder.value.blocking;
+    if (stillBlocking.length) {
+      trace(`component_ladder_asked project=${projectId} attempts=${gateLadder.attempts} blocking=[${stillBlocking.join(' | ')}]`);
     }
     // 2d — THE GATE (owner Nov 5, defect 2): the BACKSTOP for what the checklist, the
     // assignment check and the one repair pass could not place. It fires before ANY
@@ -4724,13 +4854,7 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
         trace(`planner_copy_gaps project=${projectId} narration=[${copyGaps.missingNarration.join(',')}] visual=[${copyGaps.missingVisual.join(',')}] — refusing to invent copy for an unplanned scene`);
       }
     }
-    const gateMissing = resolveGateMissingComponents({
-      missingComponents: qc.missingComponents,
-      cleanIdea,
-      conversation: input.conversation,
-      explicitComponents: input.components,
-      repairedPlaced: componentRepair.placed,
-    });
+    const gateMissing = stillBlocking;
     if (qc.missingComponents.length && gateMissing.length !== qc.missingComponents.length) {
       const blocking = new Set(gateMissing.map(c => c.toLowerCase()));
       trace(`components_gate project=${projectId} missing=${qc.missingComponents.length} blocking=${gateMissing.length} exempt=[${qc.missingComponents.filter(c => !blocking.has(c.toLowerCase())).join(' | ')}]`);
@@ -4755,7 +4879,26 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
     }
     if (componentsFailure) {
       trace(`components_not_placed project=${projectId} missing=[${componentsFailure.missing.join(' | ')}] attemptedRepair=[${componentRepair.attempted.join(' | ')}] — refusing to render a video that drops what the client asked for`);
-      throw new ComponentsNotPlacedError(projectId, componentsFailure);
+      // THE REFUSAL ASKS (owner, 23 Nov — "ask the client how it wants it to be fixed").
+      // The ladder above already spent its one retry, so what is left is ONE question with
+      // real options, written into this video's chat and stored on the row so her answer
+      // reaches the next attempt.
+      const refusal = componentRefusalAsk(componentsFailure.missing);
+      const chatTurns: VideoChatTurn[] = [...chat.turns, refusal.turn];
+      try {
+        await db.update(schema.videoProjects).set({
+          metadata: mergeCompletionMetadata(await liveProjectMetadata(projectId, {}), {
+            chat: chatMetadata({ turns: chatTurns, awaitingAnswer: refusal.ask.resolvable, selections: chatSelections }),
+          }),
+        }).where(eq(schema.videoProjects.id, projectId));
+      } catch (chatErr: any) {
+        trace(`component_refusal_chat_failed project=${projectId} error=${chatErr?.message || chatErr}`);
+      }
+      throw new ComponentsNotPlacedError(projectId, componentsFailure, {
+        turns: chatTurns,
+        awaitingAnswer: refusal.ask.resolvable,
+        question: refusal.ask,
+      });
     }
     await db.insert(schema.videoScenes).values(planned.map(s => {
       const isMotion = s.visualType === 'motion';
@@ -4800,7 +4943,15 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
    *  Best-effort by design: a database problem must never turn a $0 refusal into an
    *  error that carries no reason, so it is traced and the typed error is thrown
    *  anyway. No scene row, no receipt, no quota. */
-  private async recordPreflightFailure(projectId: string, input: VideoProjectInput, mode: 'faceless'|'scene', preflight: CostPreflightResult): Promise<void> {
+  private async recordPreflightFailure(
+    projectId: string,
+    input: VideoProjectInput,
+    mode: 'faceless'|'scene',
+    preflight: CostPreflightResult,
+    chatTurns: VideoChatTurn[] = [],
+    selections?: VideoSelections,
+    awaitingAnswer = false,
+  ): Promise<void> {
     try {
       await db.insert(schema.videoProjects).values({
         id: projectId,
@@ -4815,10 +4966,56 @@ const scriptBeforeFloor = parseScenePlan(generatedScript || {}, cleanIdea, durat
           failureCode: COST_PREFLIGHT_FAILED_CODE,
           error: preflight.reason,
           costPreflight: { check: preflight.check, reason: preflight.reason, spentUsd: 0, paidCalls: 0 },
+          // THE REFUSAL SPEAKS IN THE CHAT (owner, 23 Nov): the turn we wrote, whether it
+          // is waiting for her answer, and her selections, so the next attempt can pick
+          // the whole conversation up instead of starting again from nothing.
+          ...(chatTurns.length
+            ? { chat: chatMetadata({ turns: chatTurns, awaitingAnswer, selections }) }
+            : {}),
         },
       });
     } catch (err: any) {
       trace(`cost_preflight_row_failed project=${projectId} error=${err?.message || err}`);
+    }
+  }
+
+  /**
+   * THE CHAT THIS REQUEST IS REPLYING TO (owner, 23 Nov). Two ways in:
+   *   • the client names the refused attempt (`replyToProjectId`) — exact, always used;
+   *   • otherwise the latest refused attempt for THIS user that is still waiting for an
+   *     answer, and only when this request carries a NEW client turn — i.e. she actually
+   *     replied. A new, unrelated launch is never handed an old question.
+   * Best-effort by design: a database problem must never stop a video from being made.
+   */
+  private async loadPriorChat(input: VideoProjectInput): Promise<StoredVideoChat | null> {
+    try {
+      if (input.replyToProjectId) {
+        const [row] = await db.select().from(schema.videoProjects)
+          .where(and(eq(schema.videoProjects.id, input.replyToProjectId), eq(schema.videoProjects.userId, input.userId)))
+          .limit(1);
+        return storedChatFromMetadata((row as any)?.metadata);
+      }
+      const rows = await db.select().from(schema.videoProjects)
+        .where(and(eq(schema.videoProjects.userId, input.userId), eq(schema.videoProjects.status, 'failed')))
+        .orderBy(desc(schema.videoProjects.updatedAt))
+        .limit(10);
+      const incomingUsers = (input.conversation || []).filter((m) => m && m.role === 'user' && typeof m.content === 'string');
+      const lastUser = incomingUsers.length ? String(incomingUsers[incomingUsers.length - 1].content).trim() : '';
+      for (const row of rows) {
+        const chat = storedChatFromMetadata((row as any)?.metadata);
+        if (!chat?.awaitingAnswer) continue;
+        const at = new Date((row as any).updatedAt || 0).getTime();
+        if (!Number.isFinite(at) || Date.now() - at > PRIOR_CHAT_WINDOW_MS) continue;
+        if (!lastUser) continue;
+        // Only a turn she has NOT already said counts as an answer.
+        const known = new Set(chat.turns.filter((t) => t.role === 'user').map((t) => t.content.trim()));
+        if (known.has(lastUser)) continue;
+        return chat;
+      }
+      return null;
+    } catch (err: any) {
+      trace(`prior_chat_lookup_failed user=${input.userId} error=${err?.message || err}`);
+      return null;
     }
   }
 

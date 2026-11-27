@@ -305,6 +305,17 @@ export const createApproval = async (req: Request, res: Response) => {
           // Concrete relayed components (owner Oct 26) — forwarded so the planner's
           // component inventory includes them (mirrors studio video-project route).
           ...(components?.length ? { components } : {}),
+          // A REFUSAL IS A CONVERSATION (owner, 23 Nov): the video chat this launch
+          // replies to, and her answer to the question we asked. The pipeline loads the
+          // whole conversation from the refused attempt and carries it into the planner;
+          // absent ⇒ the latest refused attempt still waiting for an answer is used when
+          // this request carries a new client turn.
+          ...(typeof req.body.replyToProjectId === 'string' && req.body.replyToProjectId.trim()
+            ? { replyToProjectId: req.body.replyToProjectId.trim() }
+            : {}),
+          ...(typeof req.body.answer === 'string' && req.body.answer.trim()
+            ? { answer: req.body.answer.trim() }
+            : {}),
         });
         if (facelessProjectId) enrichedPayload.projectId = facelessProjectId;
       } catch (renderErr: any) {
@@ -320,6 +331,10 @@ export const createApproval = async (req: Request, res: Response) => {
           status: 'error',
           error: renderErr?.clientMessage || renderErr?.message || 'Your video could not be started, so no video was made. Please try again.',
           code: renderErr?.code || 'RENDER_INIT_FAILED',
+          // THE REFUSAL IS A TURN IN THE CHAT (owner, 23 Nov): the client shows this
+          // message in the video's chat and answers it there. It says what happened to
+          // the video and asks one specific question — it never mentions money.
+          ...(renderErr?.chat ? { chat: renderErr.chat } : {}),
         });
       }
     }
