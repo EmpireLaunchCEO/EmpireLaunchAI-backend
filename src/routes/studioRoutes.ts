@@ -13,6 +13,7 @@ import { generateDesignAndRecord } from '../services/designGenerationService.js'
 import { db, schema } from '../db/index.js';
 import { eq, and, gte, count, desc, asc, ne, sql } from 'drizzle-orm';
 import { mobileAuth } from '../middleware/mobileAuth.js';
+import { denyDemo } from '../middleware/demoRefusal.js';
 import { r2Storage } from '../services/r2StorageService.js';
 import { sceneVideoPipelineService, MAX_SCENE_DURATION, resolveSourceImagePlacementInput } from '../services/sceneVideoPipelineService.js';
 import { isSceneUnavailableError, sceneRefusalBody } from '../services/sceneAccess.js';
@@ -1274,7 +1275,7 @@ router.get('/video-project/:id', mobileAuth, async (req: Request, res: Response)
   try { const userId = await resolveUserId(String((req as any).userId)); const result = userId ? await sceneVideoPipelineService.getProject(req.params.id, userId) : null; if (!result) return res.status(404).json({ status: 'error', error: 'Project not found' }); return res.json(result); }
   catch (error: any) { return res.status(500).json({ status: 'error', error: error.message }); }
 });
-router.post('/scene/:id/regenerate', mobileAuth, async (req: Request, res: Response) => {
+router.post('/scene/:id/regenerate', mobileAuth, denyDemo, async (req: Request, res: Response) => {
   try { const userId = await resolveUserId(String((req as any).userId)); if (!userId) return res.status(401).json({ status: 'error', error: 'Valid userId is required' }); const projectId = await sceneVideoPipelineService.regenerateScene(req.params.id, userId); if (!projectId) return res.status(404).json({ status: 'error', error: 'Scene not found' }); return res.status(202).json({ status: 'processing', projectId, sceneId: req.params.id }); }
   catch (error: any) {
     // A parked-Scene refusal on regeneration is an answer, not a crash (owner Nov 9).

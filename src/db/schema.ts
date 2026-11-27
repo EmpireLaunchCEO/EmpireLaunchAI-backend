@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, jsonb, boolean, integer } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, jsonb, boolean, integer, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -9,6 +9,9 @@ export const users = pgTable('users', {
   termsAcceptedVersion: integer('terms_accepted_version').default(0).notNull(),
   businessSlots: integer('business_slots').default(1).notNull(),
   tier: text('tier').default('STANDARD_USER').notNull(),
+  // What this account may see and do: 'client' | 'sales_rep' | 'demo'.
+  // Separate from `tier` on purpose — owner rights stay tier = 'OWNER_MASTER'.
+  role: text('role').default('client').notNull(),
   isLocked: boolean('is_locked').default(false).notNull(),
   passwordHash: text('password_hash'),
   accessKey: text('access_key').unique(),
@@ -376,8 +379,46 @@ export const referrals = pgTable('referrals', {
   id: uuid('id').primaryKey().defaultRandom(),
   clientUserId: uuid('client_user_id').references(() => users.id).notNull(),
   salespersonName: text('salesperson_name').notNull(),
+  // The rep's own account, when the attribution came from a referral code.
+  // Nullable: rows written before reps had accounts carry only a name.
+  repUserId: uuid('rep_user_id').references(() => users.id),
+  // 'signup' (a code on /join/<code>) | 'payment' (legacy metadata.referral).
+  source: text('source').default('payment').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+/**
+ * Referral codes — one link per rep (`/join/<CODE>`). The code is derived from
+ * the rep's own name, uppercased and URL-safe, and unique.
+ */
+export const referralCodes = pgTable('referral_codes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  code: text('code').notNull().unique(),
+  repUserId: uuid('rep_user_id').references(() => users.id).notNull(),
+  active: boolean('active').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+/**
+ * Commission ledger — $1 per client, per month, while that client pays.
+ *
+ * The owner sends the money herself; this table only says what she owes. The
+ * unique (rep, client, period) key is what makes a replayed Stripe webhook
+ * insert nothing: one payment period can be paid to a rep exactly once.
+ */
+export const commissionEvents = pgTable('commission_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  repUserId: uuid('rep_user_id').references(() => users.id).notNull(),
+  clientUserId: uuid('client_user_id').references(() => users.id).notNull(),
+  period: text('period').notNull(), // 'YYYY-MM'
+  amountCents: integer('amount_cents').default(100).notNull(),
+  sourceSubscriptionId: text('source_subscription_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  paidOutAt: timestamp('paid_out_at'),
+}, (t) => ({
+  repClientPeriod: uniqueIndex('commission_events_rep_client_period_idx')
+    .on(t.repUserId, t.clientUserId, t.period),
+}));
 
 export const empireHealthLogs = pgTable('empire_health_logs', {
   id: uuid('id').primaryKey().defaultRandom(),
